@@ -1,0 +1,9 @@
+{"file":".trellis/tasks/09-07-portrait-beauty/prd.md","reason":"按验收标准逐项检查输入限制、预览、保存像素属性、自适应推荐、指标和人工质量验收。"}
+{"file":".trellis/tasks/09-07-portrait-beauty/design.md","reason":"检查层边界、函数契约、错误标识、mask 管线、计时边界和 GUI 状态。"}
+{"file":".trellis/tasks/09-07-portrait-beauty/implement.md","reason":"检查实施步骤、测试覆盖、人工回归、运行命令和未验证项记录。"}
+{"file":"AGENTS.md","reason":"检查 MATLAB 编码、GUI 同屏、图像属性保持、视觉质量和测试要求。"}
+{"file":"gui/faceDetectionApp.m","reason":"检查 GUI 回调、状态清理、控件启用、指标更新、保存读回和路径行为。"}
+{"file":"src/beautifyImage.m","reason":"检查输入参数、mask、磨皮/美白安全控制、类型和尺寸保持。"}
+{"file":"src/recommendBeautyParams.m","reason":"检查一键推荐是否基于图像特征、覆盖完整范围且无固定参数。"}
+{"file":"src/evaluateImage.m","reason":"检查指标公式、字段和耗时边界。"}
+{"file":"tests/testPortraitBeautyHelpers.m","reason":"检查算法、推荐和指标自动测试是否覆盖契约及数值结果。"}

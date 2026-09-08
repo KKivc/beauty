@@ -1,0 +1,9 @@
+{"file":".trellis/tasks/09-07-portrait-beauty/prd.md","reason":"已收敛输入类型、像素尺寸/通道/画幅比例、实时预览、自适应一键美颜、指标展示和元数据范围。"}
+{"file":".trellis/tasks/09-07-portrait-beauty/design.md","reason":"定义 MATLAB/toolbox 依赖、beautifyImage、recommendBeautyParams、evaluateImage 契约、GUI 状态和数据流。"}
+{"file":".trellis/tasks/09-07-portrait-beauty/implement.md","reason":"提供按函数、GUI、测试、人工验收和验证顺序组织的实施步骤及追踪关系。"}
+{"file":".trellis/tasks/09-07-portrait-beauty/research/codebase-findings.md","reason":"记录现有 GUI、检测函数、保存校验、测试覆盖和路径依赖。"}
+{"file":"AGENTS.md","reason":"项目级 MATLAB 目录、编码、GUI、图像质量和验证要求。"}
+{"file":"gui/faceDetectionApp.m","reason":"待改造的现有 AppBase GUI、图像状态、检测流程和保存流程。"}
+{"file":"src/detectSingleFace.m","reason":"复用的人脸检测函数及 Computer Vision Toolbox 依赖。"}
+{"file":"src/annotateFaceDetection.m","reason":"现有检测辅助函数，需保持既有测试兼容。"}
+{"file":"tests/testFaceDetectionHelpers.m","reason":"现有测试入口和 src 路径设置模式。"}

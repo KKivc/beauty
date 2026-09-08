@@ -1,115 +1,263 @@
 classdef faceDetectionApp < matlab.apps.AppBase
-    %FACEDETECTIONAPP 单人脸检测 GUI，负责加载、显示和保存检测结果。
+    %FACEDETECTIONAPP 主脸美颜 GUI，负责加载、预览、评价和保存结果。
 
     properties (Access = public)
         % App Designer 兼容的 UI 组件句柄。
         UIFigure matlab.ui.Figure
         OpenImageButton matlab.ui.control.Button
         SaveImageButton matlab.ui.control.Button
+        OneClickBeautyButton matlab.ui.control.Button
+        ResetBeautyButton matlab.ui.control.Button
+        SmoothingSlider matlab.ui.control.Slider
+        WhiteningSlider matlab.ui.control.Slider
+        SmoothingValueLabel matlab.ui.control.Label
+        WhiteningValueLabel matlab.ui.control.Label
+        MetricsPanel matlab.ui.container.Panel
+        EntropyLabel matlab.ui.control.Label
+        StandardDeviationLabel matlab.ui.control.Label
+        AverageGradientLabel matlab.ui.control.Label
+        ElapsedTimeLabel matlab.ui.control.Label
         SourceAxes matlab.ui.control.UIAxes
         DetectedAxes matlab.ui.control.UIAxes
         StatusLabel matlab.ui.control.Label
     end
 
     properties (Access = private)
-        % 缓存原始图像与检测结果，保存时用于尺寸校验。
+        % 缓存原始图像、当前结果和单个人脸框。
         sourceImage = []
-        detectedImage = []
+        beautifiedImage = []
+        faceBox = zeros(0, 4)
+        currentMetrics = []
+        hasSingleFace = false
 
         % 记录输入文件信息，用于生成默认输出文件名。
         inputFormat = ''
         inputBaseName = ''
 
-        % 标记当前是否已有且仅有一个 face detection 结果。
-        hasSingleFace = false
+        % 记录上次拖动预览时间，限制实时刷新频率。
+        previewClock = []
     end
 
     methods (Access = private)
+        function ensureSourcePath(~)
+            % 根据 GUI 文件位置注册算法目录，不依赖 MATLAB 当前工作目录。
+            guiFolder = fileparts(mfilename('fullpath'));
+            sourceFolder = fullfile(fileparts(guiFolder), 'src');
+            if ~isfolder(sourceFolder)
+                error('faceDetectionApp:MissingSourceFolder', ...
+                    'The project src folder was not found beside the gui folder.');
+            end
+            addpath(sourceFolder);
+        end
+
         function openImageButtonPushed(app, ~)
-            % 打开图像并立即执行单人脸检测。
+            % 打开图像并立即执行主脸检测。
             [fileName, folderPath] = uigetfile( ...
                 {'*.jpg;*.jpeg;*.png', 'JPG and PNG Images (*.jpg, *.jpeg, *.png)'}, ...
                 'Open Image');
-
             if isequal(fileName, 0)
                 return;
             end
 
-            % 读取用户选择的 JPG 或 PNG 文件。
             filePath = fullfile(folderPath, fileName);
             try
                 inputImage = imread(filePath);
             catch exception
+                app.clearLoadedImage();
                 uialert(app.UIFigure, exception.message, 'Unable to Open Image');
                 return;
             end
 
-            % 当前流程只支持三通道 RGB 图像。
-            if ndims(inputImage) ~= 3 || size(inputImage, 3) ~= 3
+            % MVP 只接受 uint8 三通道 RGB 图像，不静默转换其他位深。
+            if ~isa(inputImage, 'uint8') || ndims(inputImage) ~= 3 || ...
+                    size(inputImage, 3) ~= 3
                 app.clearLoadedImage();
                 uialert(app.UIFigure, ...
-                    'Only three-channel RGB JPG and PNG images are supported.', ...
+                    'Only uint8 three-channel RGB JPG and PNG images are supported.', ...
                     'Unsupported Image');
                 return;
             end
 
-            % 缓存输入信息，并先在左侧 Axes 展示原图。
+            % 新图像进入检测前先清理旧的结果和保存状态。
+            app.clearLoadedImage();
             [~, baseName, extension] = fileparts(fileName);
             app.sourceImage = inputImage;
             app.inputBaseName = baseName;
             app.inputFormat = app.normalizedFormat(extension);
             app.showImage(app.SourceAxes, inputImage, 'Original Image');
-            app.clearDetectionResult();
             app.StatusLabel.Text = 'Detecting face...';
             drawnow;
 
-            % 调用算法层函数检测 faceBox。
+            if exist('vision.CascadeObjectDetector', 'class') == 0
+                app.clearDetectionResult();
+                uialert(app.UIFigure, ...
+                    'Computer Vision Toolbox is required for face detection.', ...
+                    'Missing Toolbox');
+                return;
+            end
             try
-                [faceBox, isSingleFace] = detectSingleFace(inputImage);
+                [detectedFaceBox, isSingleFace] = detectSingleFace(inputImage);
             catch exception
                 app.clearDetectionResult();
                 uialert(app.UIFigure, exception.message, 'Face Detection Failed');
                 return;
             end
 
-            % 未检测到人脸或检测到多张人脸时，不允许保存结果。
             if ~isSingleFace
                 app.clearDetectionResult();
                 uialert(app.UIFigure, ...
-                    'Please choose an image containing exactly one face.', ...
-                    'Single Face Required');
+                    'No recognizable foreground face was found. Please choose another image.', ...
+                    'Face Detection Failed');
                 return;
             end
 
-            % 将检测框绘制到结果图，并启用保存按钮。
-            app.detectedImage = annotateFaceDetection(inputImage, faceBox);
+            app.faceBox = detectedFaceBox;
             app.hasSingleFace = true;
-            app.SaveImageButton.Enable = 'on';
-            app.showImage(app.DetectedAxes, app.detectedImage, 'Detected Face');
-            app.StatusLabel.Text = 'One face detected. You can save the result.';
+            app.SmoothingSlider.Value = 35;
+            app.WhiteningSlider.Value = 25;
+            app.updateStrengthLabels();
+            app.setBeautyControlsEnabled(true);
+            app.refreshPreview(35, 25);
+        end
+
+        function beautySliderValueChanging(app, event, isSmoothing)
+            % 拖动时节流，避免每个鼠标事件都重复执行完整算法。
+            if ~isempty(app.previewClock) && toc(app.previewClock) < 0.2
+                return;
+            end
+            if isSmoothing
+                smoothingStrength = event.Value;
+                whiteningStrength = app.WhiteningSlider.Value;
+            else
+                smoothingStrength = app.SmoothingSlider.Value;
+                whiteningStrength = event.Value;
+            end
+            app.refreshPreview(smoothingStrength, whiteningStrength);
+            if app.hasSingleFace
+                app.updateStrengthLabels(smoothingStrength, whiteningStrength);
+                app.previewClock = tic;
+            end
+        end
+
+        function beautySliderValueChanged(app, ~)
+            % 松开滑块后强制完成一次最终刷新。
+            app.refreshPreview(app.SmoothingSlider.Value, app.WhiteningSlider.Value);
+            if app.hasSingleFace
+                app.previewClock = tic;
+            end
+        end
+
+        function oneClickBeautyButtonPushed(app, ~)
+            % 一键美颜只推荐参数，实际处理仍复用普通预览流程。
+            if ~app.hasSingleFace
+                return;
+            end
+            try
+                params = recommendBeautyParams(app.sourceImage, app.faceBox);
+                app.SmoothingSlider.Value = params.smoothingStrength;
+                app.WhiteningSlider.Value = params.whiteningStrength;
+                app.updateStrengthLabels();
+                app.refreshPreview(params.smoothingStrength, params.whiteningStrength);
+                if app.hasSingleFace
+                    app.previewClock = tic;
+                end
+            catch exception
+                app.clearDetectionResult();
+                uialert(app.UIFigure, exception.message, 'Beauty Preview Failed');
+            end
+        end
+
+        function resetBeautyButtonPushed(app, ~)
+            % 重置后直接显示原图，不伪造美颜处理耗时。
+            if ~app.hasSingleFace
+                return;
+            end
+            app.SmoothingSlider.Value = 0;
+            app.WhiteningSlider.Value = 0;
+            app.updateStrengthLabels();
+            try
+                app.beautifiedImage = app.sourceImage;
+                app.currentMetrics = evaluateImage( ...
+                    app.sourceImage, app.sourceImage, 0);
+                app.showImage(app.DetectedAxes, app.beautifiedImage, 'Beauty Preview');
+                app.updateMetrics(app.currentMetrics);
+                app.previewClock = tic;
+                app.StatusLabel.Text = 'Original image restored.';
+            catch exception
+                app.clearDetectionResult();
+                uialert(app.UIFigure, exception.message, 'Reset Failed');
+            end
+        end
+
+        function refreshPreview(app, smoothingStrength, whiteningStrength)
+            % 只将一次 beautifyImage 调用包在耗时统计中。
+            if ~app.hasSingleFace || isempty(app.sourceImage)
+                return;
+            end
+            params = struct( ...
+                'smoothingStrength', smoothingStrength, ...
+                'whiteningStrength', whiteningStrength);
+            try
+                startTime = tic;
+                outputImage = beautifyImage(app.sourceImage, params, app.faceBox);
+                elapsedSeconds = toc(startTime);
+                metrics = evaluateImage(app.sourceImage, outputImage, elapsedSeconds);
+            catch exception
+                app.clearDetectionResult();
+                uialert(app.UIFigure, exception.message, 'Beauty Preview Failed');
+                return;
+            end
+
+            app.beautifiedImage = outputImage;
+            app.currentMetrics = metrics;
+            app.updateStrengthLabels(smoothingStrength, whiteningStrength);
+            app.showImage(app.DetectedAxes, outputImage, 'Beauty Preview');
+            app.updateMetrics(metrics);
+            app.previewClock = tic;
+            app.StatusLabel.Text = 'Beauty preview updated.';
+        end
+
+        function updateStrengthLabels(app, smoothingStrength, whiteningStrength)
+            % 同步显示两个滑块的当前强度。
+            if nargin < 2
+                smoothingStrength = app.SmoothingSlider.Value;
+                whiteningStrength = app.WhiteningSlider.Value;
+            end
+            app.SmoothingValueLabel.Text = sprintf( ...
+                'Smoothing: %.0f', smoothingStrength);
+            app.WhiteningValueLabel.Text = sprintf( ...
+                'Whitening: %.0f', whiteningStrength);
+        end
+
+        function updateMetrics(app, metrics)
+            % 更新独立指标区域中的四项指标。
+            app.EntropyLabel.Text = sprintf('Entropy: %.4f', metrics.entropy);
+            app.StandardDeviationLabel.Text = sprintf( ...
+                'Standard deviation: %.4f', metrics.standardDeviation);
+            app.AverageGradientLabel.Text = sprintf( ...
+                'Average gradient: %.4f', metrics.averageGradient);
+            app.ElapsedTimeLabel.Text = sprintf( ...
+                'Single-image time: %.2f ms', metrics.elapsedSeconds * 1000);
         end
 
         function saveImageButtonPushed(app, ~)
-            % 保存带人脸检测框的图像。
-            if ~app.hasSingleFace
+            % 保存当前美颜结果并读回校验像素属性。
+            if ~app.hasSingleFace || isempty(app.beautifiedImage)
                 uialert(app.UIFigure, ...
-                    'Open an image with exactly one detected face before saving.', ...
-                    'No Detection Result');
+                    'Open an image with a recognizable foreground face before saving.', ...
+                    'No Beauty Result');
                 return;
             end
 
-            % 默认沿用输入文件名和格式，便于用户识别结果文件。
-            defaultName = sprintf('%s_detected.%s', ...
+            defaultName = sprintf('%s_beautified.%s', ...
                 app.inputBaseName, app.inputFormat);
             [fileName, folderPath, filterIndex] = uiputfile( ...
                 {'*.jpg', 'JPEG Image (*.jpg)'; '*.png', 'PNG Image (*.png)'}, ...
-                'Save Detection Result', defaultName);
-
+                'Save Beauty Result', defaultName);
             if isequal(fileName, 0)
                 return;
             end
 
-            % 用户未输入扩展名时，根据 uiputfile 过滤器补全格式。
             [~, outputBaseName, extension] = fileparts(fileName);
             if isempty(extension)
                 if filterIndex == 1
@@ -117,31 +265,41 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 else
                     extension = '.png';
                 end
+            elseif ~ismember(lower(extension), {'.jpg', '.jpeg', '.png'})
+                uialert(app.UIFigure, ...
+                    'Save the result as a JPG or PNG image.', ...
+                    'Unsupported Output Format');
+                return;
             end
             outputPath = fullfile(folderPath, [outputBaseName, extension]);
 
-            % 写入后重新读取，确认保存结果仍保持输入图像尺寸。
             try
-                imwrite(app.detectedImage, outputPath);
+                imwrite(app.beautifiedImage, outputPath);
                 outputImage = imread(outputPath);
             catch exception
                 uialert(app.UIFigure, exception.message, 'Unable to Save Image');
                 return;
             end
 
-            if size(outputImage, 1) ~= size(app.sourceImage, 1) || ...
-                    size(outputImage, 2) ~= size(app.sourceImage, 2)
+            inputSize = size(app.sourceImage);
+            outputSize = size(outputImage);
+            samePixels = numel(outputSize) >= 3 && ...
+                outputSize(1) == inputSize(1) && outputSize(2) == inputSize(2);
+            sameChannels = ndims(outputImage) == 3 && outputSize(3) == 3;
+            sameAspectRatio = outputSize(2) * inputSize(1) == ...
+                inputSize(2) * outputSize(1);
+            if ~samePixels || ~sameChannels || ~sameAspectRatio
                 uialert(app.UIFigure, ...
-                    'The saved image dimensions do not match the input image.', ...
+                    'The saved image pixel dimensions or channels do not match the input image.', ...
                     'Save Verification Failed');
                 return;
             end
 
-            app.StatusLabel.Text = 'Detection result saved successfully.';
+            app.StatusLabel.Text = 'Beauty result saved successfully.';
         end
 
         function clearLoadedImage(app)
-            % 清空已加载图像和所有检测状态。
+            % 清空已加载图像和所有美颜状态。
             app.sourceImage = [];
             app.inputFormat = '';
             app.inputBaseName = '';
@@ -151,13 +309,38 @@ classdef faceDetectionApp < matlab.apps.AppBase
         end
 
         function clearDetectionResult(app)
-            % 重置右侧结果区域，并禁止保存旧结果。
-            app.detectedImage = [];
+            % 清空结果、指标和 faceBox，并禁止处理旧数据。
+            app.beautifiedImage = [];
+            app.faceBox = zeros(0, 4);
+            app.currentMetrics = [];
+            app.previewClock = [];
             app.hasSingleFace = false;
-            app.SaveImageButton.Enable = 'off';
+            if ~isempty(app.SmoothingSlider)
+                app.SmoothingSlider.Value = 35;
+                app.WhiteningSlider.Value = 25;
+                app.updateStrengthLabels();
+            end
+            app.setBeautyControlsEnabled(false);
             cla(app.DetectedAxes);
-            title(app.DetectedAxes, 'Detection Result');
-            app.StatusLabel.Text = 'Open a JPG or PNG image to detect one face.';
+            title(app.DetectedAxes, 'Beauty Preview');
+            app.EntropyLabel.Text = 'Entropy: --';
+            app.StandardDeviationLabel.Text = 'Standard deviation: --';
+            app.AverageGradientLabel.Text = 'Average gradient: --';
+            app.ElapsedTimeLabel.Text = 'Single-image time: --';
+            app.StatusLabel.Text = 'Open a uint8 RGB JPG or PNG image.';
+        end
+
+        function setBeautyControlsEnabled(app, isEnabled)
+            if isEnabled
+                state = 'on';
+            else
+                state = 'off';
+            end
+            app.SaveImageButton.Enable = state;
+            app.OneClickBeautyButton.Enable = state;
+            app.ResetBeautyButton.Enable = state;
+            app.SmoothingSlider.Enable = state;
+            app.WhiteningSlider.Enable = state;
         end
 
         function showImage(~, targetAxes, imageData, titleText)
@@ -181,49 +364,118 @@ classdef faceDetectionApp < matlab.apps.AppBase
         function createComponents(app)
             % 创建 GUI 组件并设置双栏图像布局。
             app.UIFigure = uifigure('Visible', 'off');
-            app.UIFigure.Position = [100, 100, 1200, 700];
-            app.UIFigure.Name = 'Single Face Detection';
+            app.UIFigure.Position = [100, 100, 1200, 760];
+            app.UIFigure.Name = 'Portrait Beauty';
 
-            % 三行两列：顶部按钮，中间原图和结果图，底部状态提示。
-            grid = uigridlayout(app.UIFigure, [3, 2]);
-            grid.RowHeight = {'fit', '1x', 'fit'};
-            grid.ColumnWidth = {'1x', '1x'};
-            grid.Padding = [12, 12, 12, 12];
+            mainGrid = uigridlayout(app.UIFigure, [4, 2]);
+            mainGrid.RowHeight = {'fit', '1x', 'fit', 'fit'};
+            mainGrid.ColumnWidth = {'1x', '1x'};
+            mainGrid.Padding = [12, 12, 12, 12];
 
-            % 打开图像按钮。
-            app.OpenImageButton = uibutton(grid, 'push');
+            controlsGrid = uigridlayout(mainGrid, [2, 6]);
+            controlsGrid.Layout.Row = 1;
+            controlsGrid.Layout.Column = [1, 2];
+            controlsGrid.RowHeight = {'fit', 'fit'};
+            controlsGrid.ColumnWidth = {'fit', 'fit', 'fit', 'fit', '1x', '1x'};
+
+            app.OpenImageButton = uibutton(controlsGrid, 'push');
             app.OpenImageButton.Text = 'Open Image';
             app.OpenImageButton.Layout.Row = 1;
             app.OpenImageButton.Layout.Column = 1;
-            app.OpenImageButton.ButtonPushedFcn = @(~, event) app.openImageButtonPushed(event);
+            app.OpenImageButton.ButtonPushedFcn = @(~, event) ...
+                app.openImageButtonPushed(event);
 
-            % 保存按钮默认禁用，检测到单张人脸后再启用。
-            app.SaveImageButton = uibutton(grid, 'push');
+            app.OneClickBeautyButton = uibutton(controlsGrid, 'push');
+            app.OneClickBeautyButton.Text = 'One-click Beauty';
+            app.OneClickBeautyButton.Layout.Row = 1;
+            app.OneClickBeautyButton.Layout.Column = 2;
+            app.OneClickBeautyButton.Enable = 'off';
+            app.OneClickBeautyButton.ButtonPushedFcn = @(~, event) ...
+                app.oneClickBeautyButtonPushed(event);
+
+            app.ResetBeautyButton = uibutton(controlsGrid, 'push');
+            app.ResetBeautyButton.Text = 'Reset Original';
+            app.ResetBeautyButton.Layout.Row = 1;
+            app.ResetBeautyButton.Layout.Column = 3;
+            app.ResetBeautyButton.Enable = 'off';
+            app.ResetBeautyButton.ButtonPushedFcn = @(~, event) ...
+                app.resetBeautyButtonPushed(event);
+
+            app.SmoothingValueLabel = uilabel(controlsGrid);
+            app.SmoothingValueLabel.Text = 'Smoothing: 35';
+            app.SmoothingValueLabel.Layout.Row = 2;
+            app.SmoothingValueLabel.Layout.Column = 1;
+            app.SmoothingSlider = uislider(controlsGrid);
+            app.SmoothingSlider.Limits = [0, 100];
+            app.SmoothingSlider.Value = 35;
+            app.SmoothingSlider.MajorTicks = 0:20:100;
+            app.SmoothingSlider.Layout.Row = 2;
+            app.SmoothingSlider.Layout.Column = [2, 3];
+            app.SmoothingSlider.Enable = 'off';
+            app.SmoothingSlider.ValueChangingFcn = @(~, event) ...
+                app.beautySliderValueChanging(event, true);
+            app.SmoothingSlider.ValueChangedFcn = @(~, event) ...
+                app.beautySliderValueChanged(event);
+
+            app.WhiteningValueLabel = uilabel(controlsGrid);
+            app.WhiteningValueLabel.Text = 'Whitening: 25';
+            app.WhiteningValueLabel.Layout.Row = 2;
+            app.WhiteningValueLabel.Layout.Column = 4;
+            app.WhiteningSlider = uislider(controlsGrid);
+            app.WhiteningSlider.Limits = [0, 100];
+            app.WhiteningSlider.Value = 25;
+            app.WhiteningSlider.MajorTicks = 0:20:100;
+            app.WhiteningSlider.Layout.Row = 2;
+            app.WhiteningSlider.Layout.Column = [5, 6];
+            app.WhiteningSlider.Enable = 'off';
+            app.WhiteningSlider.ValueChangingFcn = @(~, event) ...
+                app.beautySliderValueChanging(event, false);
+            app.WhiteningSlider.ValueChangedFcn = @(~, event) ...
+                app.beautySliderValueChanged(event);
+
+            app.SaveImageButton = uibutton(controlsGrid, 'push');
             app.SaveImageButton.Text = 'Save Image';
-            app.SaveImageButton.Enable = 'off';
             app.SaveImageButton.Layout.Row = 1;
-            app.SaveImageButton.Layout.Column = 2;
-            app.SaveImageButton.ButtonPushedFcn = @(~, event) app.saveImageButtonPushed(event);
+            app.SaveImageButton.Layout.Column = [5, 6];
+            app.SaveImageButton.Enable = 'off';
+            app.SaveImageButton.ButtonPushedFcn = @(~, event) ...
+                app.saveImageButtonPushed(event);
 
-            % 左侧 Axes 显示原始图像。
-            app.SourceAxes = uiaxes(grid);
+            app.SourceAxes = uiaxes(mainGrid);
             app.SourceAxes.Layout.Row = 2;
             app.SourceAxes.Layout.Column = 1;
             title(app.SourceAxes, 'Original Image');
             axis(app.SourceAxes, 'off');
 
-            % 右侧 Axes 显示带 Rectangle 的检测结果。
-            app.DetectedAxes = uiaxes(grid);
+            app.DetectedAxes = uiaxes(mainGrid);
             app.DetectedAxes.Layout.Row = 2;
             app.DetectedAxes.Layout.Column = 2;
-            title(app.DetectedAxes, 'Detection Result');
+            title(app.DetectedAxes, 'Beauty Preview');
             axis(app.DetectedAxes, 'off');
 
-            % 底部 Label 显示当前操作状态。
-            app.StatusLabel = uilabel(grid);
-            app.StatusLabel.Text = 'Open a JPG or PNG image to detect one face.';
+            app.MetricsPanel = uipanel(mainGrid);
+            app.MetricsPanel.Title = 'Current Metrics';
+            app.MetricsPanel.Layout.Row = 3;
+            app.MetricsPanel.Layout.Column = [1, 2];
+            metricsGrid = uigridlayout(app.MetricsPanel, [1, 4]);
+            metricsGrid.ColumnWidth = {'1x', '1x', '1x', '1x'};
+            app.EntropyLabel = uilabel(metricsGrid);
+            app.EntropyLabel.Text = 'Entropy: --';
+            app.EntropyLabel.HorizontalAlignment = 'center';
+            app.StandardDeviationLabel = uilabel(metricsGrid);
+            app.StandardDeviationLabel.Text = 'Standard deviation: --';
+            app.StandardDeviationLabel.HorizontalAlignment = 'center';
+            app.AverageGradientLabel = uilabel(metricsGrid);
+            app.AverageGradientLabel.Text = 'Average gradient: --';
+            app.AverageGradientLabel.HorizontalAlignment = 'center';
+            app.ElapsedTimeLabel = uilabel(metricsGrid);
+            app.ElapsedTimeLabel.Text = 'Single-image time: --';
+            app.ElapsedTimeLabel.HorizontalAlignment = 'center';
+
+            app.StatusLabel = uilabel(mainGrid);
+            app.StatusLabel.Text = 'Open a uint8 RGB JPG or PNG image.';
             app.StatusLabel.HorizontalAlignment = 'center';
-            app.StatusLabel.Layout.Row = 3;
+            app.StatusLabel.Layout.Row = 4;
             app.StatusLabel.Layout.Column = [1, 2];
 
             app.UIFigure.Visible = 'on';
@@ -232,7 +484,8 @@ classdef faceDetectionApp < matlab.apps.AppBase
 
     methods (Access = public)
         function app = faceDetectionApp
-            % 构造函数负责创建并注册 GUI。
+            % 构造函数负责注册算法路径、创建并注册 GUI。
+            ensureSourcePath(app)
             createComponents(app)
             registerApp(app, app.UIFigure)
 
@@ -243,7 +496,9 @@ classdef faceDetectionApp < matlab.apps.AppBase
 
         function delete(app)
             % 删除 App 时同步释放 UIFigure。
-            delete(app.UIFigure)
+            if ~isempty(app.UIFigure) && isvalid(app.UIFigure)
+                delete(app.UIFigure)
+            end
         end
     end
 end

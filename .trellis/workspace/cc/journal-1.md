@@ -32,3 +32,23 @@ Added Chinese comments to src and gui MATLAB files while preserving English tech
 ### Status
 
 [OK] **Completed**
+
+
+## Session 2: Implement portrait beauty and dominant-face detection
+
+**Date**: 2026-09-08
+**Task**: Implement portrait beauty and dominant-face detection
+
+### Summary
+
+Implemented adaptive portrait beautification, strengthened smoothing/whitening and mask protection, added multi-angle dominant-face detection, fixed GUI src-path startup, added tests and specs, and archived the task. MATLAB tests: 19 passed; Code Analyzer and GUI smoke passed. Four-photo manual visual acceptance remains pending.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a1b4741` | (see git log) |
+
+### Status
+
+[OK] **Completed**

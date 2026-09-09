@@ -27,6 +27,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
         sourceImage = []
         beautifiedImage = []
         faceBox = zeros(0, 4)
+        beautyContext = []
         currentMetrics = []
         hasSingleFace = false
 
@@ -112,6 +113,15 @@ classdef faceDetectionApp < matlab.apps.AppBase
             end
 
             app.faceBox = detectedFaceBox;
+            app.StatusLabel.Text = 'Analyzing skin and facial features...';
+            drawnow;
+            try
+                app.beautyContext = prepareBeautyContext(inputImage, detectedFaceBox);
+            catch exception
+                app.clearDetectionResult();
+                uialert(app.UIFigure, exception.message, 'Beauty Analysis Failed');
+                return;
+            end
             app.hasSingleFace = true;
             app.SmoothingSlider.Value = 35;
             app.WhiteningSlider.Value = 25;
@@ -153,7 +163,8 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 return;
             end
             try
-                params = recommendBeautyParams(app.sourceImage, app.faceBox);
+                params = recommendBeautyParams( ...
+                    app.sourceImage, app.faceBox, app.beautyContext);
                 app.SmoothingSlider.Value = params.smoothingStrength;
                 app.WhiteningSlider.Value = params.whiteningStrength;
                 app.updateStrengthLabels();
@@ -199,7 +210,8 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 'whiteningStrength', whiteningStrength);
             try
                 startTime = tic;
-                outputImage = beautifyImage(app.sourceImage, params, app.faceBox);
+                outputImage = beautifyImage( ...
+                    app.sourceImage, params, app.faceBox, app.beautyContext);
                 elapsedSeconds = toc(startTime);
                 metrics = evaluateImage(app.sourceImage, outputImage, elapsedSeconds);
             catch exception
@@ -312,6 +324,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
             % 清空结果、指标和 faceBox，并禁止处理旧数据。
             app.beautifiedImage = [];
             app.faceBox = zeros(0, 4);
+            app.beautyContext = [];
             app.currentMetrics = [];
             app.previewClock = [];
             app.hasSingleFace = false;

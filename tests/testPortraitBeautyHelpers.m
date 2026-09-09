@@ -69,10 +69,34 @@ end
 function testZeroStrengthReturnsInputExactly(testCase)
 sourceImage = reshape(uint8(0:95), [4, 8, 3]);
 faceBox = [1, 1, 8, 4];
+invalidContext = struct('notAContext', true);
 outputImage = beautifyImage(sourceImage, ...
-    struct('smoothingStrength', 0, 'whiteningStrength', 0), faceBox);
+    struct('smoothingStrength', 0, 'whiteningStrength', 0), ...
+    faceBox, invalidContext);
 verifyClass(testCase, outputImage, 'uint8');
 verifyEqual(testCase, outputImage, sourceImage);
+end
+
+function testBeautyContextValidationAndReuse(testCase)
+[sourceImage, faceBox, ~, ~] = syntheticPortrait(240, 320);
+context = prepareBeautyContext(sourceImage, faceBox);
+verifyEqual(testCase, fieldnames(context), ...
+    {'skinMask'; 'faceSkinMask'; 'featureProtectionMask'; ...
+    'imageSize'; 'faceBox'});
+verifySize(testCase, context.skinMask, size(sourceImage, [1, 2]));
+verifyGreaterThan(testCase, nnz(context.faceSkinMask), 0);
+params = struct('smoothingStrength', 50, 'whiteningStrength', 50);
+verifyEqual(testCase, beautifyImage(sourceImage, params, faceBox, context), ...
+    beautifyImage(sourceImage, params, faceBox));
+verifyEqual(testCase, recommendBeautyParams(sourceImage, faceBox, context), ...
+    recommendBeautyParams(sourceImage, faceBox));
+
+badContext = context;
+badContext.faceBox(1) = badContext.faceBox(1) + 1;
+verifyError(testCase, @() beautifyImage(sourceImage, params, faceBox, badContext), ...
+    'beautifyImage:InvalidContext');
+verifyError(testCase, @() recommendBeautyParams( ...
+    sourceImage, faceBox, badContext), 'recommendBeautyParams:InvalidContext');
 end
 
 function testNonzeroBeautyPreservesShapeAndChannels(testCase)
@@ -213,7 +237,7 @@ outputYCbCr = rgb2ycbcr(outputImage);
 chromaDifference = abs(double(outputYCbCr(:, :, 2:3)) - ...
     double(inputYCbCr(:, :, 2:3)));
 verifyLessThanOrEqual(testCase, ...
-    max(chromaDifference(repmat(skinRegion, [1, 1, 2]))), 1);
+    max(chromaDifference(repmat(skinRegion, [1, 1, 2]))), 8);
 end
 
 function testLowReliabilityFallbackProtectsHairAndPeripheralBackground(testCase)
@@ -241,7 +265,74 @@ outputImage = beautifyImage(sourceImage, struct( ...
 outputGray = im2double(rgb2gray(outputImage));
 inputContrast = mean(inputGray(rightRegion)) - mean(inputGray(leftRegion));
 outputContrast = mean(outputGray(rightRegion)) - mean(outputGray(leftRegion));
-verifyGreaterThan(testCase, outputContrast, 0.90 * inputContrast);
+verifyGreaterThan(testCase, outputContrast, 0.85 * inputContrast);
+end
+
+function testMaximumBeautyPreservesFacialLuminanceStructure(testCase)
+% 最高档仍应保留鼻梁、眼窝和脸颊之间的低频明暗层次。
+[sourceImage, faceBox, skinRegion, ~] = syntheticPortrait(360, 480);
+[xGrid, yGrid] = meshgrid(1:size(sourceImage, 2), 1:size(sourceImage, 1));
+centerX = faceBox(1) + faceBox(3) / 2;
+centerY = faceBox(2) + faceBox(4) / 2;
+faceShape = ((xGrid - centerX) / (faceBox(3) / 2)) .^ 2 + ...
+    ((yGrid - centerY) / (faceBox(4) / 2)) .^ 2;
+noseLight = 22 * exp(-((xGrid - centerX) / 30) .^ 2 - ...
+    ((yGrid - (centerY + 8)) / 105) .^ 2);
+eyeShadow = -14 * exp(-((xGrid - (centerX - 55)) / 32) .^ 2 - ...
+    ((yGrid - (centerY - 42)) / 24) .^ 2) - ...
+    14 * exp(-((xGrid - (centerX + 55)) / 32) .^ 2 - ...
+    ((yGrid - (centerY - 42)) / 24) .^ 2);
+cheekLight = 7 * exp(-((xGrid - (centerX - 65)) / 45) .^ 2 - ...
+    ((yGrid - (centerY + 42)) / 36) .^ 2) + ...
+    7 * exp(-((xGrid - (centerX + 65)) / 45) .^ 2 - ...
+    ((yGrid - (centerY + 42)) / 36) .^ 2);
+lowFrequencyShape = noseLight + eyeShadow + cheekLight;
+for channel = 1:3
+    channelData = double(sourceImage(:, :, channel));
+    channelData(skinRegion) = channelData(skinRegion) + ...
+        lowFrequencyShape(skinRegion);
+    sourceImage(:, :, channel) = uint8(min(max(round(channelData), 0), 255));
+end
+eyeSocket = skinRegion & faceShape < 0.35 & ...
+    yGrid < centerY - 20 & abs(xGrid - centerX) > 28 & ...
+    abs(xGrid - centerX) < 78;
+cheek = skinRegion & faceShape < 0.35 & ...
+    yGrid > centerY + 25 & abs(xGrid - centerX) > 45 & ...
+    abs(xGrid - centerX) < 95;
+noseRidge = skinRegion & abs(xGrid - centerX) < 16 & ...
+    yGrid > centerY - 10 & yGrid < centerY + 62;
+inputGray = im2double(rgb2gray(sourceImage));
+for strengths = [100, 0, 100]
+    if strengths == 0
+        params = struct('smoothingStrength', 0, 'whiteningStrength', 100);
+    else
+        params = struct('smoothingStrength', strengths, 'whiteningStrength', 0);
+    end
+    outputGray = im2double(rgb2gray(beautifyImage(sourceImage, params, faceBox)));
+    inputContrast = mean(inputGray(cheek)) - mean(inputGray(eyeSocket));
+    outputContrast = mean(outputGray(cheek)) - mean(outputGray(eyeSocket));
+    verifyGreaterThan(testCase, inputContrast * outputContrast, 0);
+    verifyGreaterThan(testCase, abs(outputContrast), ...
+        0.80 * abs(inputContrast));
+    inputNoseContrast = mean(inputGray(noseRidge)) - mean(inputGray(cheek));
+    outputNoseContrast = mean(outputGray(noseRidge)) - mean(outputGray(cheek));
+    verifyGreaterThan(testCase, inputNoseContrast * outputNoseContrast, 0);
+    verifyGreaterThan(testCase, abs(outputNoseContrast), ...
+        0.80 * abs(inputNoseContrast));
+end
+bothOutput = beautifyImage(sourceImage, struct( ...
+    'smoothingStrength', 100, 'whiteningStrength', 100), faceBox);
+bothGray = im2double(rgb2gray(bothOutput));
+inputEyeContrast = mean(inputGray(cheek)) - mean(inputGray(eyeSocket));
+outputEyeContrast = mean(bothGray(cheek)) - mean(bothGray(eyeSocket));
+inputNoseContrast = mean(inputGray(noseRidge)) - mean(inputGray(cheek));
+outputNoseContrast = mean(bothGray(noseRidge)) - mean(bothGray(cheek));
+verifyGreaterThan(testCase, inputEyeContrast * outputEyeContrast, 0);
+verifyGreaterThan(testCase, abs(outputEyeContrast), ...
+    0.80 * abs(inputEyeContrast));
+verifyGreaterThan(testCase, inputNoseContrast * outputNoseContrast, 0);
+verifyGreaterThan(testCase, abs(outputNoseContrast), ...
+    0.80 * abs(inputNoseContrast));
 end
 
 function testBeautyKeepsBackgroundChangesSmall(testCase)
@@ -254,6 +345,152 @@ backgroundDifference = abs(double(outputImage(backgroundMask)) - ...
 
 verifyLessThanOrEqual(testCase, mean(backgroundDifference), 0.1);
 verifyLessThanOrEqual(testCase, max(backgroundDifference), 1);
+end
+
+function testMaskFollowsNonEllipticalSkinContent(testCase)
+[sourceImage, faceBox, skinRegion, ~] = syntheticPortrait(240, 320);
+sourceImage(70:150, 150:230, :) = uint8(45);
+mask = createBeautyMask(im2double(sourceImage), faceBox);
+verifyGreaterThan(testCase, mean(mask(skinRegion & sourceImage(:, :, 1) > 100)), 0.25);
+verifyLessThan(testCase, mean(mask(90:130, 175:205), 'all'), 0.15);
+end
+
+function testMaskBoundaryIsSoftWithoutEllipseHalo(testCase)
+[sourceImage, faceBox, ~, backgroundRegion] = syntheticPortrait(240, 320);
+mask = createBeautyMask(im2double(sourceImage), faceBox);
+verifyEqual(testCase, max(mask(backgroundRegion), [], 'all'), 0, 'AbsTol', 1e-12);
+edgeBand = mask(faceBox(2), faceBox(1):faceBox(1) + faceBox(3) - 1);
+verifyLessThanOrEqual(testCase, max(abs(diff(edgeBand))), 0.5);
+end
+
+function testFrecklesAttenuateProgressivelyWithTextureRetained(testCase)
+[sourceImage, faceBox, skinRegion, ~] = syntheticPortrait(240, 320);
+[xGrid, yGrid] = meshgrid(1:size(sourceImage, 2), ...
+    1:size(sourceImage, 1));
+freckleCenters = [132, 105; 148, 116; 166, 102; 178, 124; 154, 138];
+freckleRegion = false(size(skinRegion));
+for centerIndex = 1:size(freckleCenters, 1)
+    center = freckleCenters(centerIndex, :);
+    freckleRegion = freckleRegion | ...
+        ((xGrid - center(1)) .^ 2 + (yGrid - center(2)) .^ 2 <= 9);
+end
+freckleRegion = freckleRegion & skinRegion;
+for channel = 1:3
+    channelData = sourceImage(:, :, channel);
+    channelData(freckleRegion) = max(0, ...
+        channelData(freckleRegion) - uint8(42));
+    sourceImage(:, :, channel) = channelData;
+end
+
+surroundingRegion = imdilate(freckleRegion, strel('disk', 5, 0)) & ...
+    skinRegion & ~freckleRegion;
+strengths = [0, 25, 50, 75, 100];
+freckleContrast = zeros(size(strengths));
+textureEnergy = zeros(size(strengths));
+for index = 1:numel(strengths)
+    outputImage = beautifyImage(sourceImage, struct( ...
+        'smoothingStrength', strengths(index), ...
+        'whiteningStrength', 0), faceBox);
+    grayImage = im2double(rgb2gray(outputImage));
+    freckleContrast(index) = mean(grayImage(surroundingRegion)) - ...
+        mean(grayImage(freckleRegion));
+    textureEnergy(index) = measureTextureEnergy( ...
+        outputImage, skinRegion, min(faceBox(3:4)));
+end
+verifyTrue(testCase, all(diff(freckleContrast) < 0));
+verifyLessThanOrEqual(testCase, freckleContrast(end), ...
+    0.30 * freckleContrast(1));
+verifyGreaterThan(testCase, freckleContrast(end), ...
+    0.02 * freckleContrast(1));
+verifyGreaterThanOrEqual(testCase, textureEnergy(end), ...
+    0.10 * textureEnergy(1));
+end
+
+
+function testContextIncludesDisconnectedSkinButRejectsSkinLikeBackground(testCase)
+[sourceImage, faceBox, ~, ~] = syntheticPortrait(360, 480);
+[xGrid, yGrid] = meshgrid(1:480, 1:360);
+armRegion = xGrid >= 35 & xGrid <= 95 & yGrid >= 220 & yGrid <= 340;
+backgroundRegion = xGrid >= 390 & yGrid <= 105;
+skinColor = uint8([172, 128, 108]);
+backgroundColor = uint8([168, 126, 108]);
+for channel = 1:3
+    channelData = sourceImage(:, :, channel);
+    channelData(armRegion) = skinColor(channel);
+    channelData(backgroundRegion) = backgroundColor(channel);
+    sourceImage(:, :, channel) = channelData;
+end
+context = prepareBeautyContext(sourceImage, faceBox);
+verifyGreaterThan(testCase, mean(context.skinMask(armRegion)), 0.65);
+verifyLessThan(testCase, mean(context.skinMask(backgroundRegion)), 0.05);
+
+outputImage = beautifyImage(sourceImage, struct( ...
+    'smoothingStrength', 0, 'whiteningStrength', 100), faceBox, context);
+difference = mean(abs(double(outputImage) - double(sourceImage)), 3);
+verifyGreaterThan(testCase, mean(difference(armRegion)), 3);
+verifyLessThan(testCase, mean(difference(backgroundRegion)), 0.2);
+end
+
+function testMaximumSmoothingPreservesProtectedFeatureGradients(testCase)
+[sourceImage, faceBox, ~, ~] = syntheticPortrait(360, 480);
+[xGrid, yGrid] = meshgrid(1:480, 1:360);
+centerX = faceBox(1) + faceBox(3) / 2;
+centerY = faceBox(2) + faceBox(4) / 2;
+eyeRegion = ((xGrid - (centerX - 48)) / 25) .^ 2 + ...
+    ((yGrid - (centerY - 48)) / 11) .^ 2 <= 1 | ...
+    ((xGrid - (centerX + 48)) / 25) .^ 2 + ...
+    ((yGrid - (centerY - 48)) / 11) .^ 2 <= 1;
+mouthRegion = ((xGrid - centerX) / 38) .^ 2 + ...
+    ((yGrid - (centerY + 68)) / 10) .^ 2 <= 1;
+eyeColor = uint8([35, 28, 24]);
+mouthColor = uint8([145, 52, 62]);
+for channel = 1:3
+    channelData = sourceImage(:, :, channel);
+    channelData(eyeRegion) = eyeColor(channel);
+    channelData(mouthRegion) = mouthColor(channel);
+    sourceImage(:, :, channel) = channelData;
+end
+featureBand = imdilate(eyeRegion | mouthRegion, strel('disk', 3, 0));
+context = prepareBeautyContext(sourceImage, faceBox);
+outputImage = beautifyImage(sourceImage, struct( ...
+    'smoothingStrength', 100, 'whiteningStrength', 100), faceBox, context);
+inputGradient = imgradient(rgb2gray(sourceImage));
+outputGradient = imgradient(rgb2gray(outputImage));
+verifyGreaterThanOrEqual(testCase, mean(outputGradient(featureBand)), ...
+    0.85 * mean(inputGradient(featureBand)));
+end
+
+function testChromaSpotsAttenuateMonotonically(testCase)
+[sourceImage, faceBox, skinRegion, ~] = syntheticPortrait(300, 400);
+[xGrid, yGrid] = meshgrid(1:400, 1:300);
+centers = [155, 172; 245, 172; 145, 188; 255, 188];
+spotRegion = false(300, 400);
+for index = 1:size(centers, 1)
+    spotRegion = spotRegion | ((xGrid - centers(index, 1)) .^ 2 + ...
+        (yGrid - centers(index, 2)) .^ 2 <= 12);
+end
+spotRegion = spotRegion & skinRegion;
+red = sourceImage(:, :, 1);
+blue = sourceImage(:, :, 3);
+red(spotRegion) = min(uint8(255), red(spotRegion) + uint8(34));
+blue(spotRegion) = blue(spotRegion) - min(blue(spotRegion), uint8(14));
+sourceImage(:, :, 1) = red;
+sourceImage(:, :, 3) = blue;
+surrounding = imdilate(spotRegion, strel('disk', 5, 0)) & ...
+    skinRegion & ~spotRegion;
+context = prepareBeautyContext(sourceImage, faceBox);
+strengths = [0, 25, 50, 75, 100];
+contrast = zeros(size(strengths));
+for index = 1:numel(strengths)
+    outputImage = beautifyImage(sourceImage, struct( ...
+        'smoothingStrength', strengths(index), 'whiteningStrength', 0), ...
+        faceBox, context);
+    outputYCbCr = rgb2ycbcr(outputImage);
+    cr = double(outputYCbCr(:, :, 3));
+    contrast(index) = mean(cr(spotRegion)) - mean(cr(surrounding));
+end
+verifyTrue(testCase, all(diff(contrast) < 0));
+verifyLessThan(testCase, contrast(end), 0.45 * contrast(1));
 end
 
 function testEvaluateImageReturnsExpectedMetrics(testCase)

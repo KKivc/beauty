@@ -1,11 +1,10 @@
-function beautifiedImage = beautifyImage(inputImage, params, faceBox)
-%BEAUTIFYIMAGE 对单人脸 RGB 图像执行磨皮和美白。
+function beautifiedImage = beautifyImage(inputImage, params, faceBox, beautyContext)
+%BEAUTIFYIMAGE 对裸露皮肤执行结构保留的磨皮和美白。
 
 if nargin < 1 || ~isValidRgbImage(inputImage)
     error('beautifyImage:InvalidImage', ...
         'inputImage must be a uint8 three-channel RGB image.');
 end
-
 if nargin < 2 || ~isstruct(params) || ~isscalar(params) || ...
         ~isfield(params, 'smoothingStrength') || ...
         ~isfield(params, 'whiteningStrength')
@@ -18,70 +17,116 @@ if ~isValidStrength(smoothingStrength) || ~isValidStrength(whiteningStrength)
     error('beautifyImage:InvalidParams', ...
         'Beauty strengths must be finite numeric scalars in the range 0 to 100.');
 end
-
 if nargin < 3
     error('beautifyImage:InvalidFaceBox', ...
         'faceBox must be one finite [x y width height] rectangle within the image.');
 end
 validateFaceBox(faceBox, size(inputImage, 2), size(inputImage, 1));
 
-% 零强度时直接返回原图，保证逐元素完全一致。
+% 零强度在 context 构建或验证前直接返回。
 if smoothingStrength == 0 && whiteningStrength == 0
     beautifiedImage = inputImage;
     return;
 end
 ensureImageProcessingToolbox();
+if nargin < 4
+    beautyContext = prepareBeautyContext(inputImage, faceBox);
+else
+    validateBeautyContext(beautyContext, size(inputImage), faceBox);
+end
 
 inputDouble = im2double(inputImage);
 ycbcrImage = rgb2ycbcr(inputDouble);
-luminance = ycbcrImage(:, :, 1);
-originalLuminance = luminance;
-beautyMask = createBeautyMask(inputDouble, faceBox);
+originalY = ycbcrImage(:, :, 1);
+originalCb = ycbcrImage(:, :, 2);
+originalCr = ycbcrImage(:, :, 3);
+effectMask = beautyContext.skinMask .* ...
+    (1 - beautyContext.featureProtectionMask);
+highlightDetailProtection = min(max((originalY - 0.72) / 0.16, 0), 1);
+effectMask = effectMask .* (1 - 0.95 * highlightDetailProtection);
+faceScale = min(faceBox(3:4));
 
-% 固定保护图由原始亮度计算，保证各档强度只改变效果幅度。
-[horizontalGradient, verticalGradient] = gradient(originalLuminance);
-edgeMagnitude = hypot(horizontalGradient, verticalGradient);
-edgeProtection = 1 ./ (1 + (edgeMagnitude / 0.055) .^ 4);
+% 大尺度基底承载脸部立体结构，只衰减中尺度色斑和高频纹理。
+fineSigma = min(4.5, max(0.9, 0.006 * faceScale));
+mediumSigma = min(24, max(5, 0.045 * faceScale));
+fineBase = imgaussfilt(originalY, fineSigma, 'Padding', 'replicate');
+lowFrequency = imgaussfilt(originalY, mediumSigma, 'Padding', 'replicate');
+fineDetail = originalY - fineBase;
+mediumDetail = fineBase - lowFrequency;
+
+% 低频梯度只保护真正的面部形状，不把孤立雀斑误判为结构。
+[horizontalGradient, verticalGradient] = gradient(lowFrequency);
+structureGradient = hypot(horizontalGradient, verticalGradient);
+structureProtection = min(max((structureGradient - 0.004) / 0.035, 0), 1);
+processingMask = effectMask .* (1 - 0.98 * structureProtection);
 
 if smoothingStrength > 0
-    % 滤波尺度随人脸大小变化，避免高分辨率图仍使用固定小窗口。
-    faceScale = min(faceBox(3), faceBox(4));
-    detailSigma = min(18, max(1.5, 0.018 * faceScale));
-    filterSize = 2 * ceil(3 * detailSigma) + 1;
-    baseLuminance = imgaussfilt(originalLuminance, detailSigma, ...
-        'FilterSize', filterSize, 'Padding', 'replicate');
-    detailLayer = originalLuminance - baseLuminance;
+    ratio = smoothingStrength / 100;
+    fineRetention = 1 - 0.80 * ratio ^ 0.85;
+    mediumRetention = 1 - 0.98 * ratio ^ 1.15;
+    smoothedY = lowFrequency + mediumRetention * mediumDetail + ...
+        fineRetention * fineDetail;
+    outputY = originalY + processingMask .* (smoothedY - originalY);
 
-    % 小纹理充分衰减，强细节和五官边缘通过两级权重保留。
-    detailProtection = 1 ./ (1 + (abs(detailLayer) / 0.075) .^ 4);
-    smoothingRatio = smoothingStrength / 100;
-    smoothingEffect = 1 - (1 - smoothingRatio) ^ 1.4;
-    smoothingMask = beautyMask .* edgeProtection .* detailProtection;
-    luminance = originalLuminance - smoothingEffect .* ...
-        smoothingMask .* detailLayer;
+    % 色度异常同步衰减，避免亮度磨平后仍残留橙红色斑。
+    chromaSigma = min(12, max(2.5, 0.025 * faceScale));
+    localCb = imgaussfilt(originalCb, chromaSigma, 'Padding', 'replicate');
+    localCr = imgaussfilt(originalCr, chromaSigma, 'Padding', 'replicate');
+    chromaEffect = 0.92 * ratio ^ 1.05;
+    outputCb = originalCb + processingMask .* chromaEffect .* ...
+        (localCb - originalCb);
+    outputCr = originalCr + processingMask .* chromaEffect .* ...
+        (localCr - originalCr);
+else
+    outputY = originalY;
+    outputCb = originalCb;
+    outputCr = originalCr;
 end
 
 if whiteningStrength > 0
-    % 非线性强度映射提升低档可见度，同时在高档平滑饱和。
-    whiteningRatio = whiteningStrength / 100;
-    whiteningEffect = (1 - exp(-2.5 * whiteningRatio)) / ...
-        (1 - exp(-2.5));
-    highlightProtection = min(max((0.96 - luminance) / 0.24, 0), 1);
-    whiteningEdgeProtection = 0.45 + 0.55 * edgeProtection;
-    luminanceIncrease = 0.30 * whiteningEffect .* beautyMask .* ...
-        whiteningEdgeProtection .* highlightProtection .* (1 - luminance);
-    luminance = luminance + min(luminanceIncrease, max(0, 0.97 - luminance));
+    ratio = whiteningStrength / 100;
+    % 有界单调中间调曲线，最大档仍保留亮度排序和高光层次。
+    toneStrength = 0.18 * (1 - exp(-6 * ratio)) / ...
+        (1 - exp(-6)) + 0.10 * ratio;
+    highlightProtection = min(max((0.97 - outputY) / 0.20, 0), 1);
+    increase = toneStrength .* effectMask .* highlightProtection .^ 2 .* ...
+        outputY .* (1 - outputY);
+    outputY = outputY + min(increase, max(0, 0.975 - outputY));
 end
 
-ycbcrImage(:, :, 1) = min(max(luminance, 0), 1);
-outputDouble = ycbcr2rgb(ycbcrImage);
-outputDouble = min(max(outputDouble, 0), 1);
+ycbcrImage(:, :, 1) = min(max(outputY, 0), 1);
+ycbcrImage(:, :, 2) = min(max(outputCb, 0), 1);
+ycbcrImage(:, :, 3) = min(max(outputCr, 0), 1);
+outputDouble = min(max(ycbcr2rgb(ycbcrImage), 0), 1);
 beautifiedImage = uint8(round(outputDouble * 255));
-
-% 再次确认算法分支没有泄漏临时尺寸或通道变化。
 if ~isequal(size(beautifiedImage), size(inputImage))
     error('beautifyImage:InvalidOutput', ...
         'The beautified image must preserve the input dimensions.');
+end
+end
+
+function validateBeautyContext(context, imageSize, faceBox)
+requiredFields = {'skinMask', 'faceSkinMask', 'featureProtectionMask', ...
+    'imageSize', 'faceBox'};
+isValid = isstruct(context) && isscalar(context) && ...
+    all(isfield(context, requiredFields));
+if isValid
+    expectedMaskSize = imageSize(1:2);
+    masks = {context.skinMask, context.faceSkinMask, ...
+        context.featureProtectionMask};
+    for index = 1:numel(masks)
+        mask = masks{index};
+        isValid = isValid && isa(mask, 'double') && isreal(mask) && ...
+            isequal(size(mask), expectedMaskSize) && all(isfinite(mask(:))) && ...
+            all(mask(:) >= 0) && all(mask(:) <= 1);
+    end
+    isValid = isValid && isequal(double(context.imageSize), double(imageSize)) && ...
+        isnumeric(context.faceBox) && isequal(size(context.faceBox), [1, 4]) && ...
+        all(abs(double(context.faceBox) - double(faceBox)) <= 1e-9);
+end
+if ~isValid
+    error('beautifyImage:InvalidContext', ...
+        'beautyContext does not match the input image and faceBox.');
 end
 end
 

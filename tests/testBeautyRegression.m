@@ -41,3 +41,13 @@ verifyEqual(testCase, ...
     max([report.smoothing.hardProtectionMaxChange]), 0);
 end
 
+function testShadowRegressionReportsLegacyAndV3(testCase)
+report = runBeautyShadowRegression('Assert', true);
+verifyTrue(testCase, report.passed);
+verifyEqual(testCase, report.legacy.pipeline, 'legacy');
+verifyEqual(testCase, report.v3.pipeline, 'v3');
+verifyEqual(testCase, report.legacy.strengths, report.v3.strengths);
+verifyEqual(testCase, numel(report.comparison.textureEnergyDelta), 5);
+verifyTrue(testCase, all(isfinite(report.comparison.elapsedSecondsLegacy)));
+verifyTrue(testCase, all(isfinite(report.comparison.elapsedSecondsV3)));
+end

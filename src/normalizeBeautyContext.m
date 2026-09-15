@@ -325,20 +325,10 @@ if ~hasAllSemantics
     return;
 end
 
-[~, ~, diagnostics] = buildFeatureProtectionMasks(inputImage, ...
-    regions, confidence, min(faceBox(3:4)));
-textureProtection = max(cat(3, diagnostics.occluderProtection, ...
-    diagnostics.browProtection, diagnostics.lipProtection, ...
-    diagnostics.eyeDetailProtection), [], 3);
-structureProtection = max(cat(3, diagnostics.noseStructureProtection, ...
-    diagnostics.periocularProtection, diagnostics.doubleEyelidProtection), ...
-    [], 3);
-toneProtection = max(cat(3, diagnostics.lipProtection, ...
-    diagnostics.browProtection, diagnostics.noseProtection, ...
-    diagnostics.eyeDetailProtection), [], 3);
-textureProtection = min(max(double(textureProtection), 0), 1);
-structureProtection = min(max(double(structureProtection), 0), 1);
-toneProtection = min(max(double(toneProtection), 0), 1);
+[beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
+textureProtection = beautyMasks.textureProtectionMask;
+structureProtection = beautyMasks.structureProtectionMask;
+toneProtection = beautyMasks.toneProtectionMask;
 end
 
 function context = finalizeContext(context, inputImage, faceBox)
@@ -356,6 +346,22 @@ context.hardProtectionMask = double(context.hardProtectionMask);
 context.textureProtectionMask = double(context.textureProtectionMask);
 context.structureProtectionMask = double(context.structureProtectionMask);
 context.toneProtectionMask = double(context.toneProtectionMask);
+if isfield(context, 'strengthMap') && ...
+        isfield(context, 'faceStrengthMap') && ...
+        isfield(context, 'nonFaceStrengthMap')
+    validateMask(context.strengthMap, imageSize, 'strengthMap');
+    validateMask(context.faceStrengthMap, imageSize, 'faceStrengthMap');
+    validateMask(context.nonFaceStrengthMap, imageSize, ...
+        'nonFaceStrengthMap');
+    context.strengthMap = double(context.strengthMap);
+    context.faceStrengthMap = double(context.faceStrengthMap);
+    context.nonFaceStrengthMap = double(context.nonFaceStrengthMap);
+else
+    [beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
+    context.strengthMap = beautyMasks.strengthMap;
+    context.faceStrengthMap = beautyMasks.faceStrengthMap;
+    context.nonFaceStrengthMap = beautyMasks.nonFaceStrengthMap;
+end
 if ~isfield(context, 'bodySkinMask')
     context.bodySkinMask = context.nonFaceSkinMask;
 else

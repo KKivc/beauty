@@ -11,6 +11,19 @@ if nargin < 2 || ~isstruct(params) || ~isscalar(params) || ...
     error('beautifyImage:InvalidParams', ...
         'params must contain smoothingStrength and whiteningStrength.');
 end
+pipeline = 'legacy';
+if isfield(params, 'pipeline')
+    pipeline = params.pipeline;
+    if isstring(pipeline) && isscalar(pipeline)
+        pipeline = char(pipeline);
+    end
+    if ~ischar(pipeline) || size(pipeline, 1) ~= 1 || ...
+            ~ismember(lower(pipeline), {'legacy', 'v3'})
+        error('beautifyImage:InvalidParams', ...
+            'pipeline 必须是 legacy 或 v3。');
+    end
+    pipeline = lower(pipeline);
+end
 smoothingStrength = params.smoothingStrength;
 whiteningStrength = params.whiteningStrength;
 if ~isValidStrength(smoothingStrength) || ~isValidStrength(whiteningStrength)
@@ -41,6 +54,12 @@ else
         end
         rethrow(exception);
     end
+end
+
+if strcmp(pipeline, 'v3')
+    beautifiedImage = runV3Beauty(inputImage, beautyContext, ...
+        faceBox, smoothingStrength, whiteningStrength);
+    return;
 end
 
 inputDouble = im2double(inputImage);
@@ -483,6 +502,17 @@ end
 function isValid = isValidRgbImage(inputImage)
 isValid = isa(inputImage, 'uint8') && isreal(inputImage) && ...
     ndims(inputImage) == 3 && size(inputImage, 3) == 3;
+end
+
+function beautifiedImage = runV3Beauty(inputImage, beautyContext, faceBox, ...
+        smoothingStrength, whiteningStrength)
+[beautyMasks, ~] = masks.buildBeautyMasks(inputImage, ...
+    beautyContext, faceBox);
+[frequency, ~] = beauty.decomposeSkinFrequency(inputImage, faceBox);
+[smoothedFrequency, ~] = beauty.smoothSkinTexture(frequency, ...
+    beautyMasks, smoothingStrength);
+beautifiedImage = beauty.composeBeautyResult(inputImage, frequency, ...
+    smoothedFrequency, beautyMasks, whiteningStrength);
 end
 
 function isValid = isValidStrength(strength)

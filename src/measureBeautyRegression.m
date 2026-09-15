@@ -1,5 +1,5 @@
 function metrics = measureBeautyRegression(inputImage, outputImage, ...
-        beautyContext, faceBox)
+        beautyContext, faceBox, elapsedSeconds)
 %MEASUREBEAUTYREGRESSION 使用固定口径测量美颜回归指标。
 %   鼻部与脸外皮肤结构共用 YCbCr、按人脸尺度计算的低通尺度、
 %   语义 ROI 和分位数统计公式，避免测试各自实现近似指标。
@@ -11,6 +11,14 @@ end
 if ~isequal(size(inputImage), size(outputImage))
     error('measureBeautyRegression:InvalidOutput', ...
         '输入图像和结果图像的尺寸必须一致。');
+end
+if nargin < 5 || isempty(elapsedSeconds)
+    elapsedSeconds = NaN;
+elseif ~isnumeric(elapsedSeconds) || ~isreal(elapsedSeconds) || ...
+        ~isscalar(elapsedSeconds) || ~isfinite(elapsedSeconds) || ...
+        elapsedSeconds < 0
+    error('measureBeautyRegression:InvalidElapsed', ...
+        '处理耗时必须是非负数值标量。');
 end
 beautyContext = normalizeBeautyContext(inputImage, faceBox, beautyContext);
 
@@ -52,6 +60,7 @@ metrics.outsideStructureInput = structureStatistic(inputLow, outsideRoi, config)
 metrics.backgroundMaxChange = maxChange(inputImage, outputImage, ~skinMask);
 metrics.hardProtectionMaxChange = maxChange(inputImage, outputImage, ...
     beautyContext.hardProtectionMask >= .999);
+metrics.elapsedSeconds = elapsedSeconds;
 metrics.outputSize = size(outputImage);
 metrics.outputClass = class(outputImage);
 metrics.sameSize = isequal(size(inputImage), size(outputImage));
@@ -131,4 +140,3 @@ function valid = isValidRgbImage(image)
 valid = isa(image, 'uint8') && isreal(image) && ndims(image) == 3 && ...
     size(image, 3) == 3;
 end
-

@@ -1,8 +1,10 @@
 function [beautifiedImage, diagnostics] = composeBeautyResult( ...
-        inputImage, frequency, smoothedFrequency, beautyMasks, whiteningStrength)
+        inputImage, frequency, smoothedFrequency, beautyMasks, ...
+        whiteningStrength, processing)
 %COMPOSEBEAUTYRESULT 使用一个连续 Alpha Map 合成 v3 结果。
 %   保护区域不通过脸部/脸外结果拼接，而是在同一张全图 Alpha 上
-%   完成一次主合成。
+%   完成一次主合成。可选的 processing 参数承载瑕疵、统一肤色和
+%   美白模块的诊断/结果；省略时仍由本函数调用独立美白模块。
 
 if nargin < 4 || ~isValidRgbImage(inputImage) || ...
         ~isstruct(frequency) || ~isstruct(smoothedFrequency) || ...
@@ -15,6 +17,11 @@ if nargin < 5 || isempty(whiteningStrength)
 end
 if ~isValidStrength(whiteningStrength)
     error('beauty:InvalidStrength', '美白强度必须是 0 到 100 的数值标量。');
+end
+if nargin < 6 || isempty(processing)
+    processing = struct();
+elseif ~isstruct(processing) || ~isscalar(processing)
+    error('beauty:InvalidComposeInput', '处理结果必须是标量结构体。');
 end
 imageSize = size(inputImage, 1:2);
 if ~isfield(frequency, 'sourceLuminance') || ...
@@ -29,7 +36,7 @@ requiredMasks = {'strengthMap', 'hardProtectionMask'};
 if ~all(isfield(beautyMasks, requiredMasks))
     error('beauty:InvalidMasks', 'v3 Beauty Masks 缺少合成字段。');
 end
-strengthMap = readMask(beautyMasks.strengthMap, imageSize, 'strengthMap');
+readMask(beautyMasks.strengthMap, imageSize, 'strengthMap');
 hardProtection = readMask(beautyMasks.hardProtectionMask, ...
     imageSize, 'hardProtectionMask');
 smoothingAlpha = readMask(smoothedFrequency.alphaMap, ...
@@ -38,32 +45,35 @@ sourceLuminance = double(frequency.sourceLuminance);
 smoothingDelta = double(smoothedFrequency.outputLuminance) - ...
     sourceLuminance;
 
-whiteningSupport = zeros(imageSize);
-whiteningDelta = zeros(imageSize);
-if whiteningStrength > 0
-    ratio = double(whiteningStrength) / 100;
-    skinPixels = strengthMap > .35 & hardProtection < .999;
-    if any(skinPixels(:))
-        medianLuminance = median(sourceLuminance(skinPixels));
-    else
-        medianLuminance = .78;
-    end
-    whiteningNeed = min(max((.78 - medianLuminance) / .35, .25), 1);
-    upperLuminance = percentileValue(sourceLuminance(skinPixels), .85);
-    highlightHeadroom = min(max((.97 - upperLuminance) / .20, 0), 1);
-    toneStrength = .27 * (1 - exp(-6 * ratio)) / ...
-        (1 - exp(-6)) + .16 * ratio;
-    whiteningSupport = ratio .* strengthMap .* ...
-        (1 - hardProtection);
-    % 以分区常量作为提亮量，避免源亮度逐像素参与映射而压缩鼻梁、
-    % 手指等低频结构；高光余量仍由当前皮肤分区整体限制。
-    whiteningDelta = .23 * toneStrength .* whiteningNeed .* ...
-        highlightHeadroom .* whiteningSupport;
+if isfield(processing, 'whitening')
+    whiteningResult = processing.whitening;
+    validateWhiteningResult(whiteningResult, imageSize);
+else
+    [whiteningResult, ~] = beauty.applySkinWhitening(inputImage, ...
+        frequency, beautyMasks, whiteningStrength);
+end
+whiteningSupport = readMask(whiteningResult.supportMap, imageSize, ...
+    'whiteningSupport');
+whiteningDelta = readMask(whiteningResult.delta, imageSize, ...
+    'whiteningDelta');
+
+toneSupport = zeros(imageSize);
+toneDeltaCb = zeros(imageSize);
+toneDeltaCr = zeros(imageSize);
+if isfield(processing, 'skinTone')
+    toneResult = processing.skinTone;
+    validateToneResult(toneResult, imageSize);
+    toneSupport = readMask(toneResult.toneSupport, imageSize, ...
+        'toneSupport');
+    sourceYcbcr = rgb2ycbcr(im2double(inputImage));
+    toneDeltaCb = double(toneResult.outputCb) - sourceYcbcr(:, :, 2);
+    toneDeltaCr = double(toneResult.outputCr) - sourceYcbcr(:, :, 3);
 end
 
 % smoothingDelta 和 whiteningDelta 都是相对于原图的增量，先合成增量，
 % 再只用一张 Alpha Map 将目标值与原图组合。
-alphaMap = min(1, max(smoothingAlpha, whiteningSupport));
+alphaMap = min(1, max(cat(3, smoothingAlpha, whiteningSupport, ...
+    toneSupport), [], 3));
 delta = smoothingDelta + whiteningDelta;
 targetLuminance = sourceLuminance;
 active = alphaMap > eps;
@@ -75,6 +85,19 @@ outputLuminance = sourceLuminance + ...
 
 ycbcr = rgb2ycbcr(im2double(inputImage));
 ycbcr(:, :, 1) = min(max(outputLuminance, 0), 1);
+sourceCb = ycbcr(:, :, 2);
+sourceCr = ycbcr(:, :, 3);
+toneTargetCb = sourceCb;
+toneTargetCr = sourceCr;
+activeTone = alphaMap > eps;
+toneTargetCb(activeTone) = sourceCb(activeTone) + ...
+    toneDeltaCb(activeTone) ./ alphaMap(activeTone);
+toneTargetCr(activeTone) = sourceCr(activeTone) + ...
+    toneDeltaCr(activeTone) ./ alphaMap(activeTone);
+toneTargetCb = min(max(toneTargetCb, 0), 1);
+toneTargetCr = min(max(toneTargetCr, 0), 1);
+ycbcr(:, :, 2) = sourceCb + alphaMap .* (toneTargetCb - sourceCb);
+ycbcr(:, :, 3) = sourceCr + alphaMap .* (toneTargetCr - sourceCr);
 outputDouble = min(max(ycbcr2rgb(ycbcr), 0), 1);
 beautifiedImage = uint8(round(outputDouble * 255));
 inactive = alphaMap <= eps;
@@ -94,8 +117,13 @@ diagnostics = struct( ...
     'alphaMap', alphaMap, ...
     'smoothingAlpha', smoothingAlpha, ...
     'whiteningSupport', whiteningSupport, ...
+    'toneSupport', toneSupport, ...
     'smoothingDelta', smoothingDelta, ...
     'whiteningDelta', whiteningDelta, ...
+    'toneDeltaCb', toneDeltaCb, ...
+    'toneDeltaCr', toneDeltaCr, ...
+    'toneTargetCb', toneTargetCb, ...
+    'toneTargetCr', toneTargetCr, ...
     'targetLuminance', targetLuminance, ...
     'outputLuminance', outputLuminance, ...
     'hardProtectionMask', hardProtection, ...
@@ -133,19 +161,23 @@ difference = max(abs(double(outputImage) - double(inputImage)), [], 3);
 value = max(difference(mask));
 end
 
-function value = percentileValue(values, fraction)
-values = sort(values(:));
-if isempty(values)
-    value = 0;
-    return;
+function validateWhiteningResult(result, imageSize)
+if ~isstruct(result) || ~isscalar(result) || ...
+        ~all(isfield(result, {'supportMap', 'delta'}))
+    error('beauty:InvalidComposeInput', ...
+        '美白结果缺少 supportMap 或 delta。');
 end
-position = 1 + (numel(values) - 1) * fraction;
-lower = floor(position);
-upper = ceil(position);
-if lower == upper
-    value = values(lower);
-else
-    weight = position - lower;
-    value = (1 - weight) * values(lower) + weight * values(upper);
+readMask(result.supportMap, imageSize, 'whiteningSupport');
+readMask(result.delta, imageSize, 'whiteningDelta');
 end
+
+function validateToneResult(result, imageSize)
+if ~isstruct(result) || ~isscalar(result) || ...
+        ~all(isfield(result, {'toneSupport', 'outputCb', 'outputCr'}))
+    error('beauty:InvalidComposeInput', ...
+        '肤色结果缺少 toneSupport 或输出色度。');
+end
+readMask(result.toneSupport, imageSize, 'toneSupport');
+readMask(result.outputCb, imageSize, 'outputCb');
+readMask(result.outputCr, imageSize, 'outputCr');
 end

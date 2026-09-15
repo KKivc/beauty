@@ -1,3 +1,0 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": ".trellis/spec/backend/portrait-beauty.md", "reason": "检查输入输出、零强度、保护区域和测试契约"}
-{"file": ".trellis/spec/frontend/portrait-beauty.md", "reason": "检查GUI预览、指标和保存行为未回归"}

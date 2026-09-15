@@ -1,4 +1,0 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": ".trellis/spec/backend/portrait-beauty.md", "reason": "美颜算法接口、掩膜保护和自动化测试契约"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "确认算法输出与GUI预览、指标及保存链路保持兼容"}
-{"file": ".trellis/spec/frontend/portrait-beauty.md", "reason": "GUI预分析缓存、预览回调、重置和失败清理契约"}

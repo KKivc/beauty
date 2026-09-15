@@ -1,0 +1,15 @@
+# 本地人脸解析权重可能受上游许可限制，不随仓库提交。
+/models/*.onnx
+/models/*.onnx.sha256
+/models/cache/
+/.schp-export-venv/
+/+face_parsing_bisenet_resnet18/
+/+schp_lip_resnet101/
+/MathWorks/
+__pycache__/
+*.pyc
+# 本地会话与临时目录，不随仓库提交。
+/.scratch/
+/.zcode/
+/.codegraph/
+/nul

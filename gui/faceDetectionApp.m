@@ -25,6 +25,10 @@ classdef faceDetectionApp < matlab.apps.AppBase
     properties (Access = private)
         % 缓存原始图像、当前结果和单个人脸框。
         sourceImage = []
+        previewImage = []
+        previewFaceBox = zeros(0, 4)
+        previewContext = []
+        previewScale = 1
         beautifiedImage = []
         faceBox = zeros(0, 4)
         beautyContext = []
@@ -40,6 +44,16 @@ classdef faceDetectionApp < matlab.apps.AppBase
     end
 
     methods (Access = private)
+        function scaledBox = scaleFaceBox(~, faceBox, scale, imageSize)
+            scaledBox = round(double(faceBox) * scale);
+            scaledBox(1) = max(1, min(scaledBox(1), imageSize(2)));
+            scaledBox(2) = max(1, min(scaledBox(2), imageSize(1)));
+            x2 = min(imageSize(2), scaledBox(1) + scaledBox(3) - 1);
+            y2 = min(imageSize(1), scaledBox(2) + scaledBox(4) - 1);
+            scaledBox(3:4) = max(1, [x2 - scaledBox(1) + 1, ...
+                y2 - scaledBox(2) + 1]);
+        end
+
         function ensureSourcePath(~)
             % 根据 GUI 文件位置注册算法目录，不依赖 MATLAB 当前工作目录。
             guiFolder = fileparts(mfilename('fullpath'));
@@ -83,6 +97,12 @@ classdef faceDetectionApp < matlab.apps.AppBase
             app.clearLoadedImage();
             [~, baseName, extension] = fileparts(fileName);
             app.sourceImage = inputImage;
+            app.previewScale = min(1, 800 / max(size(inputImage, 1), size(inputImage, 2)));
+            if app.previewScale < 1
+                app.previewImage = imresize(inputImage, app.previewScale, 'bilinear');
+            else
+                app.previewImage = inputImage;
+            end
             app.inputBaseName = baseName;
             app.inputFormat = app.normalizedFormat(extension);
             app.showImage(app.SourceAxes, inputImage, 'Original Image');
@@ -97,7 +117,8 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 return;
             end
             try
-                [detectedFaceBox, isSingleFace] = detectSingleFace(inputImage);
+                [detectedFaceBox, isSingleFace, detectionDetails] = ...
+                    detectSingleFace(app.previewImage);
             catch exception
                 app.clearDetectionResult();
                 uialert(app.UIFigure, exception.message, 'Face Detection Failed');
@@ -112,22 +133,29 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 return;
             end
 
-            app.faceBox = detectedFaceBox;
             app.StatusLabel.Text = 'Analyzing skin and facial features...';
             drawnow;
             try
-                app.beautyContext = prepareBeautyContext(inputImage, detectedFaceBox);
+                app.previewFaceBox = detectedFaceBox;
+                app.faceBox = app.scaleFaceBox(detectedFaceBox, ...
+                    1 / app.previewScale, size(app.sourceImage));
+                app.previewContext = prepareBeautyContext( ...
+                    app.previewImage, app.previewFaceBox, ...
+                    detectionDetails.selectedParsing, ...
+                    struct('rotationDegrees', ...
+                    detectionDetails.orientationDegrees));
+                app.beautyContext = app.previewContext;
             catch exception
                 app.clearDetectionResult();
                 uialert(app.UIFigure, exception.message, 'Beauty Analysis Failed');
                 return;
             end
             app.hasSingleFace = true;
-            app.SmoothingSlider.Value = 35;
-            app.WhiteningSlider.Value = 25;
+            app.SmoothingSlider.Value = 25;
+            app.WhiteningSlider.Value = 15;
             app.updateStrengthLabels();
             app.setBeautyControlsEnabled(true);
-            app.refreshPreview(35, 25);
+            app.refreshPreview(25, 15, true);
         end
 
         function beautySliderValueChanging(app, event, isSmoothing)
@@ -142,7 +170,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 smoothingStrength = app.SmoothingSlider.Value;
                 whiteningStrength = event.Value;
             end
-            app.refreshPreview(smoothingStrength, whiteningStrength);
+            app.refreshPreview(smoothingStrength, whiteningStrength, false);
             if app.hasSingleFace
                 app.updateStrengthLabels(smoothingStrength, whiteningStrength);
                 app.previewClock = tic;
@@ -151,7 +179,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
 
         function beautySliderValueChanged(app, ~)
             % 松开滑块后强制完成一次最终刷新。
-            app.refreshPreview(app.SmoothingSlider.Value, app.WhiteningSlider.Value);
+            app.refreshPreview(app.SmoothingSlider.Value, app.WhiteningSlider.Value, true);
             if app.hasSingleFace
                 app.previewClock = tic;
             end
@@ -164,11 +192,11 @@ classdef faceDetectionApp < matlab.apps.AppBase
             end
             try
                 params = recommendBeautyParams( ...
-                    app.sourceImage, app.faceBox, app.beautyContext);
+                    app.previewImage, app.previewFaceBox, app.previewContext);
                 app.SmoothingSlider.Value = params.smoothingStrength;
                 app.WhiteningSlider.Value = params.whiteningStrength;
                 app.updateStrengthLabels();
-                app.refreshPreview(params.smoothingStrength, params.whiteningStrength);
+                app.refreshPreview(params.smoothingStrength, params.whiteningStrength, true);
                 if app.hasSingleFace
                     app.previewClock = tic;
                 end
@@ -200,8 +228,9 @@ classdef faceDetectionApp < matlab.apps.AppBase
             end
         end
 
-        function refreshPreview(app, smoothingStrength, whiteningStrength)
+        function refreshPreview(app, smoothingStrength, whiteningStrength, updateMetrics)
             % 只将一次 beautifyImage 调用包在耗时统计中。
+            if nargin < 4, updateMetrics = true; end
             if ~app.hasSingleFace || isempty(app.sourceImage)
                 return;
             end
@@ -211,9 +240,13 @@ classdef faceDetectionApp < matlab.apps.AppBase
             try
                 startTime = tic;
                 outputImage = beautifyImage( ...
-                    app.sourceImage, params, app.faceBox, app.beautyContext);
+                    app.previewImage, params, app.previewFaceBox, app.previewContext);
                 elapsedSeconds = toc(startTime);
-                metrics = evaluateImage(app.sourceImage, outputImage, elapsedSeconds);
+                if updateMetrics
+                    metrics = evaluateImage(app.previewImage, outputImage, elapsedSeconds);
+                else
+                    metrics = [];
+                end
             catch exception
                 app.clearDetectionResult();
                 uialert(app.UIFigure, exception.message, 'Beauty Preview Failed');
@@ -221,10 +254,14 @@ classdef faceDetectionApp < matlab.apps.AppBase
             end
 
             app.beautifiedImage = outputImage;
-            app.currentMetrics = metrics;
+            if updateMetrics
+                app.currentMetrics = metrics;
+            end
             app.updateStrengthLabels(smoothingStrength, whiteningStrength);
             app.showImage(app.DetectedAxes, outputImage, 'Beauty Preview');
-            app.updateMetrics(metrics);
+            if updateMetrics
+                app.updateMetrics(metrics);
+            end
             app.previewClock = tic;
             app.StatusLabel.Text = 'Beauty preview updated.';
         end
@@ -286,7 +323,13 @@ classdef faceDetectionApp < matlab.apps.AppBase
             outputPath = fullfile(folderPath, [outputBaseName, extension]);
 
             try
-                imwrite(app.beautifiedImage, outputPath);
+                fullContext = resizeBeautyContext(app.previewContext, ...
+                    size(app.sourceImage), app.faceBox);
+                fullParams = struct('smoothingStrength', app.SmoothingSlider.Value, ...
+                    'whiteningStrength', app.WhiteningSlider.Value);
+                outputImage = beautifyImage(app.sourceImage, fullParams, ...
+                    app.faceBox, fullContext);
+                imwrite(outputImage, outputPath);
                 outputImage = imread(outputPath);
             catch exception
                 uialert(app.UIFigure, exception.message, 'Unable to Save Image');
@@ -313,6 +356,10 @@ classdef faceDetectionApp < matlab.apps.AppBase
         function clearLoadedImage(app)
             % 清空已加载图像和所有美颜状态。
             app.sourceImage = [];
+            app.previewImage = [];
+            app.previewFaceBox = zeros(0, 4);
+            app.previewContext = [];
+            app.previewScale = 1;
             app.inputFormat = '';
             app.inputBaseName = '';
             cla(app.SourceAxes);
@@ -323,14 +370,18 @@ classdef faceDetectionApp < matlab.apps.AppBase
         function clearDetectionResult(app)
             % 清空结果、指标和 faceBox，并禁止处理旧数据。
             app.beautifiedImage = [];
+            app.previewImage = [];
+            app.previewFaceBox = zeros(0, 4);
+            app.previewContext = [];
+            app.previewScale = 1;
             app.faceBox = zeros(0, 4);
             app.beautyContext = [];
             app.currentMetrics = [];
             app.previewClock = [];
             app.hasSingleFace = false;
             if ~isempty(app.SmoothingSlider)
-                app.SmoothingSlider.Value = 35;
-                app.WhiteningSlider.Value = 25;
+                app.SmoothingSlider.Value = 25;
+                app.WhiteningSlider.Value = 15;
                 app.updateStrengthLabels();
             end
             app.setBeautyControlsEnabled(false);
@@ -358,8 +409,13 @@ classdef faceDetectionApp < matlab.apps.AppBase
 
         function showImage(~, targetAxes, imageData, titleText)
             % 在指定 UIAxes 中按原比例显示图像。
-            cla(targetAxes);
-            image(targetAxes, imageData);
+            imageHandle = findobj(targetAxes, 'Type', 'image');
+            if ~isempty(imageHandle) && isvalid(imageHandle(1))
+                imageHandle(1).CData = imageData;
+            else
+                cla(targetAxes);
+                image(targetAxes, imageData);
+            end
             axis(targetAxes, 'image');
             axis(targetAxes, 'off');
             title(targetAxes, titleText, 'Interpreter', 'none');
@@ -415,12 +471,12 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 app.resetBeautyButtonPushed(event);
 
             app.SmoothingValueLabel = uilabel(controlsGrid);
-            app.SmoothingValueLabel.Text = 'Smoothing: 35';
+            app.SmoothingValueLabel.Text = 'Smoothing: 25';
             app.SmoothingValueLabel.Layout.Row = 2;
             app.SmoothingValueLabel.Layout.Column = 1;
             app.SmoothingSlider = uislider(controlsGrid);
             app.SmoothingSlider.Limits = [0, 100];
-            app.SmoothingSlider.Value = 35;
+            app.SmoothingSlider.Value = 25;
             app.SmoothingSlider.MajorTicks = 0:20:100;
             app.SmoothingSlider.Layout.Row = 2;
             app.SmoothingSlider.Layout.Column = [2, 3];
@@ -431,12 +487,12 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 app.beautySliderValueChanged(event);
 
             app.WhiteningValueLabel = uilabel(controlsGrid);
-            app.WhiteningValueLabel.Text = 'Whitening: 25';
+            app.WhiteningValueLabel.Text = 'Whitening: 15';
             app.WhiteningValueLabel.Layout.Row = 2;
             app.WhiteningValueLabel.Layout.Column = 4;
             app.WhiteningSlider = uislider(controlsGrid);
             app.WhiteningSlider.Limits = [0, 100];
-            app.WhiteningSlider.Value = 25;
+            app.WhiteningSlider.Value = 15;
             app.WhiteningSlider.MajorTicks = 0:20:100;
             app.WhiteningSlider.Layout.Row = 2;
             app.WhiteningSlider.Layout.Column = [5, 6];

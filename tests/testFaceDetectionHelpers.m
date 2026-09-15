@@ -1,5 +1,5 @@
 function tests = testFaceDetectionHelpers
-%TESTFACEDETECTIONHELPERS Unit tests for non-GUI face detection helpers.
+%TESTFACEDETECTIONHELPERS 非 GUI 人脸检测 helper 单元测试。
 
 tests = functiontests(localfunctions);
 end

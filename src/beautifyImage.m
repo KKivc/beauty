@@ -30,9 +30,17 @@ if smoothingStrength == 0 && whiteningStrength == 0
 end
 ensureImageProcessingToolbox();
 if nargin < 4
-    beautyContext = prepareBeautyContext(inputImage, faceBox);
+    beautyContext = normalizeBeautyContext(inputImage, faceBox);
 else
-    validateBeautyContext(beautyContext, size(inputImage), faceBox);
+    try
+        beautyContext = normalizeBeautyContext(inputImage, faceBox, beautyContext);
+    catch exception
+        if startsWith(exception.identifier, 'normalizeBeautyContext:')
+            error('beautifyImage:InvalidContext', ...
+                'Beauty Context 无效：%s', exception.message);
+        end
+        rethrow(exception);
+    end
 end
 
 inputDouble = im2double(inputImage);
@@ -469,34 +477,6 @@ if any(mask(:))
     value = median(imageChannel(mask));
 else
     value = fallback;
-end
-end
-
-function validateBeautyContext(context, imageSize, faceBox)
-requiredFields = {'skinMask', 'faceSkinMask', 'featureProtectionMask', ...
-    'imageSize', 'faceBox'};
-isValid = isstruct(context) && isscalar(context) && ...
-    all(isfield(context, requiredFields));
-if isValid
-    expectedMaskSize = imageSize(1:2);
-    masks = {context.skinMask, context.faceSkinMask, ...
-        context.featureProtectionMask};
-    if isfield(context, 'hardProtectionMask')
-        masks{end + 1} = context.hardProtectionMask;
-    end
-    for index = 1:numel(masks)
-        mask = masks{index};
-        isValid = isValid && isa(mask, 'double') && isreal(mask) && ...
-            isequal(size(mask), expectedMaskSize) && all(isfinite(mask(:))) && ...
-            all(mask(:) >= 0) && all(mask(:) <= 1);
-    end
-    isValid = isValid && isequal(double(context.imageSize), double(imageSize)) && ...
-        isnumeric(context.faceBox) && isequal(size(context.faceBox), [1, 4]) && ...
-        all(abs(double(context.faceBox) - double(faceBox)) <= 1e-9);
-end
-if ~isValid
-    error('beautifyImage:InvalidContext', ...
-        'beautyContext does not match the input image and faceBox.');
 end
 end
 

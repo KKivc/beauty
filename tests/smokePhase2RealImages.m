@@ -1,16 +1,15 @@
-function [summary, outputFolder] = smokePhase2RealImages
+function [summary, outputFolder] = smokePhase2RealImages(imagePaths, outputFolder)
 %SMOKEPHASE2REALIMAGES 只读真实图集并输出第二阶段回归产物。
 projectRoot = fileparts(fileparts(mfilename('fullpath')));
 addpath(fullfile(projectRoot, 'src'));
-
-imagePaths = { ...
-    'D:\桌面\人脸\人脸\14.jpg'; ...
-    'D:\桌面\人脸\人脸\15.jpg'; ...
-    'D:\桌面\人脸\人脸\73.jpg'; ...
-    'D:\桌面\人脸\人脸\80.jpg'; ...
-    'D:\桌面\人脸\人脸2\205.jpg'; ...
-    'D:\桌面\人脸\人脸2\206.jpg'};
-outputFolder = fullfile(tempdir, 'image_beauty_phase2_smoke_20260910');
+if nargin < 1 || isempty(imagePaths)
+    error('smokePhase2RealImages:InvalidInput', ...
+        '必须通过 imagePaths 参数传入私有 smoke 图像路径。');
+end
+imagePaths = normalizeImagePaths(imagePaths);
+if nargin < 2 || isempty(outputFolder)
+    outputFolder = fullfile(tempdir, 'image_beauty_phase2_smoke');
+end
 if ~isfolder(outputFolder)
     mkdir(outputFolder);
 end
@@ -27,13 +26,18 @@ for index = 1:numel(imagePaths)
     imagePath = imagePaths{index};
     if ~isfile(imagePath)
         error('smokePhase2RealImages:MissingImage', ...
-            'Regression image is missing: %s', imagePath);
+            '第 %d 个私有 smoke 图像不存在。', index);
     end
-    sourceImage = imread(imagePath);
+    try
+        sourceImage = imread(imagePath);
+    catch
+        error('smokePhase2RealImages:InvalidImage', ...
+            '第 %d 个私有 smoke 图像无法读取。', index);
+    end
     if ~isa(sourceImage, 'uint8') || ndims(sourceImage) ~= 3 || ...
             size(sourceImage, 3) ~= 3
         error('smokePhase2RealImages:InvalidImage', ...
-            'Regression image must be uint8 RGB: %s', imagePath);
+            '第 %d 个私有 smoke 图像必须是 uint8 三通道 RGB 图像。', index);
     end
 
     previewScale = min(1, 800 / max(size(sourceImage, 1), size(sourceImage, 2)));
@@ -46,10 +50,11 @@ for index = 1:numel(imagePaths)
     [previewFaceBox, hasFace, detectionDetails] = detectSingleFace(previewImage);
     if ~hasFace
         error('smokePhase2RealImages:NoSemanticFace', ...
-            'No semantic face was found: %s', imagePath);
+            '第 %d 个私有 smoke 图像未检测到语义人脸。', index);
     end
-    context = prepareBeautyContext(previewImage, previewFaceBox, ...
-        detectionDetails.selectedParsing);
+    context = normalizeBeautyContext(previewImage, previewFaceBox, ...
+        prepareBeautyContext(previewImage, previewFaceBox, ...
+        detectionDetails.selectedParsing));
     analysisSeconds = toc(analysisClock);
 
     defaultParams = struct('smoothingStrength', 25, 'whiteningStrength', 15);
@@ -66,12 +71,13 @@ for index = 1:numel(imagePaths)
         maximumSmoothingParams, previewFaceBox, context);
 
     fullFaceBox = scaleBox(previewFaceBox, 1 / previewScale, size(sourceImage));
-    fullContext = resizeBeautyContext(context, size(sourceImage), fullFaceBox);
+    fullContext = resizeBeautyContext(context, size(sourceImage), ...
+        fullFaceBox, sourceImage);
     savedOutput = beautifyImage(sourceImage, defaultParams, ...
         fullFaceBox, fullContext);
     if ~isequal(size(savedOutput), size(sourceImage))
         error('smokePhase2RealImages:SaveSizeMismatch', ...
-            'Full-size result changed image dimensions: %s', imagePath);
+            '第 %d 个私有 smoke 图像的原尺寸结果改变了图像尺寸。', index);
     end
 
     % 纹理门槛以脸部皮肤为准，身体用于覆盖与保护核验。
@@ -111,13 +117,14 @@ for index = 1:numel(imagePaths)
     end
 
     [~, baseName] = fileparts(imagePath);
-    visualPath = fullfile(outputFolder, [baseName, '_phase2.jpg']);
+    visualName = sprintf('private-%03d_phase2.jpg', index);
+    visualPath = fullfile(outputFolder, visualName);
     annotated = annotateFaceDetection(previewImage, previewFaceBox);
     maskVisual = repmat(uint8(round(255 * context.skinMask)), [1, 1, 3]);
     imwrite([annotated, defaultOutput, maximumOutput, maskVisual], visualPath, ...
         'Quality', 94);
 
-    rows(index).image = imagePath;
+    rows(index).image = sprintf('private-%03d', index);
     rows(index).width = size(sourceImage, 2);
     rows(index).height = size(sourceImage, 1);
     rows(index).faceBox = previewFaceBox;
@@ -134,8 +141,9 @@ for index = 1:numel(imagePaths)
         rows(index).oldRoiBoundaryJump = boundaryJump(difference, ...
             scaleBox([12, 114, 231, 361], previewScale, size(previewImage)));
     end
-    rows(index).visualPath = visualPath;
+    rows(index).visualPath = visualName;
 end
+
 summary = struct2table(rows);
 if any(summary.defaultTextureRetention < .80) || ...
         any(summary.maximumTextureRetention < .55) || ...
@@ -167,6 +175,25 @@ end
 if any(summary.bodyPixels(3:end) == 0)
     error('smokePhase2RealImages:BodySkinMissing', ...
         'A full-body regression image has no confirmed body skin.');
+end
+end
+
+function paths = normalizeImagePaths(paths)
+if isstring(paths)
+    paths = cellstr(paths(:));
+elseif ischar(paths) && size(paths, 1) == 1
+    paths = {paths};
+elseif iscell(paths) && all(cellfun(@(value) ischar(value) || ...
+        (isstring(value) && isscalar(value)), paths(:)))
+    paths = paths(:);
+    paths = cellfun(@char, paths, 'UniformOutput', false);
+else
+    error('smokePhase2RealImages:InvalidInput', ...
+        '必须通过 imagePaths 参数传入私有 smoke 图像路径。');
+end
+if isempty(paths)
+    error('smokePhase2RealImages:InvalidInput', ...
+        'imagePaths 不能为空。');
 end
 end
 

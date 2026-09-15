@@ -12,9 +12,17 @@ if nargin < 2
 end
 validateFaceBox(faceBox, size(inputImage, 2), size(inputImage, 1));
 if nargin < 3
-    beautyContext = prepareBeautyContext(inputImage, faceBox);
+    beautyContext = normalizeBeautyContext(inputImage, faceBox);
 else
-    validateBeautyContext(beautyContext, size(inputImage), faceBox);
+    try
+        beautyContext = normalizeBeautyContext(inputImage, faceBox, beautyContext);
+    catch exception
+        if startsWith(exception.identifier, 'normalizeBeautyContext:')
+            error('recommendBeautyParams:InvalidContext', ...
+                'Beauty Context 无效：%s', exception.message);
+        end
+        rethrow(exception);
+    end
 end
 
 ycbcrImage = rgb2ycbcr(im2double(inputImage));
@@ -137,30 +145,6 @@ else
     weight = position - lowerIndex;
     value = (1 - weight) * values(lowerIndex) + ...
         weight * values(upperIndex);
-end
-end
-
-function validateBeautyContext(context, imageSize, faceBox)
-requiredFields = {'skinMask', 'faceSkinMask', 'featureProtectionMask', ...
-    'imageSize', 'faceBox'};
-isValid = isstruct(context) && isscalar(context) && ...
-    all(isfield(context, requiredFields));
-if isValid
-    masks = {context.skinMask, context.faceSkinMask, ...
-        context.featureProtectionMask};
-    for index = 1:numel(masks)
-        mask = masks{index};
-        isValid = isValid && isa(mask, 'double') && isreal(mask) && ...
-            isequal(size(mask), imageSize(1:2)) && all(isfinite(mask(:))) && ...
-            all(mask(:) >= 0) && all(mask(:) <= 1);
-    end
-    isValid = isValid && isequal(double(context.imageSize), double(imageSize)) && ...
-        isnumeric(context.faceBox) && isequal(size(context.faceBox), [1, 4]) && ...
-        all(abs(double(context.faceBox) - double(faceBox)) <= 1e-9);
-end
-if ~isValid
-    error('recommendBeautyParams:InvalidContext', ...
-        'beautyContext does not match the input image and faceBox.');
 end
 end
 

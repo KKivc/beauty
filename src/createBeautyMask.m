@@ -9,6 +9,7 @@ if ~isnumeric(inputDouble) || ~isreal(inputDouble) || ...
         'inputDouble must be a finite RGB image in the range 0 to 1.');
 end
 inputImage = uint8(round(double(inputDouble) * 255));
-context = prepareBeautyContext(inputImage, faceBox);
+context = normalizeBeautyContext(inputImage, faceBox, ...
+    prepareBeautyContext(inputImage, faceBox));
 beautyMask = context.faceSkinMask;
 end

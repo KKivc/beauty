@@ -1,0 +1,272 @@
+function report = runBeautyRegression(varargin)
+%RUNBEAUTYREGRESSION 运行可重复的合成回归和可选私有 smoke。
+%   report = runBeautyRegression() 只使用仓库内生成的合成图。
+%   可选参数：
+%     'PrivateSmoke'：不保存路径、EXIF 或人物信息的输入结构体数组；
+%     'Assert'：为 true 时发现回归即抛出明确错误。
+
+[privateSmoke, shouldAssert] = readOptions(varargin{:});
+fixture = buildSyntheticFixture();
+context = normalizeBeautyContext(fixture.image, fixture.faceBox, ...
+    fixture.context);
+strengths = [0, 25, 50, 75, 100];
+smoothing = repmat(emptyMetrics(), 1, numel(strengths));
+whitening = repmat(emptyMetrics(), 1, numel(strengths));
+
+for index = 1:numel(strengths)
+    smoothingOutput = beautifyImage(fixture.image, struct( ...
+        'smoothingStrength', strengths(index), 'whiteningStrength', 0), ...
+        fixture.faceBox, context);
+    smoothing(index) = measureBeautyRegression(fixture.image, ...
+        smoothingOutput, context, fixture.faceBox);
+
+    whiteningOutput = beautifyImage(fixture.image, struct( ...
+        'smoothingStrength', 0, 'whiteningStrength', strengths(index)), ...
+        fixture.faceBox, context);
+    whitening(index) = measureBeautyRegression(fixture.image, ...
+        whiteningOutput, context, fixture.faceBox);
+end
+
+baseline = smoothing(1);
+thresholds = struct( ...
+    'noseStructureLowerBound', baseline.noseStructure * .90, ...
+    'outsideStructureLowerBound', baseline.outsideStructure * .90, ...
+    'monotonicTolerance', 1e-8, ...
+    'protectedPixelTolerance', 0);
+violations = {};
+violations = addViolation(violations, ...
+    ~isNonIncreasing([smoothing.textureEnergy], thresholds.monotonicTolerance), ...
+    '磨皮纹理能量随强度出现非单调变化。');
+violations = addViolation(violations, ...
+    ~isNonIncreasing([smoothing.blemishEnergy], thresholds.monotonicTolerance), ...
+    '磨皮瑕疵能量随强度出现非单调变化。');
+violations = addViolation(violations, ...
+    any([smoothing.noseStructure] < thresholds.noseStructureLowerBound - ...
+    thresholds.monotonicTolerance), ...
+    '鼻部结构低于基于实测基线计算的允许下限。');
+violations = addViolation(violations, ...
+    any([smoothing.outsideStructure] < ...
+    thresholds.outsideStructureLowerBound - thresholds.monotonicTolerance), ...
+    '脸外皮肤结构低于基于实测基线计算的允许下限。');
+violations = addViolation(violations, ...
+    ~isNonDecreasing([whitening.meanLuminance], ...
+    thresholds.monotonicTolerance), ...
+    '美白亮度随强度出现非单调变化。');
+violations = addViolation(violations, ...
+    any([smoothing.backgroundMaxChange] > ...
+    thresholds.protectedPixelTolerance + 1), ...
+    '背景像素发生非允许变化。');
+violations = addViolation(violations, ...
+    any([smoothing.hardProtectionMaxChange] > ...
+    thresholds.protectedPixelTolerance), ...
+    '硬保护像素发生变化。');
+violations = addViolation(violations, ...
+    any(~[smoothing.sameSize]) || any(~[smoothing.sameChannels]) || ...
+    any(~[whitening.sameSize]) || any(~[whitening.sameChannels]), ...
+    '处理结果没有保持输入尺寸或三通道属性。');
+
+report = struct( ...
+    'strengths', strengths, ...
+    'baseline', baseline, ...
+    'smoothing', smoothing, ...
+    'whitening', whitening, ...
+    'thresholds', thresholds, ...
+    'violations', {violations}, ...
+    'passed', isempty(violations), ...
+    'privateSmoke', runPrivateSmoke(privateSmoke));
+if shouldAssert && ~report.passed
+    error('runBeautyRegression:RegressionFailed', ...
+        '回归基线检查失败：%s', strjoin(report.violations, '；'));
+end
+end
+
+function [privateSmoke, shouldAssert] = readOptions(varargin)
+privateSmoke = struct([]);
+shouldAssert = false;
+if mod(numel(varargin), 2) ~= 0
+    error('runBeautyRegression:InvalidOptions', ...
+        '选项必须使用名称和值成对传入。');
+end
+for index = 1:2:numel(varargin)
+    name = varargin{index};
+    if isstring(name) && isscalar(name)
+        name = char(name);
+    end
+    if ~ischar(name)
+        error('runBeautyRegression:InvalidOptions', ...
+            '选项名称必须是字符向量或字符串。');
+    end
+    switch lower(name)
+        case 'privatesmoke'
+            privateSmoke = varargin{index + 1};
+            if isempty(privateSmoke)
+                privateSmoke = struct([]);
+            elseif ~isstruct(privateSmoke)
+                error('runBeautyRegression:InvalidOptions', ...
+                    'PrivateSmoke 必须是结构体数组。');
+            end
+        case 'assert'
+            shouldAssert = varargin{index + 1};
+            if ~islogical(shouldAssert) || ~isscalar(shouldAssert)
+                error('runBeautyRegression:InvalidOptions', ...
+                    'Assert 必须是逻辑标量。');
+            end
+        otherwise
+            error('runBeautyRegression:InvalidOptions', ...
+                '不支持的回归选项：%s。', name);
+    end
+end
+end
+
+function fixture = buildSyntheticFixture
+imageSize = [180, 260];
+faceBox = [70, 24, 120, 128];
+[xGrid, yGrid] = meshgrid(1:imageSize(2), 1:imageSize(1));
+faceRegion = ((xGrid - 130) / 59) .^ 2 + ...
+    ((yGrid - 86) / 63) .^ 2 <= 1;
+neckRegion = xGrid >= 106 & xGrid <= 154 & yGrid >= 138 & yGrid <= 176;
+skinRegion = faceRegion | neckRegion;
+noseRegion = ((xGrid - 130) / 18) .^ 2 + ...
+    ((yGrid - 91) / 35) .^ 2 <= 1;
+noseShading = .055 * exp(-((xGrid - 130) / 13) .^ 2) - ...
+    .035 * exp(-((xGrid - 114) / 11) .^ 2) - ...
+    .035 * exp(-((xGrid - 146) / 11) .^ 2);
+baseLuminance = .60 + .020 * sin(2 * pi * xGrid / 31) .* ...
+    sin(2 * pi * yGrid / 27);
+baseLuminance(faceRegion) = baseLuminance(faceRegion) + ...
+    noseShading(faceRegion);
+baseLuminance(neckRegion) = .58 + ...
+    .012 * sin(2 * pi * yGrid(neckRegion) / 23);
+sourceImage = zeros([imageSize, 3], 'uint8');
+for channel = 1:3
+    channelImage = uint8(round(48 + 16 * baseLuminance));
+    channelImage(skinRegion) = uint8(round( ...
+        255 * min(max(baseLuminance(skinRegion), 0), 1)));
+    sourceImage(:, :, channel) = channelImage;
+end
+sourceImage(:, :, 1) = min(255, sourceImage(:, :, 1) + uint8(18 * skinRegion));
+sourceImage(:, :, 2) = min(255, sourceImage(:, :, 2) + uint8(2 * skinRegion));
+sourceImage(:, :, 3) = max(0, sourceImage(:, :, 3) - uint8(10 * skinRegion));
+
+freckleCenters = [106, 65; 119, 87; 144, 74; 154, 101; ...
+    93, 112; 166, 123; 130, 154];
+for index = 1:size(freckleCenters, 1)
+    spot = (xGrid - freckleCenters(index, 1)) .^ 2 + ...
+        (yGrid - freckleCenters(index, 2)) .^ 2 <= 9;
+    spot = spot & skinRegion;
+    for channel = 1:3
+        channelImage = sourceImage(:, :, channel);
+        channelImage(spot) = max(0, channelImage(spot) - uint8(24));
+        sourceImage(:, :, channel) = channelImage;
+    end
+end
+
+parsing = emptyFaceParsing(imageSize);
+parsing.regions.skin = double(skinRegion);
+parsing.regionConfidence.skin = double(skinRegion);
+parsing.regions.neck = double(neckRegion);
+parsing.regionConfidence.neck = double(neckRegion);
+parsing.regions.nose = double(noseRegion);
+parsing.regionConfidence.nose = double(noseRegion);
+hardFeature = ((xGrid - 108) / 12) .^ 2 + ...
+    ((yGrid - 66) / 5) .^ 2 <= 1;
+parsing.regions.leftEye = double(hardFeature);
+parsing.regionConfidence.leftEye = double(hardFeature);
+bodyOptions = struct('probabilities', ...
+    zeros([imageSize, 20], 'single'));
+legacyContext = prepareBeautyContext(sourceImage, faceBox, parsing, ...
+    bodyOptions);
+fixture = struct('image', sourceImage, 'faceBox', faceBox, ...
+    'context', legacyContext);
+end
+
+function results = runPrivateSmoke(inputs)
+results = struct([]);
+if isempty(inputs)
+    return;
+end
+results = repmat(struct('smoothing', [], 'whitening', [], 'passed', false), ...
+    1, numel(inputs));
+for index = 1:numel(inputs)
+    entry = inputs(index);
+    if isfield(entry, 'image')
+        image = entry.image;
+    elseif isfield(entry, 'imagePath')
+        try
+            image = imread(entry.imagePath);
+        catch
+            error('runBeautyRegression:InvalidPrivateSmoke', ...
+                '第 %d 个 PrivateSmoke 图像无法读取。', index);
+        end
+    else
+        error('runBeautyRegression:InvalidPrivateSmoke', ...
+            '每个 PrivateSmoke 项必须提供 image 或 imagePath。');
+    end
+    if ~isa(image, 'uint8') || ndims(image) ~= 3 || size(image, 3) ~= 3
+        error('runBeautyRegression:InvalidPrivateSmoke', ...
+            'PrivateSmoke 图像必须是 uint8 三通道 RGB 图像。');
+    end
+    if ~isfield(entry, 'faceBox')
+        error('runBeautyRegression:InvalidPrivateSmoke', ...
+            '每个 PrivateSmoke 项必须提供 faceBox。');
+    end
+    if isfield(entry, 'context') && ~isempty(entry.context)
+        context = normalizeBeautyContext(image, entry.faceBox, entry.context);
+    else
+        context = normalizeBeautyContext(image, entry.faceBox);
+    end
+    strengths = [0, 25, 50, 75, 100];
+    smoothing = repmat(emptyMetrics(), 1, numel(strengths));
+    whitening = repmat(emptyMetrics(), 1, numel(strengths));
+    for strengthIndex = 1:numel(strengths)
+        smoothingOutput = beautifyImage(image, struct( ...
+            'smoothingStrength', strengths(strengthIndex), ...
+            'whiteningStrength', 0), entry.faceBox, context);
+        whiteningOutput = beautifyImage(image, struct( ...
+            'smoothingStrength', 0, ...
+            'whiteningStrength', strengths(strengthIndex)), ...
+            entry.faceBox, context);
+        smoothing(strengthIndex) = measureBeautyRegression( ...
+            image, smoothingOutput, context, entry.faceBox);
+        whitening(strengthIndex) = measureBeautyRegression( ...
+            image, whiteningOutput, context, entry.faceBox);
+    end
+    results(index).smoothing = smoothing;
+    results(index).whitening = whitening;
+    results(index).passed = all([smoothing.sameSize]) && ...
+        all([whitening.sameSize]);
+end
+end
+
+function parsing = emptyFaceParsing(imageSize)
+names = faceParsingClassNames();
+parsing = struct('regions', struct(), 'regionConfidence', struct());
+for index = 1:numel(names)
+    parsing.regions.(names{index}) = zeros(imageSize);
+    parsing.regionConfidence.(names{index}) = zeros(imageSize);
+end
+end
+
+function metrics = emptyMetrics
+metrics = struct( ...
+    'textureEnergy', 0, 'blemishEnergy', 0, 'meanLuminance', 0, ...
+    'noseStructure', 0, 'outsideStructure', 0, ...
+    'noseStructureInput', 0, 'outsideStructureInput', 0, ...
+    'backgroundMaxChange', 0, 'hardProtectionMaxChange', 0, ...
+    'outputSize', zeros(1, 3), 'outputClass', '', ...
+    'sameSize', false, 'sameChannels', false, 'config', struct());
+end
+
+function values = addViolation(values, condition, message)
+if condition
+    values{end + 1} = message;
+end
+end
+
+function valid = isNonIncreasing(values, tolerance)
+valid = all(diff(values) <= tolerance);
+end
+
+function valid = isNonDecreasing(values, tolerance)
+valid = all(diff(values) >= -tolerance);
+end

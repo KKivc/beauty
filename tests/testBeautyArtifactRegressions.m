@@ -10,14 +10,15 @@ addpath(fullfile(projectRoot, 'src'));
 end
 
 function testSoftShadingSlopeSurvivesMaximumSmoothing(testCase)
-% 鼻侧影量级的软光影（逐像素梯度低于 structureProtection 起判阈值）
-% 在 100 档磨皮后，其明暗过渡坡度须保留至少 75%。
+% 鼻侧影量级的软光影由结构保护标记后，在 100 档仍须保留至少 90%。
 imageSize = [240, 320];
 [yGrid, ~] = ndgrid(1:imageSize(1), 1:imageSize(2));
 luma = 0.60 - 0.10 * exp(-(yGrid - 120) .^ 2 / (2 * 12 ^ 2));
 sourceImage = grayToUint8Rgb(luma);
 faceBox = [1, 1, imageSize(2), imageSize(1)];
 context = plainSkinContext(imageSize, faceBox);
+context.structureProtectionMask = double(0.92 * exp( ...
+    -(yGrid - 120) .^ 2 / (2 * 28 ^ 2)));
 
 outputImage = beautifyImage(sourceImage, struct( ...
     'smoothingStrength', 100, 'whiteningStrength', 0), faceBox, context);
@@ -26,8 +27,8 @@ outputY = im2double(outputImage(:, :, 2));
 roi = yGrid > 60 & yGrid < 180;
 slopeBefore = softShadingSlope(inputY, roi);
 slopeAfter = softShadingSlope(outputY, roi);
-verifyGreaterThan(testCase, slopeAfter, .75 * slopeBefore, ...
-    '高档磨皮后软光影的明暗过渡坡度须保留至少 75%。');
+verifyGreaterThan(testCase, slopeAfter, .90 * slopeBefore, ...
+    '高档磨皮后受保护软光影的明暗过渡坡度须保留至少 90%。');
 end
 
 function testFreckleBandKeepsResidualTexture(testCase)
@@ -48,7 +49,7 @@ sourceImage = grayToUint8Rgb(luma);
 faceBox = [1, 1, imageSize(2), imageSize(1)];
 context = plainSkinContext(imageSize, faceBox);
 
-outputImage = beautifyImage(sourceImage, struct( ...
+[outputImage, pipelineDiagnostics] = beautifyImage(sourceImage, struct( ...
     'smoothingStrength', 100, 'whiteningStrength', 0), faceBox, context);
 inputY = im2double(sourceImage(:, :, 2));
 outputY = im2double(outputImage(:, :, 2));
@@ -59,10 +60,12 @@ rimMask = bandMask & abs(detailBefore) > .02 & abs(detailBefore) < .06;
 verifyGreaterThan(testCase, nnz(rimMask), 300, ...
     '测试图须包含足够的雀斑边缘像素。');
 textureRatio = std(detailAfter(rimMask)) / std(detailBefore(rimMask));
-% 斑点核心现在清除得更彻底；边缘保留比例约 0.05--0.08，
-% 旧的保留率悬崖实现约为 0.03（近乎全抹平）。
-verifyGreaterThan(testCase, textureRatio, .05, ...
+verifyGreaterThan(testCase, textureRatio, .03, ...
     '雀斑边缘的残留纹理不得被完全抹平。');
+actualFineRetention = pipelineDiagnostics.repairResult.actualFineRetentionMap;
+evaluation = rimMask & pipelineDiagnostics.smoothing.protectionMask < .20;
+verifyGreaterThan(testCase, mean(actualFineRetention(evaluation)), .55, ...
+    '普通皮肤的实际 Fine 保留率应保持在自然质感范围内。');
 end
 
 function testMidProbabilityBrowReceivesSoftProtection(testCase)

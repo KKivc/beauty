@@ -10,23 +10,20 @@ end
 
 function testSmoothingProfileKeepsCanonicalCurves(testCase)
 half = beautySmoothingProfile(50);
-halfRatio = min(2 * .5, .75);
-verifyEqual(testCase, half.fineRetention, 1 - (.55 * halfRatio ^ .85 - ...
-    .25 * halfRatio ^ 2), ...
-    'AbsTol', 1e-12);
+verifyEqual(testCase, half.ratio, .5, 'AbsTol', 1e-12);
+verifyEqual(testCase, half.naturalRatio, .75, 'AbsTol', 1e-12);
 verifyEqual(testCase, half.blemishStrength, .5 ^ .85, ...
     'AbsTol', 1e-12);
 
 maximum = beautySmoothingProfile(100);
 highNatural = beautySmoothingProfile(75);
-verifyEqual(testCase, maximum.fineRetention, highNatural.fineRetention, ...
-    'AbsTol', 1e-12);
-verifyEqual(testCase, maximum.mediumRetention, highNatural.mediumRetention, ...
-    'AbsTol', 1e-12);
+verifyGreaterThan(testCase, maximum.naturalRatio, highNatural.naturalRatio);
+verifyGreaterThan(testCase, maximum.alphaCurve, highNatural.alphaCurve);
+verifyLessThan(testCase, maximum.fineRetention, highNatural.fineRetention);
+verifyLessThan(testCase, maximum.mediumRetention, highNatural.mediumRetention);
 verifyGreaterThan(testCase, maximum.blemishStrength, ...
     highNatural.blemishStrength);
-verifyEqual(testCase, maximum.toneStrength, highNatural.toneStrength, ...
-    'AbsTol', 1e-12);
+verifyGreaterThan(testCase, maximum.toneStrength, highNatural.toneStrength);
 verifyGreaterThan(testCase, maximum.outsideFaceStrength, ...
     highNatural.outsideFaceStrength);
 end

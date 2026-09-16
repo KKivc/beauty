@@ -13,6 +13,7 @@ verifyNotEmpty(testCase, which('masks.buildBeautyMasks'));
 verifyNotEmpty(testCase, which('masks.buildTextureProtectionMask'));
 verifyNotEmpty(testCase, which('beauty.decomposeSkinFrequency'));
 verifyNotEmpty(testCase, which('beauty.smoothSkinTexture'));
+verifyNotEmpty(testCase, which('beauty.evenSkinLuminance'));
 verifyNotEmpty(testCase, which('beauty.composeBeautyResult'));
 end
 
@@ -75,20 +76,39 @@ verifyEqual(testCase, frequency.base + frequency.mid + frequency.fine, ...
 strengths = [0, 25, 50, 75, 100];
 retentions = zeros(size(strengths));
 fineEnergies = zeros(size(strengths));
+midRetentions = zeros(size(strengths));
+midEnergies = zeros(size(strengths));
 for index = 1:numel(strengths)
     [smoothed, details] = beauty.smoothSkinTexture( ...
         frequency, beautyMasks, strengths(index));
-    retentions(index) = details.fineRetention;
+    retentions(index) = mean(details.fineActualRetentionMap(:));
     fineEnergies(index) = details.fineEnergyAfter;
+    midRetentions(index) = mean(details.midActualRetentionMap(:));
+    midEnergies(index) = details.midEnergyAfter;
+    verifyEqual(testCase, details.fineActualRetentionMap, ...
+        1 - details.alphaMap .* (1 - details.fineRetention), ...
+        'AbsTol', 1e-12);
+    verifyEqual(testCase, details.midActualRetentionMap, ...
+        1 - details.midAlphaMap .* (1 - details.midRetention), ...
+        'AbsTol', 1e-12);
     verifyEqual(testCase, smoothed.base, frequency.base, ...
         'AbsTol', 1e-12);
-    verifyEqual(testCase, smoothed.mid, frequency.mid, ...
-        'AbsTol', 1e-12);
+    if strengths(index) == 0
+        verifyEqual(testCase, smoothed.mid, frequency.mid, ...
+            'AbsTol', 1e-12);
+    else
+        verifyGreaterThan(testCase, ...
+            nnz(abs(smoothed.mid(:) - frequency.mid(:)) > 1e-12), 0);
+    end
 end
 verifyEqual(testCase, retentions(1), 1, 'AbsTol', 1e-12);
 verifyTrue(testCase, all(diff(retentions) <= 0));
 verifyTrue(testCase, all(diff(fineEnergies) <= 1e-12));
-verifyGreaterThan(testCase, retentions(end), 0);
+verifyEqual(testCase, midRetentions(1), 1, 'AbsTol', 1e-12);
+verifyTrue(testCase, all(diff(midRetentions) <= 0));
+verifyTrue(testCase, all(diff(midEnergies) <= 1e-12));
+verifyGreaterThan(testCase, retentions(end), .55);
+verifyGreaterThan(testCase, midRetentions(end), .50);
 end
 
 function testV3PipelineUsesOneAlphaAndPreservesProtectedPixels(testCase)

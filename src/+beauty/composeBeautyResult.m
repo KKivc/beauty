@@ -45,6 +45,38 @@ sourceLuminance = double(frequency.sourceLuminance);
 smoothingDelta = double(smoothedFrequency.outputLuminance) - ...
     sourceLuminance;
 
+baseSupport = zeros(imageSize);
+baseDelta = zeros(imageSize);
+if isfield(processing, 'baseLuminance')
+    baseResult = processing.baseLuminance;
+    validateBaseLuminanceResult(baseResult, imageSize);
+    baseSupport = readMask(baseResult.supportMap, imageSize, ...
+        'baseSupport');
+    baseDelta = readSignedDelta(baseResult.baseDelta, imageSize, ...
+        'baseDelta');
+elseif isfield(processing, 'evenSkinLuminance')
+    baseResult = processing.evenSkinLuminance;
+    validateBaseLuminanceResult(baseResult, imageSize);
+    baseSupport = readMask(baseResult.supportMap, imageSize, ...
+        'baseSupport');
+    baseDelta = readSignedDelta(baseResult.baseDelta, imageSize, ...
+        'baseDelta');
+elseif isfield(processing, 'baseLuminanceResult')
+    baseResult = processing.baseLuminanceResult;
+    validateBaseLuminanceResult(baseResult, imageSize);
+    baseSupport = readMask(baseResult.supportMap, imageSize, ...
+        'baseSupport');
+    baseDelta = readSignedDelta(baseResult.baseDelta, imageSize, ...
+        'baseDelta');
+elseif isfield(processing, 'evenSkinLuminanceResult')
+    baseResult = processing.evenSkinLuminanceResult;
+    validateBaseLuminanceResult(baseResult, imageSize);
+    baseSupport = readMask(baseResult.supportMap, imageSize, ...
+        'baseSupport');
+    baseDelta = readSignedDelta(baseResult.baseDelta, imageSize, ...
+        'baseDelta');
+end
+
 if isfield(processing, 'whitening')
     whiteningResult = processing.whitening;
     validateWhiteningResult(whiteningResult, imageSize);
@@ -70,34 +102,24 @@ if isfield(processing, 'skinTone')
     toneDeltaCr = double(toneResult.outputCr) - sourceYcbcr(:, :, 3);
 end
 
-% smoothingDelta 和 whiteningDelta 都是相对于原图的增量，先合成增量，
-% 再只用一张 Alpha Map 将目标值与原图组合。
-alphaMap = min(1, max(cat(3, smoothingAlpha, whiteningSupport, ...
-    toneSupport), [], 3));
-delta = smoothingDelta + whiteningDelta;
-targetLuminance = sourceLuminance;
-active = alphaMap > eps;
-targetLuminance(active) = sourceLuminance(active) + ...
-    delta(active) ./ alphaMap(active);
-targetLuminance = min(max(targetLuminance, 0), 1);
-outputLuminance = sourceLuminance + ...
-    alphaMap .* (targetLuminance - sourceLuminance);
-
 ycbcr = rgb2ycbcr(im2double(inputImage));
-ycbcr(:, :, 1) = min(max(outputLuminance, 0), 1);
+% 所有亮度 Delta 都已经在各自模块中完成计权；Alpha 只用于统一记录
+% 支持范围和保留无作用区域，不再把同一作用权重乘第二次。
+alphaMap = min(1, max(cat(3, smoothingAlpha, baseSupport, ...
+    whiteningSupport, toneSupport), [], 3));
+delta = smoothingDelta + baseDelta + whiteningDelta;
+targetLuminance = min(max(sourceLuminance + delta, 0), 1);
+outputLuminance = targetLuminance;
+inactive = alphaMap <= eps;
+outputLuminance(inactive) = sourceLuminance(inactive);
+
+ycbcr(:, :, 1) = outputLuminance;
 sourceCb = ycbcr(:, :, 2);
 sourceCr = ycbcr(:, :, 3);
-toneTargetCb = sourceCb;
-toneTargetCr = sourceCr;
-activeTone = alphaMap > eps;
-toneTargetCb(activeTone) = sourceCb(activeTone) + ...
-    toneDeltaCb(activeTone) ./ alphaMap(activeTone);
-toneTargetCr(activeTone) = sourceCr(activeTone) + ...
-    toneDeltaCr(activeTone) ./ alphaMap(activeTone);
-toneTargetCb = min(max(toneTargetCb, 0), 1);
-toneTargetCr = min(max(toneTargetCr, 0), 1);
-ycbcr(:, :, 2) = sourceCb + alphaMap .* (toneTargetCb - sourceCb);
-ycbcr(:, :, 3) = sourceCr + alphaMap .* (toneTargetCr - sourceCr);
+toneTargetCb = min(max(sourceCb + toneDeltaCb, 0), 1);
+toneTargetCr = min(max(sourceCr + toneDeltaCr, 0), 1);
+ycbcr(:, :, 2) = toneTargetCb;
+ycbcr(:, :, 3) = toneTargetCr;
 outputDouble = min(max(ycbcr2rgb(ycbcr), 0), 1);
 beautifiedImage = uint8(round(outputDouble * 255));
 inactive = alphaMap <= eps;
@@ -116,6 +138,8 @@ end
 diagnostics = struct( ...
     'alphaMap', alphaMap, ...
     'smoothingAlpha', smoothingAlpha, ...
+    'baseSupport', baseSupport, ...
+    'baseDelta', baseDelta, ...
     'whiteningSupport', whiteningSupport, ...
     'toneSupport', toneSupport, ...
     'smoothingDelta', smoothingDelta, ...
@@ -125,6 +149,7 @@ diagnostics = struct( ...
     'toneTargetCb', toneTargetCb, ...
     'toneTargetCr', toneTargetCr, ...
     'targetLuminance', targetLuminance, ...
+    'luminanceDelta', delta, ...
     'outputLuminance', outputLuminance, ...
     'hardProtectionMask', hardProtection, ...
     'backgroundUnchanged', maxChange(inputImage, beautifiedImage, ...
@@ -148,6 +173,26 @@ if (~isnumeric(value) && ~islogical(value)) || ~isreal(value) || ...
         ~isequal(size(value), imageSize) || any(~isfinite(value(:))) || ...
         any(value(:) < 0) || any(value(:) > 1)
     error('beauty:InvalidMasks', 'Mask %s 无效。', name);
+end
+value = double(value);
+end
+
+function validateBaseLuminanceResult(result, imageSize)
+if ~isstruct(result) || ~isscalar(result) || ...
+        ~all(isfield(result, {'supportMap', 'baseDelta'}))
+    error('beauty:InvalidComposeInput', ...
+        'Base 亮度均匀化结果缺少 supportMap 或 baseDelta。');
+end
+readMask(result.supportMap, imageSize, 'baseSupport');
+readSignedDelta(result.baseDelta, imageSize, 'baseDelta');
+end
+
+function value = readSignedDelta(value, imageSize, name)
+if ~isnumeric(value) || ~isreal(value) || ~isequal(size(value), imageSize) || ...
+        any(~isfinite(value(:))) || any(value(:) < -.03) || ...
+        any(value(:) > .03)
+    error('beauty:InvalidComposeInput', ...
+        '有符号 Base 亮度增量 %s 必须位于 [-0.03, 0.03]。', name);
 end
 value = double(value);
 end

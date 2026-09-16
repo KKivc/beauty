@@ -716,7 +716,7 @@ parsing.regions.hair(10:13, 10:30) = 1;
 parsing.regionConfidence.hair(10:13, 10:30) = 1;
 context = prepareBeautyContext(image, [5 5 30 30], parsing, ...
     emptyBodyParsing(size(image, [1 2])));
-verifyEqual(testCase, context.schemaVersion, '3.0');
+verifyEqual(testCase, context.schemaVersion, '3.1');
 verifyEqual(testCase, numel(fieldnames(context.regions)), 19);
 [beautyMasks, ~] = masks.buildBeautyMasks(image, context, [5 5 30 30]);
 verifyEqual(testCase, beautyMasks.hardProtectionMask(12, 20), 1);

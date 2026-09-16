@@ -1,7 +1,8 @@
 function beautyContext = normalizeBeautyContext(inputImage, faceBox, context)
-%NORMALIZEBEAUTYCONTEXT 验证并规范化最终 v3 Beauty Context。
+%NORMALIZEBEAUTYCONTEXT 验证并规范化最终 v3.1 Beauty Context。
 %   处理入口只接受 v3 Context；派生保护 Mask 缺失时由 package 根据
-%   当前图像和语义概率补齐，不再转换或保留 v2 字段。
+%   当前图像和语义概率补齐，不再转换或保留 v2 字段。v3.0 的色度
+%   字段会在此处补齐为 v3.1 的规范字段和兼容 alias。
 
 validateImage(inputImage);
 if nargin < 2
@@ -20,20 +21,30 @@ end
 rejectLegacyFields(context);
 if ~isV3Version(context)
     error('normalizeBeautyContext:UnsupportedVersion', ...
-        '只接受 Beauty Context 版本 3.0。');
+        '只接受 Beauty Context 版本 3.0 或 3.1。');
 end
 
 imageSize = size(inputImage);
 context = normalizeSemanticFields(context, imageSize);
 validateBaseContext(context, imageSize, faceBox);
 
+[chromaProtectionMask, hasChromaProtectionMask] = ...
+    resolveChromaProtectionMask(context, imageSize(1:2), ...
+    'normalizeBeautyContext:InvalidMask', ...
+    'normalizeBeautyContext:ChromaProtectionConflict');
+if hasChromaProtectionMask
+    context.chromaProtectionMask = chromaProtectionMask;
+    context.toneProtectionMask = chromaProtectionMask;
+end
+
 derivedNames = {'textureProtectionMask', 'structureProtectionMask', ...
-    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'strengthMap', 'faceStrengthMap', ...
     'nonFaceStrengthMap'};
-if ~all(isfield(context, derivedNames))
+if ~hasChromaProtectionMask || ~all(isfield(context, derivedNames))
     [beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
     context.textureProtectionMask = beautyMasks.textureProtectionMask;
     context.structureProtectionMask = beautyMasks.structureProtectionMask;
+    context.chromaProtectionMask = beautyMasks.chromaProtectionMask;
     context.toneProtectionMask = beautyMasks.toneProtectionMask;
     context.strengthMap = beautyMasks.strengthMap;
     context.faceStrengthMap = beautyMasks.faceStrengthMap;
@@ -54,6 +65,7 @@ context.faceSkinMask = double(context.faceSkinMask);
 context.nonFaceSkinMask = double(context.nonFaceSkinMask);
 context.textureProtectionMask = double(context.textureProtectionMask);
 context.structureProtectionMask = double(context.structureProtectionMask);
+context.chromaProtectionMask = double(context.chromaProtectionMask);
 context.toneProtectionMask = double(context.toneProtectionMask);
 context.strengthMap = double(context.strengthMap);
 context.faceStrengthMap = double(context.faceStrengthMap);
@@ -61,8 +73,9 @@ context.nonFaceStrengthMap = double(context.nonFaceStrengthMap);
 context.protectionMasks = struct( ...
     'texture', context.textureProtectionMask, ...
     'structure', context.structureProtectionMask, ...
+    'chroma', context.chromaProtectionMask, ...
     'tone', context.toneProtectionMask);
-context.schemaVersion = '3.0';
+context.schemaVersion = '3.1';
 context.imageSize = imageSize;
 context.faceBox = double(faceBox);
 beautyContext = context;
@@ -152,7 +165,8 @@ end
 
 function validateDerivedContext(context, imageSize)
 names = {'textureProtectionMask', 'structureProtectionMask', ...
-    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'chromaProtectionMask', 'toneProtectionMask', 'strengthMap', ...
+    'faceStrengthMap', ...
     'nonFaceStrengthMap'};
 for index = 1:numel(names)
     validateMask(context.(names{index}), imageSize, names{index});

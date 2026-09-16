@@ -1,5 +1,5 @@
 function varargout = buildBeautyMasks(inputImage, beautyContext, faceBox)
-%BUILDBEAUTYMASKS 聚合 v3 的三类保护 Mask、硬保护和连续强度图。
+%BUILDBEAUTYMASKS 聚合 v3.1 的三类保护 Mask、硬保护和连续强度图。
 %   两个输出返回 [beautyMasks, diagnostics]；需要拆分时可请求
 %   [texture, structure, tone, strength, diagnostics]。
 
@@ -14,55 +14,84 @@ if nargin < 3 || isempty(faceBox)
     end
 end
 
-derivedNames = {'textureProtectionMask', 'structureProtectionMask', ...
-    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
-    'nonFaceStrengthMap'};
-hasDerivedMasks = all(isfield(beautyContext, derivedNames));
+imageSize = size(inputImage, 1:2);
+[chromaProtectionMask, hasChromaProtectionMask] = ...
+    resolveChromaProtectionMask(beautyContext, imageSize, ...
+    'masks:InvalidContext', 'masks:ChromaProtectionConflict');
+hasTexture = isfield(beautyContext, 'textureProtectionMask');
+hasStructure = isfield(beautyContext, 'structureProtectionMask');
+hasStrength = isfield(beautyContext, 'strengthMap');
+hasFaceStrength = isfield(beautyContext, 'faceStrengthMap');
+hasNonFaceStrength = isfield(beautyContext, 'nonFaceStrengthMap');
 needsDerivedDiagnostics = nargout == 2 || nargout >= 5;
 [generatedTexture, textureDiagnostics] = ...
     masks.buildTextureProtectionMask(inputImage, beautyContext, faceBox);
-if ~hasDerivedMasks || needsDerivedDiagnostics
+if ~hasStructure || needsDerivedDiagnostics
     [generatedStructure, structureDiagnostics] = ...
         masks.buildStructureProtectionMask(inputImage, beautyContext, faceBox);
+else
+    generatedStructure = [];
+    structureDiagnostics = struct('reusedDerivedMask', true);
+end
+if ~hasChromaProtectionMask || needsDerivedDiagnostics
     [generatedTone, toneDiagnostics] = ...
         masks.buildToneProtectionMask(inputImage, beautyContext, faceBox);
+else
+    generatedTone = [];
+    toneDiagnostics = struct('reusedDerivedMask', true);
+end
+if ~hasStrength || ~hasFaceStrength || ~hasNonFaceStrength || ...
+        needsDerivedDiagnostics
     [generatedStrength, strengthDiagnostics] = ...
         masks.buildBeautyStrengthMap(inputImage, beautyContext, faceBox);
 else
-    generatedStructure = [];
-    generatedTone = [];
     generatedStrength = [];
-    structureDiagnostics = struct('reusedDerivedMask', true);
-    toneDiagnostics = struct('reusedDerivedMask', true);
     strengthDiagnostics = struct('reusedDerivedMask', true);
 end
-if hasDerivedMasks
+if hasTexture
     textureProtectionMask = readMask(beautyContext, ...
-        'textureProtectionMask', size(inputImage, 1:2));
-    structureProtectionMask = readMask(beautyContext, ...
-        'structureProtectionMask', size(inputImage, 1:2));
-    toneProtectionMask = readMask(beautyContext, ...
-        'toneProtectionMask', size(inputImage, 1:2));
-    strengthMap = readMask(beautyContext, ...
-        'strengthMap', size(inputImage, 1:2));
-    strengthDiagnostics.faceStrengthMap = readMask(beautyContext, ...
-        'faceStrengthMap', size(inputImage, 1:2));
-    strengthDiagnostics.nonFaceStrengthMap = readMask(beautyContext, ...
-        'nonFaceStrengthMap', size(inputImage, 1:2));
+        'textureProtectionMask', imageSize);
 else
     textureProtectionMask = generatedTexture;
+end
+if hasStructure
+    structureProtectionMask = readMask(beautyContext, ...
+        'structureProtectionMask', imageSize);
+else
     structureProtectionMask = generatedStructure;
+end
+if hasChromaProtectionMask
+    toneProtectionMask = chromaProtectionMask;
+else
     toneProtectionMask = generatedTone;
+    chromaProtectionMask = toneProtectionMask;
+end
+if hasStrength
+    strengthMap = readMask(beautyContext, ...
+        'strengthMap', imageSize);
+else
     strengthMap = generatedStrength;
+end
+if hasFaceStrength
+    strengthDiagnostics.faceStrengthMap = readMask(beautyContext, ...
+        'faceStrengthMap', imageSize);
+elseif isempty(generatedStrength)
+    strengthDiagnostics.faceStrengthMap = zeros(imageSize);
+end
+if hasNonFaceStrength
+    strengthDiagnostics.nonFaceStrengthMap = readMask(beautyContext, ...
+        'nonFaceStrengthMap', imageSize);
+elseif isempty(generatedStrength)
+    strengthDiagnostics.nonFaceStrengthMap = zeros(imageSize);
 end
 
 hardProtectionMask = validateMask(textureDiagnostics.hardProtectionMask, ...
-    size(inputImage, 1:2), 'hardProtectionMask');
-skinMask = readMask(beautyContext, 'skinMask', size(inputImage, 1:2));
+    imageSize, 'hardProtectionMask');
+skinMask = readMask(beautyContext, 'skinMask', imageSize);
 faceSkinMask = readMask(beautyContext, ...
-    'faceSkinMask', size(inputImage, 1:2));
+    'faceSkinMask', imageSize);
 nonFaceSkinMask = readMask(beautyContext, ...
-    'nonFaceSkinMask', size(inputImage, 1:2));
+    'nonFaceSkinMask', imageSize);
 
 % 通用处理保护只合并纹理、结构和硬保护；色调保护仅约束色度
 % 校正，不能把鼻部整块从磨皮和瑕疵统计中排除。
@@ -72,6 +101,7 @@ protectionMask = min(max(protectionMask, 0), 1);
 beautyMasks = struct( ...
     'textureProtectionMask', textureProtectionMask, ...
     'structureProtectionMask', structureProtectionMask, ...
+    'chromaProtectionMask', chromaProtectionMask, ...
     'toneProtectionMask', toneProtectionMask, ...
     'protectionMask', protectionMask, ...
     'strengthMap', strengthMap, ...
@@ -83,8 +113,12 @@ beautyMasks = struct( ...
     'noseMask', double(textureDiagnostics.noseInterior), ...
     'hardProtectionMask', hardProtectionMask, ...
     'faceBox', double(faceBox), ...
-    'imageSize', [size(inputImage, 1:2), 3]);
+    'imageSize', [imageSize, 3], ...
+    'schemaVersion', '3.1');
 diagnostics = struct( ...
+    'schemaVersion', '3.1', ...
+    'chromaProtectionMask', chromaProtectionMask, ...
+    'toneProtectionMask', toneProtectionMask, ...
     'texture', textureDiagnostics, ...
     'structure', structureDiagnostics, ...
     'tone', toneDiagnostics, ...

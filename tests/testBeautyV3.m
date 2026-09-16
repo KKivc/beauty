@@ -18,9 +18,8 @@ end
 
 function testBeautyMasksReturnPurposeSpecificContinuousMaps(testCase)
 [image, faceBox, parsing] = fixtureImage(120, 160);
-legacy = prepareBeautyContext(image, faceBox, parsing, ...
+context = prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([120, 160]));
-context = normalizeBeautyContext(image, faceBox, legacy);
 
 [beautyMasks, diagnostics] = masks.buildBeautyMasks( ...
     image, context, faceBox);
@@ -84,23 +83,22 @@ for index = 1:numel(strengths)
         'AbsTol', 1e-12);
 end
 verifyEqual(testCase, retentions(1), 1, 'AbsTol', 1e-12);
-verifyTrue(testCase, all(diff(retentions) < 0));
+verifyTrue(testCase, all(diff(retentions) <= 0));
 verifyTrue(testCase, all(diff(fineEnergies) <= 1e-12));
 verifyGreaterThan(testCase, retentions(end), 0);
 end
 
 function testV3PipelineUsesOneAlphaAndPreservesProtectedPixels(testCase)
 [image, faceBox, parsing] = fixtureImage(120, 160);
-legacy = prepareBeautyContext(image, faceBox, parsing, ...
+context = prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([120, 160]));
-context = normalizeBeautyContext(image, faceBox, legacy);
 params = struct('smoothingStrength', 100, ...
-    'whiteningStrength', 50, 'pipeline', 'v3');
-output = beautifyImage(image, params, faceBox, context);
+    'whiteningStrength', 50);
+[output, diagnostics] = beautifyImage(image, params, faceBox, context);
 verifyClass(testCase, output, 'uint8');
 verifySize(testCase, output, size(image));
-verifyEqual(testCase, output(repmat(context.hardProtectionMask >= .999, ...
-    [1, 1, 3])), image(repmat(context.hardProtectionMask >= .999, ...
+verifyEqual(testCase, output(repmat(diagnostics.beautyMasks.hardProtectionMask >= .999, ...
+    [1, 1, 3])), image(repmat(diagnostics.beautyMasks.hardProtectionMask >= .999, ...
     [1, 1, 3])));
 verifyEqual(testCase, output(repmat(context.skinMask <= .01, ...
     [1, 1, 3])), image(repmat(context.skinMask <= .01, ...

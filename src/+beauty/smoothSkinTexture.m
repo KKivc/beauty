@@ -1,5 +1,5 @@
 function [smoothedFrequency, diagnostics] = smoothSkinTexture( ...
-        frequency, beautyMasks, smoothingStrength)
+        frequency, beautyMasks, smoothingStrength, blemishMap)
 %SMOOTHSKINTEXTURE 以连续 Alpha Map 单调衰减 Fine 纹理。
 %   Base 和 Mid 不被修改；最高档保留非零 Fine，结构保护只降低
 %   局部 Alpha，不改变分解尺度。
@@ -36,12 +36,48 @@ toneProtection = validateMask(beautyMasks.toneProtectionMask, ...
     imageSize, 'toneProtectionMask');
 hardProtection = optionalMask(beautyMasks, ...
     'hardProtectionMask', imageSize);
+if nargin < 4 || isempty(blemishMap)
+    blemishMap = zeros(imageSize);
+else
+    blemishMap = validateMask(blemishMap, imageSize, 'blemishMap');
+end
 
 protection = max(cat(3, textureProtection, ...
-    structureProtection, toneProtection, hardProtection), [], 3);
+    structureProtection, hardProtection), [], 3);
+profile = beautySmoothingProfile(smoothingStrength);
 ratio = double(smoothingStrength) / 100;
-fineRetention = 1 - .65 * ratio ^ .85;
-alphaMap = ratio .* strengthMap .* (1 - protection);
+naturalRatio = min(2 * ratio, .75);
+fineRetention = profile.fineRetention;
+processableSkin = strengthMap > .05 & protection < .80;
+if any(processableSkin(:))
+    blemishMean = mean(blemishMap(processableSkin));
+    fineEnergy = mean(abs(frequency.fine(processableSkin)));
+else
+    blemishMean = 0;
+    fineEnergy = 0;
+end
+faceScale = readFaceScale(frequency);
+highStrengthWeight = smoothStep(ratio, .50, .75) .* ...
+    smoothStep(blemishMean, .08, .14);
+smallResolutionWeight = 1 - smoothStep(faceScale, 140, 180);
+textureRetentionFloor = .20 + .35 * smoothStep(fineEnergy, .004, .010) ...
+    - .20 * smallResolutionWeight;
+fineRetention = fineRetention + highStrengthWeight .* ...
+    (textureRetentionFloor - fineRetention);
+smallFaceWeight = (1 - smoothStep(faceScale, 72, 96)) .* ...
+    smoothStep(ratio, .05, .20);
+fineRetention = fineRetention + smallFaceWeight .* (.45 - fineRetention);
+if all(isfield(beautyMasks, {'faceStrengthMap', 'nonFaceStrengthMap'}))
+    nonFaceStrength = validateMask(beautyMasks.nonFaceStrengthMap, ...
+        imageSize, 'nonFaceStrengthMap');
+    effectStrength = naturalRatio .* strengthMap;
+    nonFacePixels = nonFaceStrength > .01;
+    effectStrength(nonFacePixels) = profile.outsideFaceStrength .* ...
+        nonFaceStrength(nonFacePixels);
+else
+    effectStrength = naturalRatio .* strengthMap;
+end
+alphaMap = effectStrength .* (1 - protection);
 alphaMap = min(max(double(alphaMap), 0), 1);
 retentionMap = 1 - alphaMap .* (1 - fineRetention);
 smoothedFine = frequency.fine .* retentionMap;
@@ -57,6 +93,13 @@ smoothedFrequency.retentionMap = retentionMap;
 diagnostics = struct( ...
     'alphaMap', alphaMap, ...
     'fineRetention', fineRetention, ...
+    'profileFineRetention', profile.fineRetention, ...
+    'highStrengthWeight', highStrengthWeight, ...
+    'blemishMean', blemishMean, ...
+    'fineEnergy', fineEnergy, ...
+    'smallResolutionWeight', smallResolutionWeight, ...
+    'textureRetentionFloor', textureRetentionFloor, ...
+    'smallFaceWeight', smallFaceWeight, ...
     'retentionMap', retentionMap, ...
     'protectionMask', protection, ...
     'fineBefore', frequency.fine, ...
@@ -96,3 +139,20 @@ else
 end
 end
 
+function faceScale = readFaceScale(frequency)
+if isfield(frequency, 'faceScale') && isnumeric(frequency.faceScale) && ...
+        isreal(frequency.faceScale) && isscalar(frequency.faceScale) && ...
+        isfinite(frequency.faceScale) && frequency.faceScale > 0
+    faceScale = double(frequency.faceScale);
+elseif isfield(frequency, 'faceBox') && isnumeric(frequency.faceBox) && ...
+        numel(frequency.faceBox) == 4
+    faceScale = min(double(frequency.faceBox(3:4)));
+else
+    faceScale = min(size(frequency.fine));
+end
+end
+
+function value = smoothStep(inputValue, low, high)
+t = min(max((double(inputValue) - low) / max(high - low, eps), 0), 1);
+value = t .^ 2 .* (3 - 2 * t);
+end

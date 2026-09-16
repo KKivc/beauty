@@ -9,9 +9,9 @@ addpath(fullfile(projectRoot, 'src'));
 end
 
 function testNoseFrecklesAreSmoothedMonotonically(testCase)
-[image, faceBox, masks] = syntheticNosePortrait();
+[image, faceBox, noseData] = syntheticNosePortrait();
 context = buildBeautyContextFromParsing(image, faceBox, ...
-    parsingForPortrait(size(image, [1, 2]), masks));
+    parsingForPortrait(size(image, [1, 2]), noseData));
 strengths = [0, 25, 50, 75, 100];
 inputGray = im2double(rgb2gray(image));
 localBase = imgaussfilt(inputGray, 5, 'Padding', 'replicate');
@@ -21,8 +21,8 @@ for index = 1:numel(strengths)
         'smoothingStrength', strengths(index), 'whiteningStrength', 0), ...
         faceBox, context);
     outputGray = im2double(rgb2gray(output));
-    freckleContrast(index) = mean(abs(outputGray(masks.freckle) - ...
-        localBase(masks.freckle)));
+    freckleContrast(index) = mean(abs(outputGray(noseData.freckle) - ...
+        localBase(noseData.freckle)));
 end
 
 verifyTrue(testCase, all(diff(freckleContrast) <= 1e-6), ...
@@ -32,11 +32,13 @@ verifyLessThanOrEqual(testCase, freckleContrast(end), ...
 end
 
 function testNoseStructureAndNostrilEdgeRemainProtected(testCase)
-[image, faceBox, masks] = syntheticNosePortrait();
-parsing = parsingForPortrait(size(image, [1, 2]), masks);
-[~, hard, diagnostics] = buildFeatureProtectionMasks(image, ...
-    parsing.regions, parsing.regionConfidence, min(faceBox(3:4)));
+[image, faceBox, noseData] = syntheticNosePortrait();
+parsing = parsingForPortrait(size(image, [1, 2]), noseData);
 context = buildBeautyContextFromParsing(image, faceBox, parsing);
+[beautyMasks, allDiagnostics] = masks.buildBeautyMasks( ...
+    image, context, faceBox);
+hard = beautyMasks.hardProtectionMask >= .999;
+diagnostics = allDiagnostics.texture;
 output = beautifyImage(image, struct( ...
     'smoothingStrength', 100, 'whiteningStrength', 0), faceBox, context);
 
@@ -44,10 +46,10 @@ inputGray = im2double(rgb2gray(image));
 outputGray = im2double(rgb2gray(output));
 inputLow = imgaussfilt(inputGray, 6, 'Padding', 'replicate');
 outputLow = imgaussfilt(outputGray, 6, 'Padding', 'replicate');
-ridgeContrast = mean(inputLow(masks.noseRidge)) - ...
-    mean(inputLow(masks.cheek));
-outputRidgeContrast = mean(outputLow(masks.noseRidge)) - ...
-    mean(outputLow(masks.cheek));
+ridgeContrast = mean(inputLow(noseData.noseRidge)) - ...
+    mean(inputLow(noseData.cheek));
+outputRidgeContrast = mean(outputLow(noseData.noseRidge)) - ...
+    mean(outputLow(noseData.cheek));
 verifyGreaterThanOrEqual(testCase, outputRidgeContrast, ...
     .85 * ridgeContrast);
 
@@ -68,12 +70,15 @@ verifyEqual(testCase, nnz(hard & diagnostics.noseBoundary), 0, ...
 end
 
 function testNoseHardProtectionDoesNotContainFreckleDots(testCase)
-[image, faceBox, masks] = syntheticNosePortrait();
-parsing = parsingForPortrait(size(image, [1, 2]), masks);
-[~, hard, diagnostics] = buildFeatureProtectionMasks(image, ...
-    parsing.regions, parsing.regionConfidence, min(faceBox(3:4)));
+[image, faceBox, noseData] = syntheticNosePortrait();
+parsing = parsingForPortrait(size(image, [1, 2]), noseData);
+context = buildBeautyContextFromParsing(image, faceBox, parsing);
+[beautyMasks, allDiagnostics] = masks.buildBeautyMasks( ...
+    image, context, faceBox);
+hard = beautyMasks.hardProtectionMask >= .999;
+diagnostics = allDiagnostics.texture;
 
-verifyEqual(testCase, nnz(hard & masks.freckle), 0, ...
+verifyEqual(testCase, nnz(hard & noseData.freckle), 0, ...
     '鼻内雀斑不得进入硬保护。');
 interiorHard = hard & diagnostics.noseInterior & ...
     ~diagnostics.nostrilCore;

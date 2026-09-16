@@ -97,7 +97,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
             app.clearLoadedImage();
             [~, baseName, extension] = fileparts(fileName);
             app.sourceImage = inputImage;
-            app.previewScale = min(1, 800 / max(size(inputImage, 1), size(inputImage, 2)));
+            app.previewScale = min(1, 640 / max(size(inputImage, 1), size(inputImage, 2)));
             if app.previewScale < 1
                 app.previewImage = imresize(inputImage, app.previewScale, 'bilinear');
             else
@@ -139,13 +139,13 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 app.previewFaceBox = detectedFaceBox;
                 app.faceBox = app.scaleFaceBox(detectedFaceBox, ...
                     1 / app.previewScale, size(app.sourceImage));
-                legacyContext = prepareBeautyContext( ...
+                preparedContext = prepareBeautyContext( ...
                     app.previewImage, app.previewFaceBox, ...
                     detectionDetails.selectedParsing, ...
                     struct('rotationDegrees', ...
                     detectionDetails.orientationDegrees));
                 app.previewContext = normalizeBeautyContext( ...
-                    app.previewImage, app.previewFaceBox, legacyContext);
+                    app.previewImage, app.previewFaceBox, preparedContext);
                 app.beautyContext = app.previewContext;
             catch exception
                 app.clearDetectionResult();

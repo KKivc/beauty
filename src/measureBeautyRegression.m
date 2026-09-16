@@ -21,6 +21,7 @@ elseif ~isnumeric(elapsedSeconds) || ~isreal(elapsedSeconds) || ...
         '处理耗时必须是非负数值标量。');
 end
 beautyContext = normalizeBeautyContext(inputImage, faceBox, beautyContext);
+[beautyMasks, ~] = masks.buildBeautyMasks(inputImage, beautyContext, faceBox);
 
 config = metricConfig(faceBox);
 inputY = rgb2ycbcr(im2double(inputImage));
@@ -34,7 +35,7 @@ outputDetail = outputY - outputLow;
 
 skinMask = beautyContext.skinMask >= config.skinThreshold;
 processableSkin = skinMask & ...
-    beautyContext.featureProtectionMask < config.protectionThreshold;
+    beautyMasks.protectionMask < config.protectionThreshold;
 if ~any(processableSkin(:))
     processableSkin = skinMask;
 end
@@ -59,7 +60,7 @@ metrics.noseStructureInput = structureStatistic(inputLow, noseRoi, config);
 metrics.outsideStructureInput = structureStatistic(inputLow, outsideRoi, config);
 metrics.backgroundMaxChange = maxChange(inputImage, outputImage, ~skinMask);
 metrics.hardProtectionMaxChange = maxChange(inputImage, outputImage, ...
-    beautyContext.hardProtectionMask >= .999);
+    beautyMasks.hardProtectionMask >= .999);
 metrics.elapsedSeconds = elapsedSeconds;
 metrics.outputSize = size(outputImage);
 metrics.outputClass = class(outputImage);

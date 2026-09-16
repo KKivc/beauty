@@ -27,10 +27,11 @@ image = uint8(ones(80, 100, 3) * 128);
 parsing = syntheticParsing([80 100]);
 context = prepareBeautyContext(image, [20 15 60 50], parsing, ...
     emptyBodyParsing(size(image, [1 2])));
-verifyEqual(testCase, context.schemaVersion, '2.0');
+verifyEqual(testCase, context.schemaVersion, '3.0');
 verifyEqual(testCase, numel(fieldnames(context.regions)), 19);
-verifyEqual(testCase, context.hardProtectionMask(35, 45), 1);
-verifyEqual(testCase, context.hardProtectionMask(5, 5), 0);
+[beautyMasks, ~] = masks.buildBeautyMasks(image, context, [20 15 60 50]);
+verifyEqual(testCase, beautyMasks.hardProtectionMask(35, 45), 1);
+verifyEqual(testCase, beautyMasks.hardProtectionMask(5, 5), 0);
 end
 
 function testInvalidInjectedMask(testCase)
@@ -55,7 +56,7 @@ context = prepareBeautyContext(image, [10 8 30 24], parsing, ...
     emptyBodyParsing(size(image, [1 2])));
 resized = resizeBeautyContext(context, [80 120 3], [20 16 60 48]);
 verifySize(testCase, resized.skinMask, [80 120]);
-verifySize(testCase, resized.featureProtectionMask, [80 120]);
+verifySize(testCase, resized.textureProtectionMask, [80 120]);
 verifyEqual(testCase, resized.imageSize, [80 120 3]);
 verifyEqual(testCase, resized.faceBox, [20 16 60 48]);
 end
@@ -76,7 +77,7 @@ context = prepareBeautyContext(image, [10 8 30 24], ...
     struct('regions', regions, 'regionConfidence', confidence), ...
     emptyBodyParsing(size(image, [1 2])));
 resized = resizeBeautyContext(context, [2500 2000 3], [500 400 1200 1600]);
-% 保存路径需要 nose 概率维持预览与成图行为一致；只上采样被消费的类别。
+% 无目标原图时保留完整语义概率，供后续保存重建使用。
 verifyTrue(testCase, isfield(resized, 'regions'));
 verifyTrue(testCase, isfield(resized.regions, 'nose'));
 verifySize(testCase, resized.regions.nose, [2500 2000]);
@@ -84,10 +85,15 @@ verifyTrue(testCase, isfield(resized, 'regionConfidence'));
 verifyFalse(testCase, isfield(resized, 'geometry'));
 verifyTrue(testCase, isfield(resized, 'bodySkinMask'));
 verifySize(testCase, resized.bodySkinMask, [2500 2000]);
-% 硬保护改用双线性上采样：边界为连续软值，核心内部仍为 1。
-verifyTrue(testCase, all(resized.hardProtectionMask(:) >= 0) && ...
-    all(resized.hardProtectionMask(:) <= 1));
-verifyEqual(testCase, max(resized.hardProtectionMask(:)), 1);
+targetImage = imresize(image, [2500, 2000], 'bilinear');
+rebuiltContext = resizeBeautyContext(context, [2500, 2000, 3], ...
+    [500 400 1200 1600], targetImage);
+[resizedMasks, ~] = masks.buildBeautyMasks(targetImage, rebuiltContext, ...
+    [500 400 1200 1600]);
+% 硬保护由目标图像上的 package 重新生成。
+verifyTrue(testCase, all(resizedMasks.hardProtectionMask(:) >= 0) && ...
+    all(resizedMasks.hardProtectionMask(:) <= 1));
+verifyEqual(testCase, max(resizedMasks.hardProtectionMask(:)), 1);
 memoryInfo = whos('resized');
 verifyLessThan(testCase, memoryInfo.bytes, 400e6);
 verifyError(testCase, @() resizeBeautyContext(context, [80.5 120 3], ...

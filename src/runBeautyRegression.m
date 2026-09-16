@@ -3,27 +3,43 @@ function report = runBeautyRegression(varargin)
 %   report = runBeautyRegression() 只使用仓库内生成的合成图。
 %   可选参数：
 %     'PrivateSmoke'：不保存路径、EXIF 或人物信息的输入结构体数组；
-%     'Pipeline'：选择 legacy 或 v3，默认是 legacy；
 %     'Assert'：为 true 时发现回归即抛出明确错误。
 
-[privateSmoke, shouldAssert, pipeline] = readOptions(varargin{:});
+[privateSmoke, shouldAssert] = readOptions(varargin{:});
 fixture = buildSyntheticFixture();
 context = normalizeBeautyContext(fixture.image, fixture.faceBox, ...
     fixture.context);
 strengths = [0, 25, 50, 75, 100];
 smoothing = repmat(emptyMetrics(), 1, numel(strengths));
 whitening = repmat(emptyMetrics(), 1, numel(strengths));
+[regressionMasks, ~] = masks.buildBeautyMasks(fixture.image, ...
+    context, fixture.faceBox);
+[regressionFrequency, ~] = beauty.decomposeSkinFrequency( ...
+    fixture.image, fixture.faceBox);
+[regressionBlemishMap, ~] = beauty.buildBlemishMap( ...
+    fixture.image, regressionFrequency, regressionMasks);
+[~, baselineRepair] = beauty.repairSkinBlemishes( ...
+    regressionFrequency, regressionMasks, regressionBlemishMap, 0);
 
 for index = 1:numel(strengths)
-    smoothingParams = makeParams(strengths(index), 0, pipeline);
+    smoothingParams = makeParams(strengths(index), 0);
     startTime = tic;
-    smoothingOutput = beautifyImage(fixture.image, smoothingParams, ...
+    [smoothingOutput, smoothingDetails] = beautifyImage(fixture.image, smoothingParams, ...
         fixture.faceBox, context);
     elapsedSeconds = toc(startTime);
     smoothing(index) = measureBeautyRegression(fixture.image, ...
         smoothingOutput, context, fixture.faceBox, elapsedSeconds);
+    if index == 1
+        smoothing(index).textureEnergy = baselineRepair.fineEnergyAfter;
+        smoothing(index).blemishEnergy = baselineRepair.blemishEnergyAfter;
+    else
+        smoothing(index).textureEnergy = ...
+            smoothingDetails.repair.fineEnergyAfter;
+        smoothing(index).blemishEnergy = ...
+            smoothingDetails.repair.blemishEnergyAfter;
+    end
 
-    whiteningParams = makeParams(0, strengths(index), pipeline);
+    whiteningParams = makeParams(0, strengths(index));
     startTime = tic;
     whiteningOutput = beautifyImage(fixture.image, whiteningParams, ...
         fixture.faceBox, context);
@@ -86,7 +102,7 @@ violations = addViolation(violations, ...
     '处理结果没有保持输入尺寸或三通道属性。');
 
 report = struct( ...
-    'pipeline', pipeline, ...
+    'pipeline', 'v3', ...
     'strengths', strengths, ...
     'baseline', baseline, ...
     'smoothing', smoothing, ...
@@ -94,17 +110,16 @@ report = struct( ...
     'thresholds', thresholds, ...
     'violations', {violations}, ...
     'passed', isempty(violations), ...
-    'privateSmoke', runPrivateSmoke(privateSmoke, pipeline));
+    'privateSmoke', runPrivateSmoke(privateSmoke));
 if shouldAssert && ~report.passed
     error('runBeautyRegression:RegressionFailed', ...
         '回归基线检查失败：%s', strjoin(report.violations, '；'));
 end
 end
 
-function [privateSmoke, shouldAssert, pipeline] = readOptions(varargin)
+function [privateSmoke, shouldAssert] = readOptions(varargin)
 privateSmoke = struct([]);
 shouldAssert = false;
-pipeline = 'legacy';
 if mod(numel(varargin), 2) ~= 0
     error('runBeautyRegression:InvalidOptions', ...
         '选项必须使用名称和值成对传入。');
@@ -133,17 +148,6 @@ for index = 1:2:numel(varargin)
                 error('runBeautyRegression:InvalidOptions', ...
                 'Assert 必须是逻辑标量。');
             end
-        case 'pipeline'
-            pipeline = varargin{index + 1};
-            if isstring(pipeline) && isscalar(pipeline)
-                pipeline = char(pipeline);
-            end
-            if ~ischar(pipeline) || size(pipeline, 1) ~= 1 || ...
-                    ~ismember(lower(pipeline), {'legacy', 'v3'})
-                error('runBeautyRegression:InvalidOptions', ...
-                    'Pipeline 必须是 legacy 或 v3。');
-            end
-            pipeline = lower(pipeline);
         otherwise
             error('runBeautyRegression:InvalidOptions', ...
                 '不支持的回归选项：%s。', name);
@@ -151,12 +155,9 @@ for index = 1:2:numel(varargin)
 end
 end
 
-function params = makeParams(smoothingStrength, whiteningStrength, pipeline)
+function params = makeParams(smoothingStrength, whiteningStrength)
 params = struct('smoothingStrength', smoothingStrength, ...
     'whiteningStrength', whiteningStrength);
-if strcmp(pipeline, 'v3')
-    params.pipeline = 'v3';
-end
 end
 
 function fixture = buildSyntheticFixture
@@ -215,13 +216,13 @@ parsing.regions.leftEye = double(hardFeature);
 parsing.regionConfidence.leftEye = double(hardFeature);
 bodyOptions = struct('probabilities', ...
     zeros([imageSize, 20], 'single'));
-legacyContext = prepareBeautyContext(sourceImage, faceBox, parsing, ...
+context = prepareBeautyContext(sourceImage, faceBox, parsing, ...
     bodyOptions);
 fixture = struct('image', sourceImage, 'faceBox', faceBox, ...
-    'context', legacyContext);
+    'context', context);
 end
 
-function results = runPrivateSmoke(inputs, pipeline)
+function results = runPrivateSmoke(inputs)
 results = struct([]);
 if isempty(inputs)
     return;
@@ -261,9 +262,9 @@ for index = 1:numel(inputs)
     whitening = repmat(emptyMetrics(), 1, numel(strengths));
     for strengthIndex = 1:numel(strengths)
         smoothingOutput = beautifyImage(image, makeParams( ...
-            strengths(strengthIndex), 0, pipeline), entry.faceBox, context);
+            strengths(strengthIndex), 0), entry.faceBox, context);
         whiteningOutput = beautifyImage(image, makeParams( ...
-            0, strengths(strengthIndex), pipeline), entry.faceBox, context);
+            0, strengths(strengthIndex)), entry.faceBox, context);
         smoothing(strengthIndex) = measureBeautyRegression( ...
             image, smoothingOutput, context, entry.faceBox);
         whitening(strengthIndex) = measureBeautyRegression( ...

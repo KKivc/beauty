@@ -1,33 +1,9 @@
 function beautyContext = normalizeBeautyContext(inputImage, faceBox, context)
-%NORMALIZEBEAUTYCONTEXT 统一验证并转换可消费的 Beauty Context。
-%   无版本 Context 和 2.0 Context 按兼容规则转换为 3.0；3.0 Context
-%   必须显式提供 v3 字段。转换结果保留旧字段，供尚未迁移的消费者使用。
+%NORMALIZEBEAUTYCONTEXT 验证并规范化最终 v3 Beauty Context。
+%   处理入口只接受 v3 Context；派生保护 Mask 缺失时由 package 根据
+%   当前图像和语义概率补齐，不再转换或保留 v2 字段。
 
-% 同时接受 normalizeBeautyContext(context, imageSizeOrImage, faceBox)，
-% 方便旧的验证调用方迁移到统一入口。
-if isstruct(inputImage) && nargin >= 3 && isnumeric(context) && ...
-        isreal(context) && isequal(size(context), [1, 4])
-    legacyContext = inputImage;
-    targetFaceBox = context;
-    if isa(faceBox, 'uint8')
-        inputImage = faceBox;
-    elseif isnumeric(faceBox) && isreal(faceBox) && numel(faceBox) >= 2 && ...
-            all(isfinite(faceBox(1:2))) && all(faceBox(1:2) >= 1) && ...
-            all(faceBox(1:2) == round(faceBox(1:2)))
-        inputImage = zeros([faceBox(1:2), 3], 'uint8');
-    else
-        error('normalizeBeautyContext:InvalidImage', ...
-            '第二个参数必须是输入图像或图像尺寸。');
-    end
-    faceBox = targetFaceBox;
-    context = legacyContext;
-end
-
-if nargin < 1 || ~isa(inputImage, 'uint8') || ~isreal(inputImage) || ...
-        ndims(inputImage) ~= 3 || size(inputImage, 3) ~= 3
-    error('normalizeBeautyContext:InvalidImage', ...
-        '输入图像必须是 uint8 三通道 RGB 图像。');
-end
+validateImage(inputImage);
 if nargin < 2
     error('normalizeBeautyContext:InvalidFaceBox', ...
         '必须提供位于图像范围内的 [x y width height] 人脸框。');
@@ -41,143 +17,123 @@ if ~isstruct(context) || ~isscalar(context)
     error('normalizeBeautyContext:InvalidContext', ...
         'Beauty Context 必须是标量结构体。');
 end
+rejectLegacyFields(context);
+if ~isV3Version(context)
+    error('normalizeBeautyContext:UnsupportedVersion', ...
+        '只接受 Beauty Context 版本 3.0。');
+end
 
 imageSize = size(inputImage);
-version = readSchemaVersion(context);
-switch version
-    case 2
-        beautyContext = convertLegacyContext(context, inputImage, faceBox);
-    case 3
-        validateV3Context(context, imageSize, faceBox);
-        beautyContext = context;
-    otherwise
-        error('normalizeBeautyContext:UnsupportedVersion', ...
-            '不支持 Beauty Context 版本 "%s"，只接受 2.0 或 3.0。', ...
-            versionLabel(context));
+context = normalizeSemanticFields(context, imageSize);
+validateBaseContext(context, imageSize, faceBox);
+
+derivedNames = {'textureProtectionMask', 'structureProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'nonFaceStrengthMap'};
+if ~all(isfield(context, derivedNames))
+    [beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
+    context.textureProtectionMask = beautyMasks.textureProtectionMask;
+    context.structureProtectionMask = beautyMasks.structureProtectionMask;
+    context.toneProtectionMask = beautyMasks.toneProtectionMask;
+    context.strengthMap = beautyMasks.strengthMap;
+    context.faceStrengthMap = beautyMasks.faceStrengthMap;
+    context.nonFaceStrengthMap = beautyMasks.nonFaceStrengthMap;
+end
+validateDerivedContext(context, imageSize);
+
+if isfield(context, 'bodySkinMask')
+    validateMask(context.bodySkinMask, imageSize, 'bodySkinMask');
+    context.bodySkinMask = double(context.bodySkinMask);
+end
+if ~isfield(context, 'geometry')
+    context.geometry = struct('contours', struct(), 'landmarks', zeros(0, 2));
 end
 
-beautyContext = finalizeContext(beautyContext, inputImage, faceBox);
+context.skinMask = double(context.skinMask);
+context.faceSkinMask = double(context.faceSkinMask);
+context.nonFaceSkinMask = double(context.nonFaceSkinMask);
+context.textureProtectionMask = double(context.textureProtectionMask);
+context.structureProtectionMask = double(context.structureProtectionMask);
+context.toneProtectionMask = double(context.toneProtectionMask);
+context.strengthMap = double(context.strengthMap);
+context.faceStrengthMap = double(context.faceStrengthMap);
+context.nonFaceStrengthMap = double(context.nonFaceStrengthMap);
+context.protectionMasks = struct( ...
+    'texture', context.textureProtectionMask, ...
+    'structure', context.structureProtectionMask, ...
+    'tone', context.toneProtectionMask);
+context.schemaVersion = '3.0';
+context.imageSize = imageSize;
+context.faceBox = double(faceBox);
+beautyContext = context;
 end
 
-function label = versionLabel(context)
-value = context.schemaVersion;
-if isstring(value) && isscalar(value)
-    label = char(value);
-elseif ischar(value) && size(value, 1) == 1
-    label = value;
-elseif isnumeric(value)
-    label = mat2str(value);
-else
-    label = class(value);
+function rejectLegacyFields(context)
+legacyFields = {'featureProtectionMask', 'hardProtectionMask'};
+present = legacyFields(isfield(context, legacyFields));
+if ~isempty(present)
+    error('normalizeBeautyContext:LegacyFields', ...
+        'Beauty Context 包含已移除的旧字段：%s。', strjoin(present, '、'));
 end
 end
 
-function version = readSchemaVersion(context)
+function valid = isV3Version(context)
 if ~isfield(context, 'schemaVersion') || isempty(context.schemaVersion)
-    version = 2;
+    valid = false;
     return;
 end
-
 value = context.schemaVersion;
-if isnumeric(value) && isreal(value) && isscalar(value) && isfinite(value)
-    if value >= 3 && value < 4
-        version = 3;
-    elseif value >= 2 && value < 3
-        version = 2;
-    else
-        version = value;
-    end
+if isnumeric(value) && isreal(value) && isscalar(value) && ...
+        isfinite(value)
+    valid = value >= 3 && value < 4;
     return;
 end
 if isstring(value) && isscalar(value)
     value = char(value);
 end
-if ~ischar(value) || size(value, 1) ~= 1
-    version = NaN;
-    return;
+valid = ischar(value) && size(value, 1) == 1 && startsWith(value, '3');
 end
-if startsWith(value, '3')
-    version = 3;
-elseif startsWith(value, '2')
-    version = 2;
+
+function context = normalizeSemanticFields(context, imageSize)
+names = faceParsingClassNames();
+if isfield(context, 'semanticProbabilities')
+    validateSemanticField(context.semanticProbabilities, imageSize, ...
+        'semanticProbabilities');
+    regions = unstackSemantics(context.semanticProbabilities, names);
+elseif isfield(context, 'regions')
+    regions = normalizeSemanticStruct(context.regions, imageSize, 'regions');
 else
-    version = value;
-end
-end
-
-function context = convertLegacyContext(context, inputImage, faceBox)
-validateBaseContext(context, size(inputImage), faceBox);
-
-context.skinMask = double(context.skinMask);
-context.faceSkinMask = double(context.faceSkinMask);
-context.featureProtectionMask = double(context.featureProtectionMask);
-if isfield(context, 'hardProtectionMask')
-    validateMask(context.hardProtectionMask, size(inputImage), ...
-        'hardProtectionMask');
-    context.hardProtectionMask = double(context.hardProtectionMask);
-else
-    context.hardProtectionMask = double(context.featureProtectionMask >= .999);
+    error('normalizeBeautyContext:InvalidSemantic', ...
+        'Beauty Context 缺少语义概率。');
 end
 
-[regions, confidence] = readLegacySemantics(context, size(inputImage));
-context.regions = regions;
-context.regionConfidence = confidence;
-context.semanticProbabilities = stackSemantics(regions);
-context.semanticConfidence = stackSemantics(confidence);
-context.nonFaceSkinMask = min(max(context.skinMask - ...
-    min(context.skinMask, context.faceSkinMask), 0), 1);
-if isfield(context, 'bodySkinMask')
-    validateMask(context.bodySkinMask, size(inputImage), 'bodySkinMask');
-    context.bodySkinMask = double(context.bodySkinMask);
-else
-    context.bodySkinMask = context.nonFaceSkinMask;
-end
-
-[textureProtection, structureProtection, toneProtection] = ...
-    deriveProtectionMasks(context, inputImage, faceBox);
-context.textureProtectionMask = textureProtection;
-context.structureProtectionMask = structureProtection;
-context.toneProtectionMask = toneProtection;
-context.schemaVersion = '3.0';
-end
-
-function validateV3Context(context, imageSize, faceBox)
-requiredFields = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
-    'featureProtectionMask', 'hardProtectionMask', ...
-    'textureProtectionMask', 'structureProtectionMask', ...
-    'toneProtectionMask', 'semanticProbabilities', 'imageSize', 'faceBox'};
-if ~all(isfield(context, requiredFields))
-    error('normalizeBeautyContext:InvalidContext', ...
-        '3.0 Beauty Context 缺少必需字段。');
-end
-validateBaseContext(context, imageSize, faceBox);
-validateMask(context.nonFaceSkinMask, imageSize, 'nonFaceSkinMask');
-validateMask(context.hardProtectionMask, imageSize, 'hardProtectionMask');
-validateMask(context.textureProtectionMask, imageSize, ...
-    'textureProtectionMask');
-validateMask(context.structureProtectionMask, imageSize, ...
-    'structureProtectionMask');
-validateMask(context.toneProtectionMask, imageSize, 'toneProtectionMask');
-validateSemanticField(context.semanticProbabilities, imageSize, ...
-    'semanticProbabilities');
 if isfield(context, 'semanticConfidence')
     validateSemanticField(context.semanticConfidence, imageSize, ...
         'semanticConfidence');
+    confidence = unstackSemantics(context.semanticConfidence, names);
+elseif isfield(context, 'regionConfidence')
+    confidence = normalizeSemanticStruct(context.regionConfidence, ...
+        imageSize, 'regionConfidence');
+else
+    confidence = regions;
 end
+
+context.regions = regions;
+context.regionConfidence = confidence;
+context.semanticProbabilities = stackSemantics(regions, names);
+context.semanticConfidence = stackSemantics(confidence, names);
 end
 
 function validateBaseContext(context, imageSize, faceBox)
-requiredFields = {'skinMask', 'faceSkinMask', 'featureProtectionMask', ...
+requiredFields = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
     'imageSize', 'faceBox'};
 if ~all(isfield(context, requiredFields))
     error('normalizeBeautyContext:InvalidContext', ...
         'Beauty Context 缺少基础字段。');
 end
-expectedSize = imageSize(1:2);
 validateMask(context.skinMask, imageSize, 'skinMask');
 validateMask(context.faceSkinMask, imageSize, 'faceSkinMask');
-validateMask(context.featureProtectionMask, imageSize, ...
-    'featureProtectionMask');
+validateMask(context.nonFaceSkinMask, imageSize, 'nonFaceSkinMask');
 if ~isnumeric(context.imageSize) || ~isreal(context.imageSize) || ...
         ~isequal(size(context.imageSize), [1, 3]) || ...
         any(~isfinite(context.imageSize)) || ...
@@ -192,94 +148,39 @@ if ~isnumeric(context.faceBox) || ~isreal(context.faceBox) || ...
     error('normalizeBeautyContext:SizeMismatch', ...
         'Beauty Context 的 faceBox 与当前人脸框不匹配。');
 end
-if ~isequal(size(context.skinMask), expectedSize)
-    error('normalizeBeautyContext:SizeMismatch', ...
-        'Beauty Context 的 Mask 尺寸与输入图像不匹配。');
+end
+
+function validateDerivedContext(context, imageSize)
+names = {'textureProtectionMask', 'structureProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'nonFaceStrengthMap'};
+for index = 1:numel(names)
+    validateMask(context.(names{index}), imageSize, names{index});
 end
 end
 
-function validateMask(value, imageSize, name)
-if ~isnumeric(value) && ~islogical(value)
-    error('normalizeBeautyContext:InvalidMask', ...
-        '字段 %s 必须是数值 Mask。', name);
-end
-if ~isreal(value) || ~isequal(size(value), imageSize(1:2)) || ...
-        any(~isfinite(value(:))) || any(value(:) < 0) || any(value(:) > 1)
-    error('normalizeBeautyContext:InvalidMask', ...
-        '字段 %s 的尺寸或取值范围无效。', name);
-end
-end
-
-function [regions, confidence] = readLegacySemantics(context, imageSize)
-names = faceParsingClassNames();
-regions = emptySemanticStruct(imageSize(1:2));
-confidence = emptySemanticStruct(imageSize(1:2));
-if isfield(context, 'semanticProbabilities')
-    probabilities = context.semanticProbabilities;
-    validateSemanticField(probabilities, imageSize, 'semanticProbabilities');
-    regions = unstackSemantics(probabilities, names);
-elseif isfield(context, 'regions')
-    regions = normalizeSemanticStruct(context.regions, imageSize, ...
-        'regions', false);
-end
-if isfield(context, 'semanticConfidence')
-    confidenceValues = context.semanticConfidence;
-    validateSemanticField(confidenceValues, imageSize, 'semanticConfidence');
-    confidence = unstackSemantics(confidenceValues, names);
-elseif isfield(context, 'regionConfidence')
-    confidence = normalizeSemanticStruct(context.regionConfidence, ...
-        imageSize, 'regionConfidence', false);
-else
-    confidence = regions;
-end
-end
-
-function [regions, confidence] = readV3Semantics(context, imageSize)
-names = faceParsingClassNames();
-if isfield(context, 'semanticProbabilities')
-    values = context.semanticProbabilities;
-    validateSemanticField(values, imageSize, 'semanticProbabilities');
-    regions = unstackSemantics(values, names);
-else
-    regions = normalizeSemanticStruct(context.regions, imageSize, ...
-        'regions', true);
-end
-if isfield(context, 'semanticConfidence')
-    values = context.semanticConfidence;
-    validateSemanticField(values, imageSize, 'semanticConfidence');
-    confidence = unstackSemantics(values, names);
-elseif isfield(context, 'regionConfidence')
-    confidence = normalizeSemanticStruct(context.regionConfidence, ...
-        imageSize, 'regionConfidence', true);
-else
-    confidence = regions;
-end
-end
-
-function values = normalizeSemanticStruct(value, imageSize, fieldName, requireAll)
+function values = normalizeSemanticStruct(value, imageSize, fieldName)
 names = faceParsingClassNames();
 if ~isstruct(value) || ~isscalar(value)
     error('normalizeBeautyContext:InvalidSemantic', ...
         '字段 %s 必须是语义概率结构体。', fieldName);
 end
-values = emptySemanticStruct(imageSize(1:2));
+values = struct();
 for index = 1:numel(names)
     name = names{index};
     if ~isfield(value, name)
-        if requireAll
-            error('normalizeBeautyContext:InvalidSemantic', ...
-                '字段 %s 缺少类别 %s。', fieldName, name);
-        end
-        continue;
+        error('normalizeBeautyContext:InvalidSemantic', ...
+            '字段 %s 缺少类别 %s。', fieldName, name);
     end
-    validateMask(value.(name), imageSize, [fieldName, '.', name]);
-    values.(name) = double(value.(name));
+    values.(name) = validateMask(value.(name), imageSize, ...
+        [fieldName, '.', name]);
 end
 end
 
 function validateSemanticField(value, imageSize, name)
 if ~isnumeric(value) || ~isreal(value) || ndims(value) ~= 3 || ...
-        size(value, 1) ~= imageSize(1) || size(value, 2) ~= imageSize(2) || ...
+        size(value, 1) ~= imageSize(1) || ...
+        size(value, 2) ~= imageSize(2) || ...
         size(value, 3) ~= numel(faceParsingClassNames()) || ...
         any(~isfinite(value(:))) || any(value(:) < 0) || any(value(:) > 1)
     error('normalizeBeautyContext:InvalidSemantic', ...
@@ -287,8 +188,7 @@ if ~isnumeric(value) || ~isreal(value) || ndims(value) ~= 3 || ...
 end
 end
 
-function values = stackSemantics(semanticStruct)
-names = faceParsingClassNames();
+function values = stackSemantics(semanticStruct, names)
 first = semanticStruct.(names{1});
 values = zeros([size(first), numel(names)], 'single');
 for index = 1:numel(names)
@@ -303,86 +203,28 @@ for index = 1:numel(names)
 end
 end
 
-function semanticStruct = emptySemanticStruct(imageSize)
-names = faceParsingClassNames();
-semanticStruct = struct();
-for index = 1:numel(names)
-    semanticStruct.(names{index}) = zeros(imageSize);
+function value = validateMask(value, imageSize, name)
+if (~isnumeric(value) && ~islogical(value)) || ~isreal(value) || ...
+        ~isequal(size(value), imageSize(1:2)) || ...
+        any(~isfinite(value(:))) || any(value(:) < 0) || any(value(:) > 1)
+    error('normalizeBeautyContext:InvalidMask', ...
+        '字段 %s 的尺寸或取值范围无效。', name);
 end
-end
-
-function [textureProtection, structureProtection, toneProtection] = ...
-        deriveProtectionMasks(context, inputImage, faceBox)
-regions = context.regions;
-confidence = context.regionConfidence;
-names = faceParsingClassNames();
-hasAllSemantics = all(isfield(regions, names)) && ...
-    all(isfield(confidence, names));
-if ~hasAllSemantics
-    textureProtection = double(context.featureProtectionMask);
-    structureProtection = textureProtection;
-    toneProtection = textureProtection;
-    return;
+value = double(value);
 end
 
-[beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
-textureProtection = beautyMasks.textureProtectionMask;
-structureProtection = beautyMasks.structureProtectionMask;
-toneProtection = beautyMasks.toneProtectionMask;
+function validateImage(inputImage)
+if ~isa(inputImage, 'uint8') || ~isreal(inputImage) || ...
+        ndims(inputImage) ~= 3 || size(inputImage, 3) ~= 3
+    error('normalizeBeautyContext:InvalidImage', ...
+        '输入图像必须是 uint8 三通道 RGB 图像。');
 end
-
-function context = finalizeContext(context, inputImage, faceBox)
-imageSize = size(inputImage);
-[regions, confidence] = readV3Semantics(context, imageSize);
-context.regions = regions;
-context.regionConfidence = confidence;
-context.semanticProbabilities = stackSemantics(regions);
-context.semanticConfidence = stackSemantics(confidence);
-context.skinMask = double(context.skinMask);
-context.faceSkinMask = double(context.faceSkinMask);
-context.nonFaceSkinMask = double(context.nonFaceSkinMask);
-context.featureProtectionMask = double(context.featureProtectionMask);
-context.hardProtectionMask = double(context.hardProtectionMask);
-context.textureProtectionMask = double(context.textureProtectionMask);
-context.structureProtectionMask = double(context.structureProtectionMask);
-context.toneProtectionMask = double(context.toneProtectionMask);
-if isfield(context, 'strengthMap') && ...
-        isfield(context, 'faceStrengthMap') && ...
-        isfield(context, 'nonFaceStrengthMap')
-    validateMask(context.strengthMap, imageSize, 'strengthMap');
-    validateMask(context.faceStrengthMap, imageSize, 'faceStrengthMap');
-    validateMask(context.nonFaceStrengthMap, imageSize, ...
-        'nonFaceStrengthMap');
-    context.strengthMap = double(context.strengthMap);
-    context.faceStrengthMap = double(context.faceStrengthMap);
-    context.nonFaceStrengthMap = double(context.nonFaceStrengthMap);
-else
-    [beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
-    context.strengthMap = beautyMasks.strengthMap;
-    context.faceStrengthMap = beautyMasks.faceStrengthMap;
-    context.nonFaceStrengthMap = beautyMasks.nonFaceStrengthMap;
-end
-if ~isfield(context, 'bodySkinMask')
-    context.bodySkinMask = context.nonFaceSkinMask;
-else
-    context.bodySkinMask = double(context.bodySkinMask);
-end
-if ~isfield(context, 'geometry')
-    context.geometry = struct('contours', struct(), 'landmarks', zeros(0, 2));
-end
-context.protectionMasks = struct( ...
-    'texture', context.textureProtectionMask, ...
-    'structure', context.structureProtectionMask, ...
-    'tone', context.toneProtectionMask);
-context.schemaVersion = '3.0';
-context.imageSize = imageSize;
-context.faceBox = double(faceBox);
 end
 
 function validateFaceBox(faceBox, imageWidth, imageHeight)
-if ~isnumeric(faceBox) || ~isreal(faceBox) || ~isequal(size(faceBox), [1, 4]) || ...
-        any(~isfinite(faceBox)) || faceBox(1) < 1 || faceBox(2) < 1 || ...
-        faceBox(3) <= 0 || faceBox(4) <= 0 || ...
+if ~isnumeric(faceBox) || ~isreal(faceBox) || ...
+        ~isequal(size(faceBox), [1, 4]) || any(~isfinite(faceBox)) || ...
+        faceBox(1) < 1 || faceBox(2) < 1 || any(faceBox(3:4) <= 0) || ...
         faceBox(1) + faceBox(3) - 1 > imageWidth || ...
         faceBox(2) + faceBox(4) - 1 > imageHeight
     error('normalizeBeautyContext:InvalidFaceBox', ...

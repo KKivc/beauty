@@ -9,16 +9,6 @@ if nargin < 4
     error('beauty:InvalidBlemishRepair', ...
         '瑕疵修复需要频率、Beauty Masks、瑕疵图和磨皮强度。');
 end
-% 兼容按“频率、瑕疵图、Mask、强度”阅读的调用顺序；两种形式
-% 都指向同一个明确的参数，不会改变检测或修复规则。
-if (~isstruct(beautyMasks) && isstruct(blemishMap)) || ...
-        (isstruct(beautyMasks) && isstruct(blemishMap) && ...
-        ~isfield(beautyMasks, 'strengthMap') && ...
-        isfield(blemishMap, 'strengthMap'))
-    temporary = beautyMasks;
-    beautyMasks = blemishMap;
-    blemishMap = temporary;
-end
 validateFrequency(frequency);
 imageSize = frequency.imageSize(1:2);
 validateMasks(beautyMasks, imageSize);
@@ -36,27 +26,66 @@ structureProtection = readMask(beautyMasks, ...
     'structureProtectionMask', imageSize);
 hardProtection = readOptionalMask(beautyMasks, ...
     'hardProtectionMask', imageSize);
-allowed = min(skinMask, strengthMap) .* (1 - hardProtection);
 
-ratio = double(smoothingStrength) / 100;
-repairCurve = ratio ^ .85;
-structureGate = 1 - structureProtection;
+profile = beautySmoothingProfile(smoothingStrength);
+allowed = min(skinMask, strengthMap) .* (1 - hardProtection);
+nonFaceStrength = readOptionalMask(beautyMasks, ...
+    'nonFaceStrengthMap', imageSize);
+nonFacePixels = nonFaceStrength > .01;
+if any(nonFacePixels(:))
+    allowed(nonFacePixels) = profile.outsideFaceStrength .* ...
+        min(skinMask(nonFacePixels), nonFaceStrength(nonFacePixels)) .* ...
+        (1 - hardProtection(nonFacePixels));
+end
+normalRepairCurve = min(profile.blemishStrength / (.75 ^ .85), 1);
+highEndRepairCurve = max(profile.blemishStrength - .75 ^ .85, 0);
+% 高置信瑕疵可适度放宽一般结构门控；只有强结构边缘保留固定下限，
+% 避免眼唇边界被瑕疵修复覆盖，同时不阻断普通雀斑修复。
+structureGate = 1 - structureProtection .* (1 - .90 * blemishMap);
+hardFeatureBand = bwdist(hardProtection >= .999) <= 3;
+strongStructure = smoothStep(structureProtection, .70, .90) .* ...
+    double(hardFeatureBand);
+structureGate = min(structureGate, 1 - .65 * strongStructure);
 
 % 低置信度瑕疵保留在 Fine 层；Mid 仅在连续置信度达到中高档后
 % 开启，避免普通皮肤被大面积拉向一个颜色。
-mediumConfidence = smoothStep(blemishMap, .38, .70);
-highConfidence = smoothStep(blemishMap, .62, .90);
-fineWeight = .34 * repairCurve .* blemishMap .* allowed .* structureGate;
-mediumWeight = .12 * repairCurve .* mediumConfidence .* allowed .* ...
-    structureGate;
-chromaWeight = .16 * repairCurve .* highConfidence .* allowed .* ...
+faceScale = readFaceScale(frequency);
+ noseMask = readOptionalMask(beautyMasks, 'noseMask', imageSize);
+blemishDensity = imgaussfilt(double(blemishMap > .60), ...
+    max(3, min(12, .04 * faceScale)), 'Padding', 'replicate');
+globalHighDensity = mean(blemishMap(:) > .60);
+globalBlemishMean = mean(blemishMap(:));
+sparseGate = 1 - smoothStep(globalHighDensity, .05, .15) .* ...
+    smoothStep(blemishDensity, .03, .20);
+globalGate = smoothStep(globalBlemishMean, .005, .015);
+repairEvidence = min(max(blemishMap .* sparseGate .* ...
+    max(globalGate, double(noseMask > .01)), 0), 1);
+mediumConfidence = smoothStep(repairEvidence, .60, .90);
+highConfidence = smoothStep(repairEvidence, .62, .90);
+if highEndRepairCurve > 0
+    blobMask = smallBlemishBlobs(blemishMap > .65, faceScale);
+else
+    blobMask = false(imageSize);
+end
+highEndConfidence = highConfidence .* max(blobMask, ...
+    double(noseMask > .01)) .* ...
+    max(globalGate, double(noseMask > .01));
+repairCurveMap = normalRepairCurve .* (1 + .35 * noseMask .* ...
+    highConfidence);
+repairCurveMap = min(max(repairCurveMap, 0), 1);
+fineWeight = repairCurveMap .* repairEvidence .* allowed .* structureGate + ...
+    (.25 * highConfidence + highEndRepairCurve .* ...
+    highEndConfidence) .* allowed .* structureGate;
+mediumWeight = .95 * repairCurveMap .* mediumConfidence .* allowed .* ...
+    structureGate + (.40 * highConfidence + highEndRepairCurve .* ...
+    highEndConfidence) .* allowed .* structureGate;
+chromaWeight = .16 * repairCurveMap .* highConfidence .* allowed .* ...
     structureGate;
 fineWeight = min(max(fineWeight, 0), 1);
 mediumWeight = min(max(mediumWeight, 0), 1);
 chromaWeight = min(max(chromaWeight, 0), 1);
 
-faceScale = readFaceScale(frequency);
-radius = min(12, max(3, round(.018 * faceScale)));
+radius = min(20, max(3, round(.070 * faceScale)));
 kernelSize = 2 * radius + 1;
 kernel = ones(kernelSize, kernelSize);
 
@@ -105,11 +134,19 @@ blemishAfter = mean((abs(repairedFrequency.fine(:)) + ...
     abs(repairedFrequency.mid(:))) .* blemishMap(:));
 diagnostics = struct( ...
     'blemishMap', blemishMap, ...
+    'sparseGate', sparseGate, ...
+    'globalHighDensity', globalHighDensity, ...
+    'globalBlemishMean', globalBlemishMean, ...
+    'globalGate', globalGate, ...
+    'repairEvidence', repairEvidence, ...
+    'repairCurveMap', repairCurveMap, ...
+    'blobMask', blobMask, ...
     'fineWeight', fineWeight, ...
     'mediumWeight', mediumWeight, ...
     'midWeight', mediumWeight, ...
     'chromaWeight', chromaWeight, ...
     'repairWeight', min(1, fineWeight + mediumWeight), ...
+    'allowed', allowed, ...
     'structureGate', structureGate, ...
     'referenceReliability', referenceReliability, ...
     'referenceWeight', referenceWeight, ...
@@ -222,6 +259,28 @@ end
 function value = smoothStep(inputValue, low, high)
 t = min(max((double(inputValue) - low) / max(high - low, eps), 0), 1);
 value = t .^ 2 .* (3 - 2 * t);
+end
+
+function blobMask = smallBlemishBlobs(candidate, faceScale)
+% 只有小而紧凑的连通瑕疵才接受高档额外修复，长条纹理不进入该层。
+blobMask = false(size(candidate));
+if ~any(candidate(:))
+    return;
+end
+components = bwconncomp(candidate, 8);
+areaLimit = max(24, round(.006 * faceScale ^ 2));
+spanLimit = max(5, round(.045 * faceScale));
+for index = 1:components.NumObjects
+    pixels = components.PixelIdxList{index};
+    [rows, columns] = ind2sub(size(candidate), pixels);
+    rowSpan = max(rows) - min(rows) + 1;
+    columnSpan = max(columns) - min(columns) + 1;
+    fillRatio = numel(pixels) / max(1, rowSpan * columnSpan);
+    if numel(pixels) <= areaLimit && max(rowSpan, columnSpan) <= spanLimit && ...
+            fillRatio >= .18
+        blobMask(pixels) = true;
+    end
+end
 end
 
 function valid = isValidStrength(value)

@@ -1,33 +1,97 @@
-function beautyContext = prepareBeautyContext(inputImage, faceBox, injectedParsing, bodyParsingParams)
-%PREPAREBEAUTYCONTEXT 构建版本化语义美颜 context。
-if ~isa(inputImage, 'uint8') || ~isreal(inputImage) || ndims(inputImage) ~= 3 || size(inputImage, 3) ~= 3
-    error('prepareBeautyContext:InvalidImage', 'inputImage must be uint8 RGB.');
-end
+function beautyContext = prepareBeautyContext(inputImage, faceBox, ...
+        injectedParsing, bodyParsingParams)
+%PREPAREBEAUTYCONTEXT 构建包含脸外皮肤的最终 v3 Context。
+
+validateImage(inputImage);
 validateFaceBox(faceBox, size(inputImage, 2), size(inputImage, 1));
-if nargin >= 3
+if nargin >= 3 && ~isempty(injectedParsing)
     parsing = parseFaceRegions(inputImage, faceBox, injectedParsing);
 else
     parsing = parseFaceRegions(inputImage, faceBox);
 end
-beautyContext = buildBeautyContextFromParsing(inputImage, faceBox, parsing);
+
 if nargin < 4 || isempty(bodyParsingParams)
     bodyParsingParams = struct();
 elseif ~isstruct(bodyParsingParams) || ~isscalar(bodyParsingParams)
     error('prepareBeautyContext:InvalidBodyParsingParams', ...
-        'The fourth argument must be a scalar SCHP options struct.');
-end
-baseFaceAndNeckMask = beautyContext.skinMask;
-probabilities = inferSchpLipProbabilities(inputImage, bodyParsingParams);
-bodyMask = buildBodySkinMaskFromSchp(probabilities, ...
-    baseFaceAndNeckMask, inputImage);
-beautyContext.bodySkinMask = bodyMask;
-beautyContext.skinMask = max(baseFaceAndNeckMask, bodyMask);
+        '第四个参数必须是标量 SCHP 选项结构体。');
 end
 
-function validateFaceBox(box, imageWidth, imageHeight)
-if ~isnumeric(box) || ~isreal(box) || ~isequal(size(box), [1, 4]) || any(~isfinite(box)) || ...
-        box(1) < 1 || box(2) < 1 || any(box(3:4) <= 0) || ...
-        box(1) + box(3) - 1 > imageWidth || box(2) + box(4) - 1 > imageHeight
-    error('prepareBeautyContext:InvalidFaceBox', 'Invalid face rectangle.');
+beautyContext = buildBeautyContextFromParsing(inputImage, faceBox, parsing);
+faceAndNeckMask = beautyContext.skinMask;
+probabilities = inferSchpLipProbabilities(inputImage, bodyParsingParams);
+bodyMask = buildBodySkinMaskFromSchp(probabilities, ...
+    faceAndNeckMask, inputImage);
+
+% SCHP 只补充主人物的脸外皮肤；脸部语义仍以 Face Parsing 为准。
+beautyContext.bodySkinMask = bodyMask;
+beautyContext.skinMask = max(faceAndNeckMask, bodyMask);
+beautyContext.nonFaceSkinMask = max(beautyContext.skinMask - ...
+    min(beautyContext.skinMask, beautyContext.faceSkinMask), 0);
+derivedNames = {'textureProtectionMask', 'structureProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'nonFaceStrengthMap', 'protectionMasks'};
+presentNames = derivedNames(isfield(beautyContext, derivedNames));
+if ~isempty(presentNames)
+    beautyContext = rmfield(beautyContext, presentNames);
+end
+[beautyContext, ~, ~] = attachDerivedMasks( ...
+    inputImage, beautyContext, faceBox);
+beautyContext = normalizeBeautyContext(inputImage, faceBox, beautyContext);
+[runtimeMasks, maskDiagnostics] = masks.buildBeautyMasks( ...
+    inputImage, beautyContext, faceBox);
+beautyContext.runtimeCache = buildRuntimeCache( ...
+    inputImage, faceBox, runtimeMasks, maskDiagnostics);
+end
+
+function [context, beautyMasks, maskDiagnostics] = attachDerivedMasks( ...
+        inputImage, context, faceBox)
+[beautyMasks, maskDiagnostics] = masks.buildBeautyMasks( ...
+    inputImage, context, faceBox);
+context.textureProtectionMask = beautyMasks.textureProtectionMask;
+context.structureProtectionMask = beautyMasks.structureProtectionMask;
+context.toneProtectionMask = beautyMasks.toneProtectionMask;
+context.strengthMap = beautyMasks.strengthMap;
+context.faceStrengthMap = beautyMasks.faceStrengthMap;
+context.nonFaceStrengthMap = beautyMasks.nonFaceStrengthMap;
+context.protectionMasks = struct( ...
+    'texture', beautyMasks.textureProtectionMask, ...
+    'structure', beautyMasks.structureProtectionMask, ...
+    'tone', beautyMasks.toneProtectionMask);
+end
+
+function runtimeCache = buildRuntimeCache( ...
+        inputImage, faceBox, beautyMasks, maskDiagnostics)
+[frequency, decompositionDiagnostics] = beauty.decomposeSkinFrequency( ...
+    inputImage, faceBox);
+[blemishMap, blemishDiagnostics] = beauty.buildBlemishMap( ...
+    inputImage, frequency, beautyMasks);
+runtimeCache = struct( ...
+    'inputImage', inputImage, ...
+    'faceBox', double(faceBox), ...
+    'beautyMasks', beautyMasks, ...
+    'maskDiagnostics', maskDiagnostics, ...
+    'frequency', frequency, ...
+    'decompositionDiagnostics', decompositionDiagnostics, ...
+    'blemishMap', blemishMap, ...
+    'blemishDiagnostics', blemishDiagnostics);
+end
+
+function validateImage(inputImage)
+if ~isa(inputImage, 'uint8') || ~isreal(inputImage) || ...
+        ndims(inputImage) ~= 3 || size(inputImage, 3) ~= 3
+    error('prepareBeautyContext:InvalidImage', ...
+        '输入图像必须是 uint8 三通道 RGB 图像。');
+end
+end
+
+function validateFaceBox(faceBox, imageWidth, imageHeight)
+if ~isnumeric(faceBox) || ~isreal(faceBox) || ...
+        ~isequal(size(faceBox), [1, 4]) || any(~isfinite(faceBox)) || ...
+        faceBox(1) < 1 || faceBox(2) < 1 || any(faceBox(3:4) <= 0) || ...
+        faceBox(1) + faceBox(3) - 1 > imageWidth || ...
+        faceBox(2) + faceBox(4) - 1 > imageHeight
+    error('prepareBeautyContext:InvalidFaceBox', ...
+        'faceBox 必须是位于图像范围内的 [x y width height] 矩形。');
 end
 end

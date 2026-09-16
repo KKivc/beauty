@@ -80,10 +80,14 @@ end
 function testBeautyContextValidationAndReuse(testCase)
 [sourceImage, faceBox, ~, ~] = syntheticPortrait(240, 320);
 context = contextForTestImage(sourceImage, faceBox);
-verifyEqual(testCase, fieldnames(context), ...
-    {'skinMask'; 'faceSkinMask'; 'featureProtectionMask'; 'schemaVersion'; ...
-    'regions'; 'regionConfidence'; 'bodySkinMask'; 'hardProtectionMask'; ...
-    'geometry'; 'imageSize'; 'faceBox'});
+required = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
+    'textureProtectionMask', 'structureProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'semanticProbabilities', ...
+    'schemaVersion', 'regions', 'regionConfidence', 'bodySkinMask', ...
+    'geometry', 'imageSize', 'faceBox'};
+verifyTrue(testCase, all(isfield(context, required)));
+verifyFalse(testCase, any(isfield(context, ...
+    {'featureProtectionMask', 'hardProtectionMask'})));
 verifySize(testCase, context.skinMask, size(sourceImage, [1, 2]));
 verifyGreaterThan(testCase, nnz(context.faceSkinMask), 0);
 params = struct('smoothingStrength', 50, 'whiteningStrength', 50);
@@ -703,7 +707,7 @@ function params = defaultParams
 params = struct('smoothingStrength', 10, 'whiteningStrength', 10);
 end
 
-function testInjectedSchemaV2Context(testCase)
+function testInjectedParsingProducesV3Context(testCase)
 image = uint8(ones(40, 40, 3) * 128);
 parsing = syntheticParsingForContext([40 40]);
 parsing.regions.skin(10:30, 10:30) = 1;
@@ -712,9 +716,10 @@ parsing.regions.hair(10:13, 10:30) = 1;
 parsing.regionConfidence.hair(10:13, 10:30) = 1;
 context = prepareBeautyContext(image, [5 5 30 30], parsing, ...
     emptyBodyParsing(size(image, [1 2])));
-verifyEqual(testCase, context.schemaVersion, '2.0');
+verifyEqual(testCase, context.schemaVersion, '3.0');
 verifyEqual(testCase, numel(fieldnames(context.regions)), 19);
-verifyEqual(testCase, context.hardProtectionMask(12, 20), 1);
+[beautyMasks, ~] = masks.buildBeautyMasks(image, context, [5 5 30 30]);
+verifyEqual(testCase, beautyMasks.hardProtectionMask(12, 20), 1);
 end
 
 function testSoftParsingKeepsBoundaryAndEarCoverage(testCase)
@@ -754,9 +759,10 @@ parsing.regions.leftEye(27:31, 35:42) = 1;
 parsing.regionConfidence.leftEye(27:31, 35:42) = 1;
 context = prepareBeautyContext(image, [10 10 60 40], parsing, ...
     emptyBodyParsing(size(image, [1 2])));
-verifyEqual(testCase, context.hardProtectionMask(29, 38), 1);
-verifyGreaterThan(testCase, context.featureProtectionMask(29, 34), 0);
-verifyLessThan(testCase, context.featureProtectionMask(29, 34), 1);
+[beautyMasks, ~] = masks.buildBeautyMasks(image, context, [10 10 60 40]);
+verifyEqual(testCase, beautyMasks.hardProtectionMask(29, 38), 1);
+verifyGreaterThan(testCase, beautyMasks.textureProtectionMask(29, 34), 0);
+verifyLessThan(testCase, beautyMasks.textureProtectionMask(29, 34), 1);
 end
 
 function parsing = syntheticParsingForContext(imageSize)

@@ -1,5 +1,5 @@
 function tests = testBeautyContextV3
-%TESTBEAUTYCONTEXTV3 Beauty Context v3 规范化和原尺寸派生 Mask 测试。
+%TESTBEAUTYCONTEXTV3 验证 v3 Context 和原尺寸派生 Mask。
 tests = functiontests(localfunctions);
 end
 
@@ -8,46 +8,69 @@ projectRoot = fileparts(fileparts(mfilename('fullpath')));
 addpath(fullfile(projectRoot, 'src'));
 end
 
-function testNormalizeConvertsV2AndKeepsLegacyFields(testCase)
+function testPrepareProducesCanonicalV3Context(testCase)
 [image, faceBox, parsing] = fixtureContext(40, 60);
-legacy = prepareBeautyContext(image, faceBox, parsing, emptyBodyParsing([40, 60]));
-normalized = normalizeBeautyContext(image, faceBox, legacy);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
 
-verifyEqual(testCase, normalized.schemaVersion, '3.0');
-verifyTrue(testCase, isfield(normalized, 'nonFaceSkinMask'));
-verifyTrue(testCase, isfield(normalized, 'textureProtectionMask'));
-verifyTrue(testCase, isfield(normalized, 'structureProtectionMask'));
-verifyTrue(testCase, isfield(normalized, 'toneProtectionMask'));
-verifyTrue(testCase, isfield(normalized, 'semanticProbabilities'));
-verifyEqual(testCase, size(normalized.semanticProbabilities), [40, 60, 19]);
-verifyEqual(testCase, size(normalized.nonFaceSkinMask), [40, 60]);
-verifyEqual(testCase, normalized.featureProtectionMask, ...
-    double(legacy.featureProtectionMask), 'AbsTol', 1e-12);
-verifyEqual(testCase, normalized.hardProtectionMask, ...
-    double(legacy.hardProtectionMask), 'AbsTol', 1e-12);
+verifyEqual(testCase, context.schemaVersion, '3.0');
+required = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
+    'textureProtectionMask', 'structureProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'semanticProbabilities', ...
+    'semanticConfidence', 'imageSize', 'faceBox'};
+verifyTrue(testCase, all(isfield(context, required)));
+verifyFalse(testCase, any(isfield(context, ...
+    {'featureProtectionMask', 'hardProtectionMask'})));
+verifyTrue(testCase, isfield(context, 'runtimeCache'));
+verifyEqual(testCase, context.runtimeCache.inputImage, image);
+verifyEqual(testCase, size(context.semanticProbabilities), [40, 60, 19]);
+verifyEqual(testCase, size(context.nonFaceSkinMask), [40, 60]);
 
 params = struct('smoothingStrength', 25, 'whiteningStrength', 15);
-verifySize(testCase, beautifyImage(image, params, faceBox, legacy), [40, 60, 3]);
-recommended = recommendBeautyParams(image, faceBox, legacy);
+[output, diagnostics] = beautifyImage(image, params, faceBox, context);
+verifySize(testCase, output, [40, 60, 3]);
+verifyTrue(testCase, diagnostics.reusedRuntimeCache);
+uncachedContext = rmfield(context, 'runtimeCache');
+[uncachedOutput, uncachedDiagnostics] = beautifyImage( ...
+    image, params, faceBox, uncachedContext);
+verifyFalse(testCase, uncachedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, output, uncachedOutput);
+changedImage = image;
+changedImage(1, 1, 1) = changedImage(1, 1, 1) + uint8(1);
+[changedOutput, changedDiagnostics] = beautifyImage( ...
+    changedImage, params, faceBox, context);
+verifySize(testCase, changedOutput, [40, 60, 3]);
+verifyFalse(testCase, changedDiagnostics.reusedRuntimeCache);
+recommended = recommendBeautyParams(image, faceBox, context);
 verifyTrue(testCase, isfield(recommended, 'smoothingStrength'));
 end
 
-function testNormalizeRejectsUnsupportedVersionAndSize(testCase)
+function testNormalizeRejectsLegacyAndInvalidContext(testCase)
 [image, faceBox, parsing] = fixtureContext(40, 60);
-legacy = prepareBeautyContext(image, faceBox, parsing, emptyBodyParsing([40, 60]));
-normalized = normalizeBeautyContext(image, faceBox, legacy);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
 
-unsupported = normalized;
+unsupported = context;
 unsupported.schemaVersion = '9.0';
 verifyError(testCase, @() normalizeBeautyContext(image, faceBox, unsupported), ...
     'normalizeBeautyContext:UnsupportedVersion');
 
-wrongSize = normalized;
+legacyVersion = context;
+legacyVersion.schemaVersion = '2.0';
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, legacyVersion), ...
+    'normalizeBeautyContext:UnsupportedVersion');
+
+legacyField = context;
+legacyField.featureProtectionMask = zeros(40, 60);
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, legacyField), ...
+    'normalizeBeautyContext:LegacyFields');
+
+wrongSize = context;
 wrongSize.imageSize = [39, 60, 3];
 verifyError(testCase, @() normalizeBeautyContext(image, faceBox, wrongSize), ...
     'normalizeBeautyContext:SizeMismatch');
 
-wrongSemantic = normalized;
+wrongSemantic = context;
 wrongSemantic.semanticProbabilities = zeros(40, 60, 18, 'single');
 verifyError(testCase, @() normalizeBeautyContext(image, faceBox, wrongSemantic), ...
     'normalizeBeautyContext:InvalidSemantic');
@@ -55,8 +78,8 @@ end
 
 function testOriginalSizeRebuildsDerivedProtectionMasks(testCase)
 [image, faceBox, parsing] = fixtureContext(40, 60);
-legacy = prepareBeautyContext(image, faceBox, parsing, emptyBodyParsing([40, 60]));
-previewContext = normalizeBeautyContext(image, faceBox, legacy);
+previewContext = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
 targetImage = imresize(image, [80, 120], 'bilinear');
 targetFaceBox = [20, 16, 60, 48];
 savedContext = resizeBeautyContext(previewContext, ...
@@ -104,4 +127,3 @@ end
 function options = emptyBodyParsing(imageSize)
 options = struct('probabilities', zeros([imageSize, 20], 'single'));
 end
-

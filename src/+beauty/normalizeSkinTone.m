@@ -1,14 +1,13 @@
-function [toneResult, diagnostics] = normalizeSkinTone(inputImage, varargin)
+function [toneResult, diagnostics] = normalizeSkinTone( ...
+        inputImage, frequency, beautyMasks, blemishMap, smoothingStrength)
 %NORMALIZESKINTONE 用一套全皮肤候选结果修正低频色度异常。
-%   主调用形式为
-%       normalizeSkinTone(inputImage, beautyMasks, blemishMap, strength)
-%   也接受带频率结构的形式
-%       normalizeSkinTone(inputImage, frequency, beautyMasks, ...)
 %   频率结构只用于校验尺寸；脸部和脸外始终共享同一个候选色度，
 %   区域差异仅来自 masks.buildBeautyStrengthMap 的连续强度图。
 
-[frequency, beautyMasks, blemishMap, smoothingStrength] = ...
-    parseInputs(inputImage, varargin{:});
+if nargin < 5
+    error('beauty:InvalidSkinToneInput', ...
+        '肤色统一需要输入图像、频率、Beauty Masks、瑕疵图和磨皮强度。');
+end
 validateImage(inputImage);
 imageSize = size(inputImage, 1:2);
 if ~isempty(frequency)
@@ -57,24 +56,55 @@ end
 chromaResidual = max(abs(localCb - candidateCb), ...
     abs(localCr - candidateCr));
 chromaEvidence = smoothStep(chromaResidual, .018, .060);
+localChromaResidual = max(abs(cb - localCb), abs(cr - localCr));
+localChromaEvidence = smoothStep(localChromaResidual, .010, .045);
 blemishEvidence = smoothStep(blemishMap, .32, .72);
 
-% 统一候选只做小幅连续校正。正常皮肤的基础权重很低，明显色度
-% 异常或瑕疵残余才逐步增加；不对亮度通道做任何补偿。
+% 统一候选只做小幅连续校正。局部色度异常优先向邻域色度收敛，
+% 正常皮肤的基础权重很低；不对亮度通道做任何补偿。
+profile = beautySmoothingProfile(smoothingStrength);
 ratio = double(smoothingStrength) / 100;
-toneCurve = ratio ^ .85;
+toneCurve = profile.toneStrength;
+fullToneCurve = ratio ^ .85;
+toneCurveMap = toneCurve + (fullToneCurve - toneCurve) .* ...
+    smoothStep(chromaEvidence, .25, .65);
+toneCurveMap = max(toneCurveMap, ...
+    fullToneCurve .* localChromaEvidence);
 structureGate = 1 - structureProtection;
 featureGate = 1 - .78 * toneProtection;
 allowed = min(skinMask, strengthMap) .* (1 - hardProtection);
-weightMap = toneCurve .* allowed .* structureGate .* featureGate .* ...
-    (.08 + .35 * chromaEvidence + .20 * blemishEvidence);
+if ratio > .50
+    uniformToneCurve = .36 * fullToneCurve .* ...
+        smoothStep(ratio, .50, .75);
+    uniformToneSupport = allowed .* structureGate .* ...
+        (1 - toneProtection);
+else
+    uniformToneCurve = 0;
+    uniformToneSupport = zeros(imageSize);
+end
+weightMap = toneCurveMap .* allowed .* structureGate .* featureGate .* ...
+    (.08 + .35 * chromaEvidence + .35 * localChromaEvidence + ...
+    .20 * blemishEvidence);
+weightMap = weightMap + uniformToneCurve .* uniformToneSupport;
 weightMap = min(max(weightMap, 0), .55);
 if ~hasCandidate
     weightMap = zeros(imageSize);
 end
 
-deltaCb = weightMap .* (candidateCb - localCb);
-deltaCr = weightMap .* (candidateCr - localCr);
+candidateDeltaCb = candidateCb - localCb;
+candidateDeltaCr = candidateCr - localCr;
+localDeltaCb = localCb - cb;
+localDeltaCr = localCr - cr;
+if uniformToneCurve > eps
+    localBlend = max(localChromaEvidence, double( ...
+        uniformToneSupport > eps));
+else
+    localBlend = localChromaEvidence;
+end
+deltaCb = weightMap .* ((1 - localBlend) .* candidateDeltaCb + ...
+    localBlend .* localDeltaCb);
+deltaCr = weightMap .* ((1 - localBlend) .* candidateDeltaCr + ...
+    localBlend .* localDeltaCr);
 outputCb = min(max(cb + deltaCb, 0), 1);
 outputCr = min(max(cr + deltaCr, 0), 1);
 
@@ -92,7 +122,11 @@ toneResult = struct( ...
     'weightMap', weightMap, ...
     'alphaMap', weightMap, ...
     'toneSupport', weightMap, ...
+    'uniformToneCurve', uniformToneCurve, ...
+    'localBlend', localBlend, ...
     'chromaEvidence', chromaEvidence, ...
+    'localChromaResidual', localChromaResidual, ...
+    'localChromaEvidence', localChromaEvidence, ...
     'blemishEvidence', blemishEvidence, ...
     'candidateMask', double(candidate), ...
     'imageSize', [imageSize, 3], ...
@@ -112,10 +146,14 @@ diagnostics = struct( ...
     'localCr', localCr, ...
     'chromaResidual', chromaResidual, ...
     'chromaEvidence', chromaEvidence, ...
+    'localChromaResidual', localChromaResidual, ...
+    'localChromaEvidence', localChromaEvidence, ...
     'blemishEvidence', blemishEvidence, ...
     'weightMap', weightMap, ...
     'alphaMap', weightMap, ...
     'toneSupport', weightMap, ...
+    'uniformToneCurve', uniformToneCurve, ...
+    'localBlend', localBlend, ...
     'deltaCb', deltaCb, ...
     'deltaCr', deltaCr, ...
     'faceWeight', weightMap .* double(faceMask > .01), ...
@@ -125,57 +163,6 @@ diagnostics = struct( ...
     'hardProtectionMask', hardProtection, ...
     'imageSize', [imageSize, 3], ...
     'smoothingStrength', double(smoothingStrength));
-end
-
-function [frequency, beautyMasks, blemishMap, smoothingStrength] = ...
-        parseInputs(inputImage, varargin)
-frequency = [];
-count = numel(varargin);
-if count == 4 && isFrequency(varargin{1})
-    frequency = varargin{1};
-    beautyMasks = varargin{2};
-    if isnumeric(varargin{3}) && isscalar(varargin{3}) && ...
-            ~isscalar(varargin{4})
-        smoothingStrength = varargin{3};
-        blemishMap = varargin{4};
-    else
-        blemishMap = varargin{3};
-        smoothingStrength = varargin{4};
-    end
-elseif count == 3 && isFrequency(varargin{1})
-    frequency = varargin{1};
-    beautyMasks = varargin{2};
-    blemishMap = zeros(size(inputImage, 1:2));
-    smoothingStrength = varargin{3};
-elseif count == 3
-    beautyMasks = varargin{1};
-    if isnumeric(varargin{2}) && isscalar(varargin{2}) && ...
-            ~isscalar(varargin{3})
-        smoothingStrength = varargin{2};
-        blemishMap = varargin{3};
-    else
-        blemishMap = varargin{2};
-        smoothingStrength = varargin{3};
-    end
-elseif count == 2 && isFrequency(varargin{1})
-    frequency = varargin{1};
-    beautyMasks = varargin{2};
-    blemishMap = zeros(size(inputImage, 1:2));
-    smoothingStrength = 100;
-elseif count == 2 && isnumeric(varargin{2})
-    beautyMasks = varargin{1};
-    blemishMap = zeros(size(inputImage, 1:2));
-    smoothingStrength = varargin{2};
-else
-    error('beauty:InvalidSkinToneInput', ...
-        ['肤色统一需要 (inputImage, Beauty Masks, blemishMap, strength)，', ...
-        '或带 frequency 的等价形式。']);
-end
-end
-
-function valid = isFrequency(value)
-valid = isstruct(value) && isscalar(value) && ...
-    all(isfield(value, {'base', 'mid', 'fine', 'imageSize'}));
 end
 
 function candidate = selectToneCandidate(luminance, baseCandidate)

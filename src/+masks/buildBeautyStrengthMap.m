@@ -27,7 +27,7 @@ end
 
 % 皮肤 Mask 本身已经是概率域平滑结果，只做有界映射，不重新二值化。
 faceStrength = min(max(faceRegion, 0), 1);
-nonFaceStrength = .55 * min(max(nonFaceRegion, 0), 1);
+nonFaceStrength = .45 * min(max(nonFaceRegion, 0), 1);
 strengthMap = max(faceStrength, nonFaceStrength);
 strengthMap(~(skin > .01)) = 0;
 

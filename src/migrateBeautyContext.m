@@ -1,12 +1,19 @@
 function migratedContext = migrateBeautyContext(inputImage, faceBox, context)
 %MIGRATEBEAUTYCONTEXT 显式将 Beauty Context 升级为 v3.1。
-%   migrateBeautyContext(context) 只迁移已存在的色度保护 Mask。
-%   migrateBeautyContext(inputImage, faceBox, context) 会通过完整规范化
-%   校验并补齐当前图像所需的派生字段。
+%   仅有 Context 时可迁移字段和 alias；若 Context 携带原图缓存，则
+%   自动使用该原图重新生成 v3.1 运行时产物。提供原图时始终重建缓存，
+%   不会把历史 3.0 派生产物仅补上 alias 后标记为当前算法产物。
 
 if nargin == 1
-    context = inputImage;
-    migratedContext = migrateWithoutImage(context);
+    sourceContext = inputImage;
+    validateContext(sourceContext);
+    if hasCachedInput(sourceContext)
+        migratedContext = migrateWithImage( ...
+            sourceContext.runtimeCache.inputImage, sourceContext.faceBox, ...
+            sourceContext);
+    else
+        migratedContext = migrateWithoutImage(sourceContext);
+    end
     return;
 end
 if nargin ~= 3
@@ -24,19 +31,28 @@ else
     sourceFaceBox = faceBox;
     sourceContext = context;
 end
-migratedContext = normalizeBeautyContext( ...
-    sourceImage, sourceFaceBox, sourceContext);
-migratedContext = migrateRuntimeCache(migratedContext, ...
-    size(sourceImage, 1:2), migratedContext.chromaProtectionMask);
+migratedContext = migrateWithImage(sourceImage, sourceFaceBox, sourceContext);
+end
+
+function migratedContext = migrateWithImage(inputImage, faceBox, context)
+validateContext(context);
+sourceSchemaVersion = schemaVersionText(context.schemaVersion);
+% normalizeBeautyContext 负责旧 alias 与基础字段规范化；这里随后用
+% 当前输入重新生成完整缓存，确保缓存产物拥有独立的 v3.1 版本信息。
+migratedContext = normalizeBeautyContext(inputImage, faceBox, context);
+[runtimeMasks, maskDiagnostics] = masks.buildBeautyMasks( ...
+    inputImage, migratedContext, double(faceBox));
+migration = struct( ...
+    'status', 'regenerated', ...
+    'sourceSchemaVersion', sourceSchemaVersion, ...
+    'message', '已按当前输入重新生成 v3.1 运行时派生产物。');
+migratedContext.runtimeCache = buildBeautyRuntimeCache( ...
+    inputImage, double(faceBox), runtimeMasks, maskDiagnostics, migration);
+migratedContext.migrationDiagnostics = migration;
 end
 
 function migratedContext = migrateWithoutImage(context)
-validateContext(context);
-if ~isV3Version(context.schemaVersion)
-    error('migrateBeautyContext:UnsupportedVersion', ...
-        '只接受 Beauty Context 版本 3.0 或 3.1。');
-end
-
+sourceSchemaVersion = schemaVersionText(context.schemaVersion);
 if ~isfield(context, 'skinMask') || ~isnumeric(context.skinMask) || ...
         ~isreal(context.skinMask) || ~ismatrix(context.skinMask)
     error('migrateBeautyContext:InvalidContext', ...
@@ -48,11 +64,6 @@ imageSize = size(context.skinMask);
     'migrateBeautyContext:InvalidContext', ...
     'migrateBeautyContext:ChromaProtectionConflict');
 if ~hasChromaProtectionMask
-    if hasCachedInput(context)
-        migratedContext = normalizeBeautyContext( ...
-            context.runtimeCache.inputImage, context.faceBox, context);
-        return;
-    end
     error('migrateBeautyContext:MissingChromaProtectionMask', ...
         '无原图时，旧 Context 必须包含 toneProtectionMask 或 chromaProtectionMask。');
 end
@@ -67,32 +78,25 @@ if isfield(migratedContext, 'protectionMasks') && ...
     migratedContext.protectionMasks.chroma = chromaProtectionMask;
     migratedContext.protectionMasks.tone = chromaProtectionMask;
 end
-migratedContext = migrateRuntimeCache(migratedContext, imageSize, ...
-    chromaProtectionMask);
+migration = struct( ...
+    'status', 'aliasMigrated', ...
+    'sourceSchemaVersion', sourceSchemaVersion, ...
+    'message', '已迁移色度保护字段；无原图时未宣称缓存产物已重建。');
+migratedContext.migrationDiagnostics = migration;
+if isfield(migratedContext, 'runtimeCache')
+    migratedContext.runtimeCache = markCacheForRegeneration( ...
+        migratedContext.runtimeCache, sourceSchemaVersion);
+end
 end
 
-function context = migrateRuntimeCache(context, imageSize, fallbackMask)
-if ~isfield(context, 'runtimeCache') || ...
-        ~isstruct(context.runtimeCache) || ~isscalar(context.runtimeCache)
+function cache = markCacheForRegeneration(cache, sourceSchemaVersion)
+if ~isstruct(cache) || ~isscalar(cache)
     return;
 end
-cache = context.runtimeCache;
-if ~isfield(cache, 'beautyMasks') || ...
-        ~isstruct(cache.beautyMasks) || ~isscalar(cache.beautyMasks)
-    return;
-end
-[cacheMask, hasCacheMask] = resolveChromaProtectionMask( ...
-    cache.beautyMasks, imageSize, ...
-    'migrateBeautyContext:InvalidContext', ...
-    'migrateBeautyContext:ChromaProtectionConflict');
-if ~hasCacheMask
-    cacheMask = fallbackMask;
-end
-cache.beautyMasks.chromaProtectionMask = cacheMask;
-cache.beautyMasks.toneProtectionMask = cacheMask;
-cache.beautyMasks.schemaVersion = '3.1';
-cache.schemaVersion = '3.1';
-context.runtimeCache = cache;
+cache.migration = struct( ...
+    'status', 'requiresRegeneration', ...
+    'sourceSchemaVersion', sourceSchemaVersion, ...
+    'message', '无原图可用，历史运行时缓存必须在处理入口重新生成。');
 end
 
 function hasInput = hasCachedInput(context)
@@ -110,17 +114,36 @@ if ~isstruct(context) || ~isscalar(context) || ...
     error('migrateBeautyContext:InvalidContext', ...
         'Beauty Context 必须是包含 schemaVersion 的标量结构体。');
 end
+if ~isV3Version(context.schemaVersion)
+    error('migrateBeautyContext:UnsupportedVersion', ...
+        '只接受 Beauty Context 版本 3.0 或 3.1。');
+end
 end
 
 function valid = isV3Version(value)
 if isnumeric(value) && isreal(value) && isscalar(value) && isfinite(value)
-    valid = value >= 3 && value < 4;
+    valid = value == 3 || value == 3.1;
     return;
 end
 if isstring(value) && isscalar(value)
     value = char(value);
 end
-valid = ischar(value) && size(value, 1) == 1 && startsWith(value, '3');
+valid = ischar(value) && size(value, 1) == 1 && ...
+    any(strcmp(value, {'3.0', '3.1'}));
+end
+
+function value = schemaVersionText(version)
+if isnumeric(version) && isscalar(version) && version == 3
+    value = '3.0';
+elseif isnumeric(version) && isscalar(version) && version == 3.1
+    value = '3.1';
+elseif isstring(version) && isscalar(version)
+    value = char(version);
+elseif ischar(version) && size(version, 1) == 1
+    value = version;
+else
+    value = 'unknown';
+end
 end
 
 function valid = isValidRgbImage(value)

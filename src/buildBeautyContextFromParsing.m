@@ -61,7 +61,7 @@ function context = attachDerivedMasks(inputImage, context, faceBox)
 context.textureProtectionMask = beautyMasks.textureProtectionMask;
 context.structureProtectionMask = beautyMasks.structureProtectionMask;
 context.chromaProtectionMask = beautyMasks.chromaProtectionMask;
-context.toneProtectionMask = beautyMasks.toneProtectionMask;
+context.toneProtectionMask = context.chromaProtectionMask;
 context.strengthMap = beautyMasks.strengthMap;
 context.faceStrengthMap = beautyMasks.faceStrengthMap;
 context.nonFaceStrengthMap = beautyMasks.nonFaceStrengthMap;
@@ -69,7 +69,7 @@ context.protectionMasks = struct( ...
     'texture', beautyMasks.textureProtectionMask, ...
     'structure', beautyMasks.structureProtectionMask, ...
     'chroma', beautyMasks.chromaProtectionMask, ...
-    'tone', beautyMasks.toneProtectionMask);
+    'tone', context.chromaProtectionMask);
 end
 
 function [regions, confidence] = normalizeSemantics(parsing, imageSize)

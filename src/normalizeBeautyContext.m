@@ -45,7 +45,7 @@ if ~hasChromaProtectionMask || ~all(isfield(context, derivedNames))
     context.textureProtectionMask = beautyMasks.textureProtectionMask;
     context.structureProtectionMask = beautyMasks.structureProtectionMask;
     context.chromaProtectionMask = beautyMasks.chromaProtectionMask;
-    context.toneProtectionMask = beautyMasks.toneProtectionMask;
+    context.toneProtectionMask = beautyMasks.chromaProtectionMask;
     context.strengthMap = beautyMasks.strengthMap;
     context.faceStrengthMap = beautyMasks.faceStrengthMap;
     context.nonFaceStrengthMap = beautyMasks.nonFaceStrengthMap;
@@ -74,7 +74,7 @@ context.protectionMasks = struct( ...
     'texture', context.textureProtectionMask, ...
     'structure', context.structureProtectionMask, ...
     'chroma', context.chromaProtectionMask, ...
-    'tone', context.toneProtectionMask);
+    'tone', context.chromaProtectionMask);
 context.schemaVersion = '3.1';
 context.imageSize = imageSize;
 context.faceBox = double(faceBox);
@@ -98,13 +98,14 @@ end
 value = context.schemaVersion;
 if isnumeric(value) && isreal(value) && isscalar(value) && ...
         isfinite(value)
-    valid = value >= 3 && value < 4;
+    valid = value == 3 || value == 3.1;
     return;
 end
 if isstring(value) && isscalar(value)
     value = char(value);
 end
-valid = ischar(value) && size(value, 1) == 1 && startsWith(value, '3');
+valid = ischar(value) && size(value, 1) == 1 && ...
+    any(strcmp(value, {'3.0', '3.1'}));
 end
 
 function context = normalizeSemanticFields(context, imageSize)
@@ -114,7 +115,12 @@ if isfield(context, 'semanticProbabilities')
         'semanticProbabilities');
     regions = unstackSemantics(context.semanticProbabilities, names);
 elseif isfield(context, 'regions')
-    regions = normalizeSemanticStruct(context.regions, imageSize, 'regions');
+    if allowsPartialSemantics(context)
+        regions = normalizePartialSemanticStruct(context.regions, ...
+            imageSize, 'regions');
+    else
+        regions = normalizeSemanticStruct(context.regions, imageSize, 'regions');
+    end
 else
     error('normalizeBeautyContext:InvalidSemantic', ...
         'Beauty Context 缺少语义概率。');
@@ -125,8 +131,13 @@ if isfield(context, 'semanticConfidence')
         'semanticConfidence');
     confidence = unstackSemantics(context.semanticConfidence, names);
 elseif isfield(context, 'regionConfidence')
-    confidence = normalizeSemanticStruct(context.regionConfidence, ...
-        imageSize, 'regionConfidence');
+    if allowsPartialSemantics(context)
+        confidence = normalizePartialSemanticStruct( ...
+            context.regionConfidence, imageSize, 'regionConfidence');
+    else
+        confidence = normalizeSemanticStruct(context.regionConfidence, ...
+            imageSize, 'regionConfidence');
+    end
 else
     confidence = regions;
 end
@@ -179,6 +190,7 @@ if ~isstruct(value) || ~isscalar(value)
     error('normalizeBeautyContext:InvalidSemantic', ...
         '字段 %s 必须是语义概率结构体。', fieldName);
 end
+
 values = struct();
 for index = 1:numel(names)
     name = names{index};
@@ -189,6 +201,39 @@ for index = 1:numel(names)
     values.(name) = validateMask(value.(name), imageSize, ...
         [fieldName, '.', name]);
 end
+end
+
+function values = normalizePartialSemanticStruct(value, imageSize, fieldName)
+if ~isstruct(value) || ~isscalar(value)
+    error('normalizeBeautyContext:InvalidSemantic', ...
+        '字段 %s 必须是语义概率结构体。', fieldName);
+end
+names = faceParsingClassNames();
+values = struct();
+for index = 1:numel(names)
+    name = names{index};
+    if isfield(value, name)
+        values.(name) = validateMask(value.(name), imageSize, ...
+            [fieldName, '.', name]);
+    else
+        values.(name) = zeros(imageSize(1:2));
+    end
+end
+end
+
+function valid = allowsPartialSemantics(context)
+valid = isfield(context, 'migrationDiagnostics') && ...
+    isstruct(context.migrationDiagnostics) && ...
+    isscalar(context.migrationDiagnostics) && ...
+    isfield(context.migrationDiagnostics, 'status') && ...
+    isTextEqual(context.migrationDiagnostics.status, 'resized');
+end
+
+function valid = isTextEqual(value, expected)
+if isstring(value) && isscalar(value)
+    value = char(value);
+end
+valid = ischar(value) && size(value, 1) == 1 && strcmp(value, expected);
 end
 
 function validateSemanticField(value, imageSize, name)

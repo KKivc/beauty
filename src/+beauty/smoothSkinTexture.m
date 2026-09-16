@@ -26,17 +26,14 @@ requiredMaskFields = {'strengthMap', 'textureProtectionMask', ...
 if ~all(isfield(beautyMasks, requiredMaskFields))
     error('beauty:InvalidMasks', 'v3 Beauty Masks 缺少必需字段。');
 end
-% 色度保护只由独立色度模块消费；这里仍校验其 canonical/alias 字段，
+% 色度保护只由独立色度模块消费；此处通过规范字段解析兼容 alias，
 % 防止错误的 Context 在进入管线后才以难定位的方式失败。
-if isfield(beautyMasks, 'toneProtectionMask')
-    validateMask(beautyMasks.toneProtectionMask, imageSize, ...
-        'toneProtectionMask');
-elseif isfield(beautyMasks, 'chromaProtectionMask')
-    validateMask(beautyMasks.chromaProtectionMask, imageSize, ...
-        'chromaProtectionMask');
-else
+[~, hasChromaProtection] = resolveChromaProtectionMask( ...
+    beautyMasks, imageSize, 'beauty:InvalidMasks', ...
+    'beauty:ChromaProtectionConflict');
+if ~hasChromaProtection
     error('beauty:InvalidMasks', ...
-        'v3 Beauty Masks 缺少 toneProtectionMask 或 chromaProtectionMask。');
+        'v3 Beauty Masks 缺少 chromaProtectionMask。');
 end
 strengthMap = validateMask(beautyMasks.strengthMap, imageSize, ...
     'strengthMap');

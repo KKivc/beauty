@@ -38,6 +38,10 @@ classdef faceDetectionApp < matlab.apps.AppBase
         % 记录输入文件信息，用于生成默认输出文件名。
         inputFormat = ''
         inputBaseName = ''
+        inputImageInfo = []
+
+        % 保存最近一次处理诊断，便于确认缓存是否被复用或重建。
+        lastDiagnostics = []
 
         % 记录上次拖动预览时间，限制实时刷新频率。
         previewClock = []
@@ -77,6 +81,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
             filePath = fullfile(folderPath, fileName);
             try
                 inputImage = imread(filePath);
+                imageInfo = imfinfo(filePath);
             catch exception
                 app.clearLoadedImage();
                 uialert(app.UIFigure, exception.message, 'Unable to Open Image');
@@ -97,6 +102,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
             app.clearLoadedImage();
             [~, baseName, extension] = fileparts(fileName);
             app.sourceImage = inputImage;
+            app.inputImageInfo = imageInfo;
             app.previewScale = min(1, 640 / max(size(inputImage, 1), size(inputImage, 2)));
             if app.previewScale < 1
                 app.previewImage = imresize(inputImage, app.previewScale, 'bilinear');
@@ -241,9 +247,10 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 'whiteningStrength', whiteningStrength);
             try
                 startTime = tic;
-                outputImage = beautifyImage( ...
+                [outputImage, processingDiagnostics] = beautifyImage( ...
                     app.previewImage, params, app.previewFaceBox, app.previewContext);
                 elapsedSeconds = toc(startTime);
+                app.lastDiagnostics = processingDiagnostics;
                 if updateMetrics
                     metrics = evaluateImage(app.previewImage, outputImage, elapsedSeconds);
                 else
@@ -329,10 +336,13 @@ classdef faceDetectionApp < matlab.apps.AppBase
                     size(app.sourceImage), app.faceBox, app.sourceImage);
                 fullParams = struct('smoothingStrength', app.SmoothingSlider.Value, ...
                     'whiteningStrength', app.WhiteningSlider.Value);
-                outputImage = beautifyImage(app.sourceImage, fullParams, ...
-                    app.faceBox, fullContext);
-                imwrite(outputImage, outputPath);
+                [outputImage, saveDiagnostics] = beautifyImage( ...
+                    app.sourceImage, fullParams, app.faceBox, fullContext);
+                app.lastDiagnostics = saveDiagnostics;
+                app.writeImageWithResolution(outputImage, outputPath, ...
+                    app.inputImageInfo);
                 outputImage = imread(outputPath);
+                outputInfo = imfinfo(outputPath);
             catch exception
                 uialert(app.UIFigure, exception.message, 'Unable to Save Image');
                 return;
@@ -345,9 +355,12 @@ classdef faceDetectionApp < matlab.apps.AppBase
             sameChannels = ndims(outputImage) == 3 && outputSize(3) == 3;
             sameAspectRatio = outputSize(2) * inputSize(1) == ...
                 inputSize(2) * outputSize(1);
-            if ~samePixels || ~sameChannels || ~sameAspectRatio
+            sameResolution = app.hasSameResolution( ...
+                app.inputImageInfo, outputInfo);
+            if ~samePixels || ~sameChannels || ~sameAspectRatio || ...
+                    ~sameResolution
                 uialert(app.UIFigure, ...
-                    'The saved image pixel dimensions or channels do not match the input image.', ...
+                    '保存结果的尺寸、通道、比例或分辨率与输入图像不一致。', ...
                     'Save Verification Failed');
                 return;
             end
@@ -364,6 +377,8 @@ classdef faceDetectionApp < matlab.apps.AppBase
             app.previewScale = 1;
             app.inputFormat = '';
             app.inputBaseName = '';
+            app.inputImageInfo = [];
+            app.lastDiagnostics = [];
             cla(app.SourceAxes);
             title(app.SourceAxes, 'Original Image');
             app.clearDetectionResult();
@@ -379,6 +394,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
             app.faceBox = zeros(0, 4);
             app.beautyContext = [];
             app.currentMetrics = [];
+            app.lastDiagnostics = [];
             app.previewClock = [];
             app.hasSingleFace = false;
             if ~isempty(app.SmoothingSlider)
@@ -429,6 +445,91 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 format = 'png';
             else
                 format = 'jpg';
+            end
+        end
+
+        function writeImageWithResolution(~, imageData, outputPath, imageInfo)
+            % 保存时传递输入文件的像素分辨率元数据。
+            options = {};
+            [~, ~, extension] = fileparts(outputPath);
+            if strcmpi(extension, '.png') && ...
+                    isstruct(imageInfo) && isscalar(imageInfo) && ...
+                    all(isfield(imageInfo, {'XResolution', 'YResolution'})) && ...
+                    isnumeric(imageInfo.XResolution) && ...
+                    isnumeric(imageInfo.YResolution) && ...
+                    isfinite(imageInfo.XResolution) && ...
+                    isfinite(imageInfo.YResolution) && ...
+                    imageInfo.XResolution > 0 && imageInfo.YResolution > 0
+                resolution = double([imageInfo.XResolution, ...
+                    imageInfo.YResolution]);
+                resolutionUnit = 'unknown';
+                if isfield(imageInfo, 'ResolutionUnit')
+                    unit = imageInfo.ResolutionUnit;
+                    if isstring(unit) && isscalar(unit)
+                        unit = char(unit);
+                    end
+                    if ischar(unit) && size(unit, 1) == 1
+                        unit = lower(strtrim(unit));
+                        if strcmp(unit, 'meter')
+                            resolutionUnit = 'meter';
+                        elseif strcmp(unit, 'inch')
+                            resolution = resolution * 39.3700787401575;
+                            resolutionUnit = 'meter';
+                        elseif strcmp(unit, 'centimeter')
+                            resolution = resolution * 100;
+                            resolutionUnit = 'meter';
+                        end
+                    end
+                end
+                options = {'XResolution', resolution(1), ...
+                    'YResolution', resolution(2), ...
+                    'ResolutionUnit', resolutionUnit};
+            end
+            imwrite(imageData, outputPath, options{:});
+        end
+
+        function same = hasSameResolution(~, inputInfo, outputInfo)
+            % 只有输入文件声明了分辨率时才执行元数据等值校验。
+            same = true;
+            if ~isstruct(inputInfo) || ~isscalar(inputInfo) || ...
+                    ~all(isfield(inputInfo, {'XResolution', 'YResolution'}))
+                return;
+            end
+            if ~isstruct(outputInfo) || ~isscalar(outputInfo) || ...
+                    ~all(isfield(outputInfo, {'XResolution', 'YResolution'}))
+                same = false;
+                return;
+            end
+            [inputResolution, inputValid] = app.resolutionInMeters(inputInfo);
+            [outputResolution, outputValid] = app.resolutionInMeters(outputInfo);
+            same = inputValid && outputValid && ...
+                all(abs(outputResolution - inputResolution) <= ...
+                max(1e-6, abs(inputResolution) * 1e-6));
+        end
+
+        function [resolution, valid] = resolutionInMeters(~, imageInfo)
+            resolution = double([imageInfo.XResolution, ...
+                imageInfo.YResolution]);
+            valid = all(isfinite(resolution)) && all(resolution > 0);
+            if ~valid || ~isfield(imageInfo, 'ResolutionUnit')
+                return;
+            end
+            unit = imageInfo.ResolutionUnit;
+            if isstring(unit) && isscalar(unit)
+                unit = char(unit);
+            end
+            if ~ischar(unit) || size(unit, 1) ~= 1
+                valid = false;
+                return;
+            end
+            switch lower(strtrim(unit))
+                case 'meter'
+                case 'inch'
+                    resolution = resolution * 39.3700787401575;
+                case 'centimeter'
+                    resolution = resolution * 100;
+                otherwise
+                    % unknown 单位只能比较原始数值，不能进行物理换算。
             end
         end
 

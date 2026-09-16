@@ -48,6 +48,91 @@ recommended = recommendBeautyParams(image, faceBox, context);
 verifyTrue(testCase, isfield(recommended, 'smoothingStrength'));
 end
 
+function testRuntimeCacheDeclaresCanonicalArtifacts(testCase)
+[image, faceBox, parsing] = fixtureContext(40, 60);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+cache = context.runtimeCache;
+verifyEqual(testCase, cache.schemaVersion, '3.1');
+verifyEqual(testCase, cache.algorithmVersion, 'v3.1');
+verifyEqual(testCase, cache.artifactVersion, 'v3.1');
+verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.1');
+verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.1');
+verifyEqual(testCase, cache.artifactInfo.blemishMap, 'v3.1');
+verifyEqual(testCase, cache.beautyMasks.chromaProtectionMask, ...
+    cache.beautyMasks.toneProtectionMask, 'AbsTol', 0);
+verifyEqual(testCase, cache.frequency.schemaVersion, '3.1');
+verifyEqual(testCase, cache.blemishDiagnostics.schemaVersion, '3.1');
+end
+
+function testHistoricalRuntimeCacheIsRegenerated(testCase)
+[image, faceBox, parsing] = fixtureContext(40, 60);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+historical = context;
+historical.runtimeCache.schemaVersion = '3.0';
+[output, diagnostics] = beautifyImage(image, struct( ...
+    'smoothingStrength', 25, 'whiteningStrength', 15), faceBox, historical);
+verifySize(testCase, output, [40, 60, 3]);
+verifyFalse(testCase, diagnostics.reusedRuntimeCache);
+verifyEqual(testCase, diagnostics.runtimeCache.status, 'regenerated');
+verifyEqual(testCase, diagnostics.runtimeCache.sourceSchemaVersion, '3.0');
+end
+
+function testExplicitMigrationRegeneratesHistoricalCache(testCase)
+[image, faceBox, parsing] = fixtureContext(40, 60);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+legacy = rmfield(context, 'chromaProtectionMask');
+legacy.schemaVersion = '3.0';
+legacy.runtimeCache.schemaVersion = '3.0';
+migrated = migrateBeautyContext(legacy);
+verifyEqual(testCase, migrated.schemaVersion, '3.1');
+verifyEqual(testCase, migrated.migrationDiagnostics.status, 'regenerated');
+verifyEqual(testCase, migrated.migrationDiagnostics.sourceSchemaVersion, '3.0');
+verifyEqual(testCase, migrated.runtimeCache.schemaVersion, '3.1');
+verifyEqual(testCase, migrated.runtimeCache.migration.status, 'regenerated');
+end
+
+function testResizedContextCarriesCompleteSchema(testCase)
+[image, faceBox, parsing] = fixtureContext(40, 60);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+targetSize = [80, 120];
+targetFaceBox = [20, 16, 60, 48];
+resized = resizeBeautyContext(context, [targetSize, 3], targetFaceBox);
+required = {'regions', 'regionConfidence', 'strengthMap', ...
+    'faceStrengthMap', 'nonFaceStrengthMap', 'chromaProtectionMask', ...
+    'toneProtectionMask', 'protectionMasks'};
+verifyTrue(testCase, all(isfield(resized, required)));
+verifySize(testCase, resized.regions.nose, [80, 120]);
+verifyFalse(testCase, isfield(resized, 'runtimeCache'));
+
+targetImage = imresize(image, targetSize, 'bilinear');
+[output, diagnostics] = beautifyImage(targetImage, struct( ...
+    'smoothingStrength', 25, 'whiteningStrength', 15), ...
+    targetFaceBox, resized);
+verifySize(testCase, output, [80, 120, 3]);
+verifyFalse(testCase, diagnostics.reusedRuntimeCache);
+end
+
+function testOriginalSizeContextCacheCanBeReusedExactly(testCase)
+[image, faceBox, parsing] = fixtureContext(40, 60);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+targetImage = imresize(image, [80, 120], 'bilinear');
+targetFaceBox = [20, 16, 60, 48];
+resized = resizeBeautyContext(context, [80, 120, 3], ...
+    targetFaceBox, targetImage);
+params = struct('smoothingStrength', 50, 'whiteningStrength', 25);
+[cachedOutput, cachedDiagnostics] = beautifyImage( ...
+    targetImage, params, targetFaceBox, resized);
+uncached = rmfield(resized, 'runtimeCache');
+uncachedOutput = beautifyImage(targetImage, params, targetFaceBox, uncached);
+verifyTrue(testCase, cachedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, cachedOutput, uncachedOutput);
+end
+
 function testNormalizeRejectsLegacyAndInvalidContext(testCase)
 [image, faceBox, parsing] = fixtureContext(40, 60);
 context = prepareBeautyContext(image, faceBox, parsing, ...
@@ -77,6 +162,11 @@ wrongSemantic = context;
 wrongSemantic.semanticProbabilities = zeros(40, 60, 18, 'single');
 verifyError(testCase, @() normalizeBeautyContext(image, faceBox, wrongSemantic), ...
     'normalizeBeautyContext:InvalidSemantic');
+
+unsupportedMinor = context;
+unsupportedMinor.schemaVersion = '3.2';
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, unsupportedMinor), ...
+    'normalizeBeautyContext:UnsupportedVersion');
 end
 
 function testOriginalSizeRebuildsDerivedProtectionMasks(testCase)

@@ -42,20 +42,32 @@ if hasTargetImage
     rebuilt = attachDerivedMasks(targetImage, rebuilt, targetFaceBox);
     resizedContext = normalizeBeautyContext(targetImage, ...
         double(targetFaceBox), rebuilt);
+    [runtimeMasks, maskDiagnostics] = masks.buildBeautyMasks( ...
+        targetImage, resizedContext, double(targetFaceBox));
+    migration = struct( ...
+        'status', 'resizedAndRegenerated', ...
+        'sourceSchemaVersion', schemaVersionText(context.schemaVersion), ...
+        'message', '原尺寸 Context 已重新生成 v3.1 派生产物。');
+    resizedContext.migrationDiagnostics = migration;
+    resizedContext.runtimeCache = buildBeautyRuntimeCache( ...
+        targetImage, double(targetFaceBox), runtimeMasks, maskDiagnostics, migration);
     return;
 end
 
-% 三参数入口是轻量迁移入口，只携带后续显示所需的 Mask 和鼻部语义；
-% 原尺寸保存必须使用上面的目标原图分支，以重新生成完整 v3 Context。
+% 三参数入口没有目标原图，不能重新计算依赖像素的派生结果；它仍需
+% 完整携带语义、皮肤、保护和强度字段，避免下游规范化时回落到旧尺寸。
 [sourceChroma, ~] = resolveChromaProtectionMask(context, sourceSize, ...
     'resizeBeautyContext:InvalidContext', ...
     'resizeBeautyContext:ChromaProtectionConflict');
-resizedSkin = resizeMask(context.skinMask, targetSize);
-resizedFaceSkin = resizeMask(context.faceSkinMask, targetSize);
-resizedNonFaceSkin = resizeMask(context.nonFaceSkinMask, targetSize);
-resizedTexture = resizeMask(context.textureProtectionMask, targetSize);
-resizedStructure = resizeMask(context.structureProtectionMask, targetSize);
-resizedChroma = resizeMask(sourceChroma, targetSize);
+resizedSkin = resizeLightweightMask(context.skinMask, targetSize);
+resizedFaceSkin = resizeLightweightMask(context.faceSkinMask, targetSize);
+resizedNonFaceSkin = resizeLightweightMask(context.nonFaceSkinMask, targetSize);
+resizedTexture = resizeLightweightMask(context.textureProtectionMask, targetSize);
+resizedStructure = resizeLightweightMask(context.structureProtectionMask, targetSize);
+resizedChroma = resizeLightweightMask(sourceChroma, targetSize);
+resizedStrength = resizeLightweightMask(context.strengthMap, targetSize);
+resizedFaceStrength = resizeLightweightMask(context.faceStrengthMap, targetSize);
+resizedNonFaceStrength = resizeLightweightMask(context.nonFaceStrengthMap, targetSize);
 resizedContext = struct( ...
     'skinMask', resizedSkin, ...
     'faceSkinMask', resizedFaceSkin, ...
@@ -64,35 +76,53 @@ resizedContext = struct( ...
     'structureProtectionMask', resizedStructure, ...
     'chromaProtectionMask', resizedChroma, ...
     'toneProtectionMask', resizedChroma, ...
+    'strengthMap', resizedStrength, ...
+    'faceStrengthMap', resizedFaceStrength, ...
+    'nonFaceStrengthMap', resizedNonFaceStrength, ...
     'schemaVersion', '3.1', ...
     'imageSize', [targetSize, 3], ...
-    'faceBox', double(targetFaceBox));
+    'faceBox', double(targetFaceBox), ...
+    'migrationDiagnostics', struct( ...
+    'status', 'resized', ...
+    'sourceSchemaVersion', schemaVersionText(context.schemaVersion), ...
+    'message', '已按目标尺寸缩放 v3.1 Context 派生字段。'), ...
+    'protectionMasks', struct( ...
+    'texture', resizedTexture, ...
+    'structure', resizedStructure, ...
+    'chroma', resizedChroma, ...
+    'tone', resizedChroma));
 if isfield(context, 'bodySkinMask')
     if isequal(context.bodySkinMask, context.nonFaceSkinMask)
         resizedContext.bodySkinMask = resizedNonFaceSkin;
     else
-        resizedContext.bodySkinMask = resizeMask(context.bodySkinMask, targetSize);
-    end
-end
-maskNames = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
-    'textureProtectionMask', 'structureProtectionMask', ...
-    'toneProtectionMask', 'bodySkinMask'};
-for index = 1:numel(maskNames)
-    name = maskNames{index};
-    if isfield(context, name) && ~isfield(resizedContext, name)
-        validateSourceMask(context.(name), sourceSize, name);
-        resizedContext.(name) = resizeMask(context.(name), targetSize);
+        resizedContext.bodySkinMask = resizeLightweightMask( ...
+            context.bodySkinMask, targetSize);
     end
 end
 if isfield(context, 'regions') && isfield(context.regions, 'nose')
-    % 轻量迁移沿用语义堆栈的 single 精度，避免新增 alias 使大图缓存膨胀。
+    % 轻量入口只保留已有的鼻部语义，完整语义仅在目标原图分支使用。
     resizedContext.regions = struct('nose', single(resizeMask( ...
         context.regions.nose, targetSize)));
+elseif isfield(context, 'semanticProbabilities')
+    names = faceParsingClassNames();
+    noseIndex = find(strcmp(names, 'nose'), 1);
+    probabilities = readSemanticStack(context, sourceSize, ...
+        'semanticProbabilities');
+    resizedContext.regions = struct('nose', single(resizeMask( ...
+        probabilities(:, :, noseIndex), targetSize)));
 end
 if isfield(context, 'regionConfidence') && ...
         isfield(context.regionConfidence, 'nose')
     resizedContext.regionConfidence = struct('nose', single(resizeMask( ...
         context.regionConfidence.nose, targetSize)));
+elseif isfield(context, 'semanticConfidence') || ...
+        isfield(context, 'semanticProbabilities')
+    names = faceParsingClassNames();
+    noseIndex = find(strcmp(names, 'nose'), 1);
+    confidence = readSemanticStack(context, sourceSize, ...
+        'semanticConfidence');
+    resizedContext.regionConfidence = struct('nose', single(resizeMask( ...
+        confidence(:, :, noseIndex), targetSize)));
 end
 end
 
@@ -101,7 +131,7 @@ function context = attachDerivedMasks(inputImage, context, faceBox)
 context.textureProtectionMask = beautyMasks.textureProtectionMask;
 context.structureProtectionMask = beautyMasks.structureProtectionMask;
 context.chromaProtectionMask = beautyMasks.chromaProtectionMask;
-context.toneProtectionMask = beautyMasks.toneProtectionMask;
+context.toneProtectionMask = context.chromaProtectionMask;
 context.strengthMap = beautyMasks.strengthMap;
 context.faceStrengthMap = beautyMasks.faceStrengthMap;
 context.nonFaceStrengthMap = beautyMasks.nonFaceStrengthMap;
@@ -109,7 +139,7 @@ context.protectionMasks = struct( ...
     'texture', beautyMasks.textureProtectionMask, ...
     'structure', beautyMasks.structureProtectionMask, ...
     'chroma', beautyMasks.chromaProtectionMask, ...
-    'tone', beautyMasks.toneProtectionMask);
+    'tone', context.chromaProtectionMask);
 end
 
 function [chromaProtectionMask, hasChromaProtectionMask] = ...
@@ -139,7 +169,11 @@ if ~isnumeric(context.imageSize) || ~isequal(size(context.imageSize), [1, 3]) ||
         '源 Context 的 imageSize 无效。');
 end
 if ~isnumeric(context.faceBox) || ~isequal(size(context.faceBox), [1, 4]) || ...
-        any(~isfinite(context.faceBox))
+        ~isreal(context.faceBox) || any(~isfinite(context.faceBox)) || ...
+        context.faceBox(1) < 1 || context.faceBox(2) < 1 || ...
+        any(context.faceBox(3:4) <= 0) || ...
+        context.faceBox(1) + context.faceBox(3) - 1 > sourceSize(2) || ...
+        context.faceBox(2) + context.faceBox(4) - 1 > sourceSize(1)
     error('resizeBeautyContext:InvalidContext', ...
         '源 Context 的 faceBox 无效。');
 end
@@ -162,27 +196,57 @@ for index = 1:numel(derived)
         validateSourceMask(context.(name), sourceSize, name);
     end
 end
+if isfield(context, 'bodySkinMask')
+    validateSourceMask(context.bodySkinMask, sourceSize, 'bodySkinMask');
+end
 end
 
 function valid = isV3Version(value)
 if isnumeric(value) && isreal(value) && isscalar(value) && isfinite(value)
-    valid = value >= 3 && value < 4;
+    valid = value == 3 || value == 3.1;
     return;
 end
 if isstring(value) && isscalar(value)
     value = char(value);
 end
-valid = ischar(value) && size(value, 1) == 1 && startsWith(value, '3');
+valid = ischar(value) && size(value, 1) == 1 && ...
+    any(strcmp(value, {'3.0', '3.1'}));
+end
+
+function value = schemaVersionText(version)
+if isnumeric(version) && isscalar(version) && version == 3
+    value = '3.0';
+elseif isnumeric(version) && isscalar(version) && version == 3.1
+    value = '3.1';
+elseif isstring(version) && isscalar(version)
+    value = char(version);
+elseif ischar(version) && size(version, 1) == 1
+    value = version;
+else
+    value = 'unknown';
+end
 end
 
 function values = readSemanticStack(context, sourceSize, name)
 if isfield(context, name)
     values = context.(name);
 elseif strcmp(name, 'semanticConfidence')
-    values = context.semanticProbabilities;
+    if isfield(context, 'semanticProbabilities')
+        values = context.semanticProbabilities;
+    elseif allowsPartialSemantics(context)
+        values = stackPartialSemantics(context.regions, ...
+            faceParsingClassNames(), sourceSize);
+    else
+        error('resizeBeautyContext:InvalidContext', ...
+            '源 Context 缺少字段 %s。', name);
+    end
 else
     names = faceParsingClassNames();
-    values = stackSemantics(context.regions, names);
+    if allowsPartialSemantics(context)
+        values = stackPartialSemantics(context.regions, names, sourceSize);
+    else
+        values = stackSemantics(context.regions, names);
+    end
 end
 if ~isnumeric(values) || ~isreal(values) || ndims(values) ~= 3 || ...
         ~isequal(size(values, 1:2), sourceSize) || ...
@@ -218,9 +282,50 @@ for index = 1:numel(names)
 end
 end
 
+function values = stackPartialSemantics(semanticStruct, names, imageSize)
+if ~isstruct(semanticStruct) || ~isscalar(semanticStruct)
+    error('resizeBeautyContext:InvalidContext', ...
+        '轻量 Context 的语义字段必须是标量结构体。');
+end
+values = zeros([imageSize, numel(names)], 'single');
+for index = 1:numel(names)
+    name = names{index};
+    if isfield(semanticStruct, name)
+        value = semanticStruct.(name);
+        if ~isnumeric(value) || ~isreal(value) || ...
+                ~isequal(size(value), imageSize) || ...
+                any(~isfinite(value(:))) || any(value(:) < 0) || ...
+                any(value(:) > 1)
+            error('resizeBeautyContext:InvalidContext', ...
+                '轻量 Context 的语义类别 %s 无效。', name);
+        end
+        values(:, :, index) = single(value);
+    end
+end
+end
+
+function valid = allowsPartialSemantics(context)
+valid = isfield(context, 'migrationDiagnostics') && ...
+    isstruct(context.migrationDiagnostics) && ...
+    isscalar(context.migrationDiagnostics) && ...
+    isfield(context.migrationDiagnostics, 'status') && ...
+    isTextEqual(context.migrationDiagnostics.status, 'resized');
+end
+
+function valid = isTextEqual(value, expected)
+if isstring(value) && isscalar(value)
+    value = char(value);
+end
+valid = ischar(value) && size(value, 1) == 1 && strcmp(value, expected);
+end
+
 function output = resizeMask(value, targetSize)
 output = min(1, max(0, imresize(double(value), targetSize, ...
     'bilinear')));
+end
+
+function output = resizeLightweightMask(value, targetSize)
+output = single(resizeMask(value, targetSize));
 end
 
 function validateSourceMask(value, sourceSize, name)

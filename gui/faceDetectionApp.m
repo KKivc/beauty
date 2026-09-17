@@ -77,8 +77,11 @@ classdef faceDetectionApp < matlab.apps.AppBase
             if isequal(fileName, 0)
                 return;
             end
+            app.openImageFromPath(fullfile(folderPath, fileName));
+        end
 
-            filePath = fullfile(folderPath, fileName);
+        function openImageFromPath(app, filePath)
+            % 由按钮和可重复的 GUI 回归共同调用的打开流程。
             try
                 inputImage = imread(filePath);
                 imageInfo = imfinfo(filePath);
@@ -100,7 +103,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
 
             % 新图像进入检测前先清理旧的结果和保存状态。
             app.clearLoadedImage();
-            [~, baseName, extension] = fileparts(fileName);
+            [~, baseName, extension] = fileparts(filePath);
             app.sourceImage = inputImage;
             app.inputImageInfo = imageInfo;
             app.previewScale = min(1, 640 / max(size(inputImage, 1), size(inputImage, 2)));
@@ -307,8 +310,13 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 return;
             end
 
+            defaultExtension = app.inputFormat;
+            if strcmp(defaultExtension, 'jpg') && ...
+                    app.hasResolutionMetadata(app.inputImageInfo)
+                defaultExtension = 'png';
+            end
             defaultName = sprintf('%s_beautified.%s', ...
-                app.inputBaseName, app.inputFormat);
+                app.inputBaseName, defaultExtension);
             [fileName, folderPath, filterIndex] = uiputfile( ...
                 {'*.jpg', 'JPEG Image (*.jpg)'; '*.png', 'PNG Image (*.png)'}, ...
                 'Save Beauty Result', defaultName);
@@ -332,21 +340,42 @@ classdef faceDetectionApp < matlab.apps.AppBase
             outputPath = fullfile(folderPath, [outputBaseName, extension]);
 
             try
-                fullContext = resizeBeautyContext(app.previewContext, ...
-                    size(app.sourceImage), app.faceBox, app.sourceImage);
-                fullParams = struct('smoothingStrength', app.SmoothingSlider.Value, ...
-                    'whiteningStrength', app.WhiteningSlider.Value);
-                [outputImage, saveDiagnostics] = beautifyImage( ...
-                    app.sourceImage, fullParams, app.faceBox, fullContext);
-                app.lastDiagnostics = saveDiagnostics;
-                app.writeImageWithResolution(outputImage, outputPath, ...
-                    app.inputImageInfo);
-                outputImage = imread(outputPath);
-                outputInfo = imfinfo(outputPath);
+                app.saveImageToPath(outputPath);
             catch exception
                 uialert(app.UIFigure, exception.message, 'Unable to Save Image');
                 return;
             end
+        end
+
+        function saveImageToPath(app, outputPath)
+            % 保存原尺寸结果，并在写盘后校验尺寸、比例和分辨率。
+            if ~app.hasSingleFace || isempty(app.beautifiedImage)
+                error('faceDetectionApp:NoBeautyResult', ...
+                    '保存前必须先打开包含可识别人脸的图像。');
+            end
+            if ~(ischar(outputPath) && size(outputPath, 1) == 1) && ...
+                    ~(isstring(outputPath) && isscalar(outputPath))
+                error('faceDetectionApp:InvalidOutputPath', ...
+                    '输出路径必须是字符向量或字符串标量。');
+            end
+            outputPath = char(outputPath);
+            [~, ~, extension] = fileparts(outputPath);
+            if ~ismember(lower(extension), {'.jpg', '.jpeg', '.png'})
+                error('faceDetectionApp:UnsupportedOutputFormat', ...
+                    '输出结果必须保存为 JPG 或 PNG。');
+            end
+
+            fullContext = resizeBeautyContext(app.previewContext, ...
+                size(app.sourceImage), app.faceBox, app.sourceImage);
+            fullParams = struct('smoothingStrength', app.SmoothingSlider.Value, ...
+                'whiteningStrength', app.WhiteningSlider.Value);
+            [outputImage, saveDiagnostics] = beautifyImage( ...
+                app.sourceImage, fullParams, app.faceBox, fullContext);
+            app.lastDiagnostics = saveDiagnostics;
+            app.writeImageWithResolution(outputImage, outputPath, ...
+                app.inputImageInfo);
+            outputImage = imread(outputPath);
+            outputInfo = imfinfo(outputPath);
 
             inputSize = size(app.sourceImage);
             outputSize = size(outputImage);
@@ -359,10 +388,8 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 app.inputImageInfo, outputInfo);
             if ~samePixels || ~sameChannels || ~sameAspectRatio || ...
                     ~sameResolution
-                uialert(app.UIFigure, ...
-                    '保存结果的尺寸、通道、比例或分辨率与输入图像不一致。', ...
-                    'Save Verification Failed');
-                return;
+                error('faceDetectionApp:SaveVerificationFailed', ...
+                    '保存结果的尺寸、通道、比例或分辨率与输入图像不一致。');
             end
 
             app.StatusLabel.Text = 'Beauty result saved successfully.';
@@ -448,6 +475,19 @@ classdef faceDetectionApp < matlab.apps.AppBase
             end
         end
 
+        function hasResolution = hasResolutionMetadata(~, imageInfo)
+            % 有分辨率元数据时默认选择可携带该元数据的 PNG。
+            hasResolution = isstruct(imageInfo) && isscalar(imageInfo) && ...
+                all(isfield(imageInfo, {'XResolution', 'YResolution'})) && ...
+                isnumeric(imageInfo.XResolution) && ...
+                isnumeric(imageInfo.YResolution) && ...
+                isscalar(imageInfo.XResolution) && ...
+                isscalar(imageInfo.YResolution) && ...
+                isfinite(imageInfo.XResolution) && ...
+                isfinite(imageInfo.YResolution) && ...
+                imageInfo.XResolution > 0 && imageInfo.YResolution > 0;
+        end
+
         function writeImageWithResolution(~, imageData, outputPath, imageInfo)
             % 保存时传递输入文件的像素分辨率元数据。
             options = {};
@@ -488,7 +528,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
             imwrite(imageData, outputPath, options{:});
         end
 
-        function same = hasSameResolution(~, inputInfo, outputInfo)
+        function same = hasSameResolution(app, inputInfo, outputInfo)
             % 只有输入文件声明了分辨率时才执行元数据等值校验。
             same = true;
             if ~isstruct(inputInfo) || ~isscalar(inputInfo) || ...
@@ -504,7 +544,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
             [outputResolution, outputValid] = app.resolutionInMeters(outputInfo);
             same = inputValid && outputValid && ...
                 all(abs(outputResolution - inputResolution) <= ...
-                max(1e-6, abs(inputResolution) * 1e-6));
+                max(1, abs(inputResolution) * 1e-6));
         end
 
         function [resolution, valid] = resolutionInMeters(~, imageInfo)
@@ -664,6 +704,62 @@ classdef faceDetectionApp < matlab.apps.AppBase
             if nargout == 0
                 clear app
             end
+        end
+
+        function openImageFile(app, filePath)
+            % 按路径执行与“打开图像”按钮相同的完整流程。
+            if ~(ischar(filePath) && size(filePath, 1) == 1) && ...
+                    ~(isstring(filePath) && isscalar(filePath))
+                error('faceDetectionApp:InvalidInputPath', ...
+                    '输入路径必须是字符向量或字符串标量。');
+            end
+            app.openImageFromPath(char(filePath));
+            if ~app.hasSingleFace
+                error('faceDetectionApp:OpenImageFailed', ...
+                    '图像未能完成单人脸分析。');
+            end
+        end
+
+        function setBeautyParameters(app, smoothingStrength, whiteningStrength)
+            % 设置两个滑块并强制执行一次实时预览。
+            values = [smoothingStrength, whiteningStrength];
+            if ~isnumeric(values) || ~isreal(values) || ...
+                    any(~isfinite(values)) || any(values < 0) || ...
+                    any(values > 100)
+                error('faceDetectionApp:InvalidBeautyParameters', ...
+                    '美颜强度必须是 0 到 100 内的有限数值。');
+            end
+            if ~app.hasSingleFace
+                error('faceDetectionApp:NoBeautyResult', ...
+                    '设置参数前必须先打开图像。');
+            end
+            app.SmoothingSlider.Value = smoothingStrength;
+            app.WhiteningSlider.Value = whiteningStrength;
+            app.updateStrengthLabels();
+            app.refreshPreview(smoothingStrength, whiteningStrength, true);
+        end
+
+        function applyOneClickBeauty(app)
+            % 执行与“一键美颜”按钮相同的推荐和预览流程。
+            if ~app.hasSingleFace
+                error('faceDetectionApp:NoBeautyResult', ...
+                    '一键美颜前必须先打开图像。');
+            end
+            app.oneClickBeautyButtonPushed([]);
+        end
+
+        function resetBeauty(app)
+            % 执行与“重置原图”按钮相同的严格原图恢复流程。
+            if ~app.hasSingleFace
+                error('faceDetectionApp:NoBeautyResult', ...
+                    '重置前必须先打开图像。');
+            end
+            app.resetBeautyButtonPushed([]);
+        end
+
+        function saveImageFile(app, outputPath)
+            % 按路径执行与“保存图像”按钮相同的原尺寸保存流程。
+            app.saveImageToPath(outputPath);
         end
 
         function delete(app)

@@ -39,6 +39,10 @@ if hasTargetImage
     if isfield(context, 'bodySkinMask')
         rebuilt.bodySkinMask = resizeMask(context.bodySkinMask, targetSize);
     end
+    % 前一步 buildBeautyContextFromParsing 已经基于未合并的脸外皮肤
+    % 生成过派生字段；合并目标尺寸的身体皮肤后必须清掉旧字段，
+    % 否则 runtime cache 会携带与最终 skinMask 不一致的结构和强度图。
+    rebuilt = clearDerivedMasks(rebuilt);
     rebuilt = attachDerivedMasks(targetImage, rebuilt, targetFaceBox);
     resizedContext = normalizeBeautyContext(targetImage, ...
         double(targetFaceBox), rebuilt);
@@ -153,6 +157,17 @@ context.protectionMasks = struct( ...
     'whitening', beautyMasks.whiteningProtectionMask, ...
     'chroma', beautyMasks.chromaProtectionMask, ...
     'tone', context.chromaProtectionMask);
+end
+
+function context = clearDerivedMasks(context)
+names = {'textureProtectionMask', 'structureProtectionMask', ...
+    'whiteningProtectionMask', 'chromaProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'nonFaceStrengthMap', 'protectionMasks'};
+names = names(isfield(context, names));
+if ~isempty(names)
+    context = rmfield(context, names);
+end
 end
 
 function [chromaProtectionMask, hasChromaProtectionMask] = ...

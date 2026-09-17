@@ -52,7 +52,9 @@ highlightProtection = highlightProtection .^ .80;
 % 语义阻断美白，脸外仍沿用原有弱处理约束。
 structureGate = 1 - structureProtection;
 faceSkin = faceSkinMask >= .5;
-structureGate(faceSkin) = 1 - .25 * structureProtection(faceSkin);
+% 脸部结构只做浅退让；过强的软门控会让眉周近区比远区
+% 少获得一档美白，形成可量化的亮度断层。
+structureGate(faceSkin) = 1 - .10 * structureProtection(faceSkin);
 allowed = min(skinMask, strengthMap) .* (1 - hardProtection);
 
 % 五官过渡由特征身份和人脸尺度单独生成，不能再用色度保护代替。
@@ -61,13 +63,29 @@ featureSetback = min(max(featureSetback, 0), 1);
 faceScale = readFaceScale(frequency, beautyMasks, imageSize);
 chromaGate = ones(imageSize);
 
-whiteningSupport = whiteningCurve .* allowed .* highlightProtection .* ...
-    structureGate .* featureSetback;
+% 合格脸部皮肤在五官近区仍可能因语义边界羽化而只有 0.5--0.7
+% 的 strengthMap；直接相乘会制造近区/远区亮度断层。脸部使用
+% 连续的最小作用权重，脸外仍保留原有弱化 strengthMap。
+faceStrength = faceSkinMask >= .5;
+allowed(faceStrength) = max(allowed(faceStrength), .85);
+
+supportBase = allowed .* highlightProtection .* structureGate .* ...
+    featureSetback;
+whiteningSupport = whiteningCurve .* supportBase;
 whiteningSupport = min(max(whiteningSupport, 0), 1);
-whiteningDelta = .20 * brightnessNeed * globalHeadroom .* ...
-    whiteningSupport;
+% supportBase 不含强度曲线，避免把 whiteningCurve 重复相乘。
+% 没有真实鼻部结构的输入保留完整连续曲线；存在鼻部结构时仅在
+% 高档封顶，避免高对比侧脸在 RGB 裁切后丢失鼻梁/鼻侧结构。
+whiteningAmplitude = .20 * whiteningCurve;
+hasNoseStructure = isfield(beautyMasks, 'noseMask') && ...
+    any(beautyMasks.noseMask(:) > .5);
+if hasNoseStructure
+    whiteningAmplitude = min(whiteningAmplitude, .07);
+end
+whiteningDelta = whiteningAmplitude * brightnessNeed * globalHeadroom .* ...
+    supportBase;
 whiteningDelta = min(max(whiteningDelta, 0), ...
-    max(.001, .20 * brightnessNeed));
+    max(.001, whiteningAmplitude * brightnessNeed));
 outputLuminance = min(max(sourceLuminance + whiteningDelta, 0), 1);
 
 whiteningResult = struct( ...

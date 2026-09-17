@@ -49,7 +49,9 @@ eyeTransition = skinTransition(eyeCore, qualifiedSkin, radii.eye, .50);
 lipTransition = skinTransition(lipCore, qualifiedSkin, radii.lip, .60);
 nostrilTransition = skinTransition(nostrilCore, qualifiedSkin, ...
     radii.nostril, .60);
-browTransition = skinTransition(browCore, qualifiedSkin, radii.brow, 2, 0);
+% 眉周只需抑制紧贴眉毛的极窄区域；更快退让可避免近区与
+% 远区美白出现明显亮度台阶，同时不扩大保护半径。
+browTransition = skinTransition(browCore, qualifiedSkin, radii.brow, 3, 0);
 lashTransition = skinTransition(lashCore, qualifiedSkin, radii.lash, .50);
 
 % 取最大值合并重叠保护；这里明确不加入整个鼻部语义区域。

@@ -38,12 +38,16 @@ if hasChromaProtectionMask
 end
 
 derivedNames = {'textureProtectionMask', 'structureProtectionMask', ...
-    'strengthMap', 'faceStrengthMap', ...
+    'whiteningProtectionMask', 'strengthMap', 'faceStrengthMap', ...
     'nonFaceStrengthMap'};
-if ~hasChromaProtectionMask || ~all(isfield(context, derivedNames))
+requiresRegeneration = hasMigrationStatus(context, ...
+    {'aliasMigrated', 'requiresRegeneration'});
+if ~hasChromaProtectionMask || ~all(isfield(context, derivedNames)) || ...
+        requiresRegeneration
     [beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
     context.textureProtectionMask = beautyMasks.textureProtectionMask;
     context.structureProtectionMask = beautyMasks.structureProtectionMask;
+    context.whiteningProtectionMask = beautyMasks.whiteningProtectionMask;
     context.chromaProtectionMask = beautyMasks.chromaProtectionMask;
     context.toneProtectionMask = beautyMasks.chromaProtectionMask;
     context.strengthMap = beautyMasks.strengthMap;
@@ -65,6 +69,7 @@ context.faceSkinMask = double(context.faceSkinMask);
 context.nonFaceSkinMask = double(context.nonFaceSkinMask);
 context.textureProtectionMask = double(context.textureProtectionMask);
 context.structureProtectionMask = double(context.structureProtectionMask);
+context.whiteningProtectionMask = double(context.whiteningProtectionMask);
 context.chromaProtectionMask = double(context.chromaProtectionMask);
 context.toneProtectionMask = double(context.toneProtectionMask);
 context.strengthMap = double(context.strengthMap);
@@ -73,11 +78,13 @@ context.nonFaceStrengthMap = double(context.nonFaceStrengthMap);
 context.protectionMasks = struct( ...
     'texture', context.textureProtectionMask, ...
     'structure', context.structureProtectionMask, ...
+    'whitening', context.whiteningProtectionMask, ...
     'chroma', context.chromaProtectionMask, ...
     'tone', context.chromaProtectionMask);
 context.schemaVersion = '3.1';
 context.imageSize = imageSize;
 context.faceBox = double(faceBox);
+context.faceScale = min(double(faceBox(3:4)));
 beautyContext = context;
 end
 
@@ -176,12 +183,28 @@ end
 
 function validateDerivedContext(context, imageSize)
 names = {'textureProtectionMask', 'structureProtectionMask', ...
-    'chromaProtectionMask', 'toneProtectionMask', 'strengthMap', ...
+    'whiteningProtectionMask', 'chromaProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', ...
     'faceStrengthMap', ...
     'nonFaceStrengthMap'};
 for index = 1:numel(names)
     validateMask(context.(names{index}), imageSize, names{index});
 end
+end
+
+function valid = hasMigrationStatus(context, statuses)
+valid = false;
+if ~isfield(context, 'migrationDiagnostics') || ...
+        ~isstruct(context.migrationDiagnostics) || ...
+        ~isscalar(context.migrationDiagnostics) || ...
+        ~isfield(context.migrationDiagnostics, 'status')
+    return;
+end
+status = context.migrationDiagnostics.status;
+if isstring(status) && isscalar(status)
+    status = char(status);
+end
+valid = ischar(status) && size(status, 1) == 1 && any(strcmp(status, statuses));
 end
 
 function values = normalizeSemanticStruct(value, imageSize, fieldName)

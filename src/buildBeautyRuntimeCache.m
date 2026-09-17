@@ -46,6 +46,8 @@ decompositionDiagnostics = stampArtifact(decompositionDiagnostics, contract);
     inputImage, frequency, beautyMasks);
 blemishDiagnostics = stampArtifact(blemishDiagnostics, contract);
 maskDiagnostics = stampArtifact(maskDiagnostics, contract);
+maskDiagnostics.whiteningProtectionMask = ...
+    beautyMasks.whiteningProtectionMask;
 maskDiagnostics.chromaProtectionMask = chromaProtectionMask;
 maskDiagnostics.toneProtectionMask = chromaProtectionMask;
 

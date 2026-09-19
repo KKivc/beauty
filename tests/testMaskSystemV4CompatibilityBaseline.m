@@ -25,6 +25,17 @@ function tests = testMaskSystemV4CompatibilityBaseline
 %
 %   后续 V4 架构迁移 Ticket（只改架构、不改效果）必须保持本测试通过；
 %   若确需变更效果，必须先在工单中重立 oracle 并更新基线文档。
+%
+%   T20（2026-09-19）：第一批真实 V4 policy 行为变化（工单
+%   20-eye-lip-identity-policy）。生产链（V4 Context 携带 evidence）对
+%   眼周/唇周执行三带分级保护：identity core 不新增 hard；soft detail
+%   band 抬升 smoothingFine/ smoothingMid 等 stage 字段；skin
+%   transition band 封顶 texture 通道打开处理量。compat Context（无
+%   evidence 层）仍走 T07 legacy 折叠，与 e889f31 逐位一致。structural
+%   断言（零强度=源图、hard 区域=源图、cached/uncached 一致、预览/
+%   原尺寸等价）不放松；仅 RGB digest oracle 按"当前真实输出重新录制"
+%   的规则更新（新旧对照见 tests/beauty-regression-baseline.md 的 T20
+%   章节；rich 0/100 与 s=0 场景因不触发 smoothing 而保持原值）。
 
 tests = functiontests(localfunctions);
 end
@@ -102,7 +113,9 @@ end
 end
 
 function testFinalRgbMatchesRecordedBaselineDigests(testCase)
-% 最终 RGB oracle：SHA-256（uint8 列优先字节序），在 e889f31 上录制。
+% 最终 RGB oracle：SHA-256（uint8 列优先字节序）。e889f31 录制；T20 起
+%   按"当前真实输出重新录制"规则更新（0/100 项未触发 smoothing，保持
+%   e889f31 原值）。
 [cases, expectedDigests] = recordedRgbBaseline();
 for index = 1:numel(cases)
     fixture = loadBaselineFixture(cases(index).fixture);
@@ -114,7 +127,7 @@ for index = 1:numel(cases)
     verifySize(testCase, output, size(fixture.image));
     verifyClass(testCase, output, 'uint8');
     verifyEqual(testCase, rgbDigest(output), expectedDigests{index}, ...
-        sprintf('fixture=%s, smoothing=%d, whitening=%d 的最终 RGB 偏离 e889f31 基线。', ...
+        sprintf('fixture=%s, smoothing=%d, whitening=%d 的最终 RGB 偏离 T20 重录基线。', ...
         cases(index).fixture, cases(index).smoothingStrength, ...
         cases(index).whiteningStrength));
 end
@@ -172,7 +185,7 @@ previewOutput = beautifyImage(previewImage, params, previewFaceBox, ...
     rmfield(previewContext, 'runtimeCache'));
 verifySize(testCase, previewOutput, [previewSize, 3]);
 verifyEqual(testCase, rgbDigest(previewOutput), recordedPreviewDigest(), ...
-    '预览路径最终 RGB 偏离 e889f31 基线。');
+    '预览路径最终 RGB 偏离 T20 重录基线。');
 
 fullContext = resizeBeautyContext(previewContext, ...
     [size(fixture.image, 1), size(fixture.image, 2), 3], ...
@@ -181,7 +194,7 @@ fullOutput = beautifyImage(fixture.image, params, fixture.faceBox, ...
     fullContext);
 verifySize(testCase, fullOutput, size(fixture.image));
 verifyEqual(testCase, rgbDigest(fullOutput), recordedOriginalSizeDigest(), ...
-    '原尺寸路径最终 RGB 偏离 e889f31 基线。');
+    '原尺寸路径最终 RGB 偏离 T20 重录基线。');
 
 uncachedFullContext = rmfield(fullContext, 'runtimeCache');
 uncachedFullOutput = beautifyImage(fixture.image, params, ...
@@ -192,25 +205,29 @@ end
 %% Oracle 表与辅助函数
 
 function [cases, expectedDigests] = recordedRgbBaseline
-%RECORDEDRGBBASELINE e889f31 冻结的最终 RGB oracle（SHA-256）。
+%RECORDEDRGBBASELINE 冻结的最终 RGB oracle（SHA-256）。
+%   e889f31 录制；T20（eye/lip identity policy）按当前真实输出重录，
+%   新旧对照见 tests/beauty-regression-baseline.md。
 cases = struct( ...
     'fixture', {'rich', 'rich', 'rich', 'rich', 'compact'}, ...
     'smoothingStrength', {100, 0, 100, 50, 100}, ...
     'whiteningStrength', {0, 100, 15, 25, 15});
 expectedDigests = { ...
-    '8ef2bf0ec01c681a2ee1d649220581ff7bf3dbb9cb650b5a37db9cab78682dc6'; ...
+    'fffa926c215f1ad2ca4ec2adb027c5f0d56eb1a0ff014145092151190b61bf61'; ...
     '58ab2f354176fb258dcef67e01ff65d5c4c2b98f0085902cfe16c604281bfe80'; ...
-    '6716ed9ef1db1c9a3f91c5c1aa877732a92398e2452abdacd6d3aefc9fac21f9'; ...
-    'b18986f62ffa6952b2252160dc79264448d2fac9c16b935cf6b4e966104dc6fe'; ...
-    '012175a4b7b63b06bd73dd8a3dd638c811d4fcde24d544047e4b154b6e4b6304'};
+    'e981883d03041d1835ce4993ee4b8741feadbe8fdf32e41449cd8dbc214d32a1'; ...
+    'b4cfffbf09872912e27fdc8d1c3f202b1a22d5bf80bef80da8963aa414e00cd7'; ...
+    '35279975228d5c25334e8b3a3a8fb243a532e9fb85a94a11acbff8c407a21b75'};
 end
 
 function digest = recordedPreviewDigest
-digest = 'dc6539302f6c001509f0cb69a95ae87691d852e551ba915b83ba98e10e3b89b2';
+% T20 重录（e889f31 原值 dc6539302f6c001509f0cb69a95ae87691d852e551ba915b83ba98e10e3b89b2）。
+digest = '32ecb919c09c7899e83aa9c48bfe3bd1c212ff3c15f8cf7448fd7652f008485b';
 end
 
 function digest = recordedOriginalSizeDigest
-digest = '31e9168c9dc1d74d3a0c40104c64eb40bd1d74ce6e1eb57e4f748db96c7a1ef7';
+% T20 重录（e889f31 原值 31e9168c9dc1d74d3a0c40104c64eb40bd1d74ce6e1eb57e4f748db96c7a1ef7）。
+digest = 'fe627460bb82d7b4bfd2e07d270c442398d22d80008a131afb681a5020115ea5';
 end
 
 function digest = rgbDigest(image)

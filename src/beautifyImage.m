@@ -121,7 +121,20 @@ runtimeEvidence = makeRuntimeEvidence(frequency, ...
 %   从本次调用实际使用的 beautyMasks 产物推导（T07 头注约定：与生产
 %   门控共用同一份 mask 产物），uncached 与 cached 两条路径同源；
 %   其余 stage（Mid/Repair/Tone/...）迁移前继续走各自现有兼容逻辑。
-stageProtection = masks.buildStageProtectionMasks(beautyMasks);
+% T20：eye/lip identity policy 需要桥接发布的 policy evidence——
+%   V4 Context（build/prepare/resize 链路）携带与本次输入/语义一致的
+%   evidence 层（缓存指纹同时钉住输入图与 Context mask，cached 路径
+%   的 evidence 与缓存产物同源）；转发给 stage protection 推导。
+%   无 evidence 层的 compat Context（v3.1 轻量 resize 路径、手工
+%   legacy Context）不携带 eye/lip 语义证据，保持 T07 legacy 折叠；
+%   evidence 缺少 periocular/lip 字段时由 builder 按零带处理。
+if isfield(beautyContext, 'evidence') && isstruct(beautyContext.evidence) && ...
+        isscalar(beautyContext.evidence)
+    stageProtection = masks.buildStageProtectionMasks(beautyMasks, ...
+        beautyContext.evidence);
+else
+    stageProtection = masks.buildStageProtectionMasks(beautyMasks);
+end
 [smoothedFrequency, smoothingDiagnostics] = beauty.smoothSkinTexture( ...
     runtimeEvidence.frequency, beautyMasks, smoothingStrength, ...
     runtimeEvidence.blemishMap, stageProtection);

@@ -23,6 +23,15 @@ function context = rebuildBeautyDerivedMasks(inputImage, context, faceBox)
 %   baseLuminance/tone/whitening/hard；hard identity 与
 %   strengthMap/effectStrengthMap 保持独立，不并入 stage 字段。
 %
+%   T20 起，本桥接把 policy evidence 传入 stage protection 推导：
+%   evidence 先于 protection 构建，并作为第二输入传给
+%   masks.buildStageProtectionMasks（eye/lip identity policy 只消费
+%   periocular/lip 两个语义字段；零带时 protection 与 T07 legacy 折叠
+%   逐位相等）。evidence 的只读边界不变：它仍不回写任何 v3.1
+%   protection mask，buildBeautyMasks 产物与 evidence 解耦；消费发生
+%   在 V4 protection 层推导这一处，且只经由本桥接提供的 evidence，
+%   各入口不得自行拼装。
+%
 %   T09 起，本桥接同时是 resize/recompute 契约的重算点：
 %   resizeBeautyContext 的四参数路径在合并目标尺寸皮肤域后调用本桥
 %   接，soft protection、二值 hard identity 与 image-dependent policy
@@ -49,10 +58,11 @@ context.protectionMasks = struct( ...
     'whitening', beautyMasks.whiteningProtectionMask, ...
     'chroma', beautyMasks.chromaProtectionMask, ...
     'tone', context.chromaProtectionMask);
-context.protection = masks.buildStageProtectionMasks(beautyMasks);
 [policyEvidence, evidenceMetadata] = masks.buildBeautyPolicyEvidence( ...
     inputImage, context, faceBox, maskDiagnostics);
 context.evidence = policyEvidence;
+context.protection = masks.buildStageProtectionMasks(beautyMasks, ...
+    policyEvidence);
 context = stampPolicyEvidenceMetadata(context, evidenceMetadata);
 end
 

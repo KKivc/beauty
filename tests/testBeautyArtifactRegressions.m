@@ -477,6 +477,146 @@ for index = 1:size(strengthCombos, 1)
 end
 end
 
+function testEyeLipPolicyDoesNotWorsenSeamHaloOrStructureLoss(testCase)
+% T20：eye/lip identity policy 的 artifact 诊断对比断言。同一合成人像
+%   分别以 T20 policy 路径（V4 Context 携带 evidence）与 legacy 路径
+%   （剥离 evidence，T07 折叠）运行，用现有 smoothing/whitening 诊断
+%   比较缝合、光晕与结构损失：
+%     缝合 —— transition band（环带外半程）的 Fine 处理量不得低于
+%       legacy（皮肤过渡带不被冻结成未处理环带）；evidence 带外的
+%       alphaMap 与最终输出逐位等于 legacy（不引入新不连续）；
+%     结构损失 —— detail band 内 Fine/Mid 处理量显著低于 legacy
+%       （identity 细节保留；探针实测 Fine 比值≈.50、Mid 比值≈.07），
+%       输出高频能量不低于 legacy；
+%     光晕 —— whitening consumer 未迁移，美白-only 输出必须与 legacy
+%       逐位一致；whitening 字段在 detail band 内携带
+%       >= .85*detailBand 的假白退让（供后续 consumer 迁移）。
+[sourceImage, faceBox, context] = eyeLipPolicyFixture();
+legacyContext = rmfield(context, 'evidence');
+params = struct('smoothingStrength', 100, 'whiteningStrength', 0);
+[policyOut, policyDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, context);
+[legacyOut, legacyDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, legacyContext);
+
+[beautyMasks, ~] = masks.buildBeautyMasks(sourceImage, context, faceBox);
+protection = masks.buildStageProtectionMasks(beautyMasks, context.evidence);
+legacyProtection = masks.buildStageProtectionMasks(beautyMasks);
+hardMask = protection.hard >= .999;
+verifyTrue(testCase, isequal(protection.hard, legacyProtection.hard) && ...
+    nnz(hardMask) > 0, 'T20 不得新增或减少 hard identity 像素。');
+verifyEqual(testCase, policyOut(repmat(hardMask, [1, 1, 3])), ...
+    sourceImage(repmat(hardMask, [1, 1, 3])), ...
+    'hard identity 区域 RGB 必须与源图逐位相等。');
+
+eyeField = context.evidence.periocular;
+lipField = context.evidence.lip;
+detailBand = max(smoothStep(eyeField, .50, .78), ...
+    smoothStep(lipField, .55, .85));
+transitionBand = max(smoothStep(eyeField, .08, .40), ...
+    smoothStep(lipField, .12, .50)) .* (1 - detailBand);
+softBand = detailBand > .5 & ~hardMask;
+transitionSoft = transitionBand > .5 & ~hardMask;
+outside = eyeField == 0 & lipField == 0;
+verifyTrue(testCase, nnz(softBand) > 0 && nnz(transitionSoft) > 0 && ...
+    nnz(outside) > 0, 'fixture 必须同时包含三带与带外区域。');
+
+alphaPolicy = policyDiagnostics.smoothing.alphaMap;
+alphaLegacy = legacyDiagnostics.smoothing.alphaMap;
+% 缝合：带外逐位一致 + transition band 处理量不下降。
+verifyEqual(testCase, alphaPolicy(outside), alphaLegacy(outside), ...
+    'AbsTol', 0, 'evidence 带外的 Fine alphaMap 必须逐位等于 legacy。');
+verifyGreaterThanOrEqual(testCase, mean(alphaPolicy(transitionSoft)), ...
+    mean(alphaLegacy(transitionSoft)) - 1e-12, ...
+    'transition band 的 Fine 处理量不得低于 legacy（无未处理环带）。');
+
+% 结构损失：detail band 的 Fine/Mid 处理量显著下降，高频能量保留。
+verifyLessThanOrEqual(testCase, mean(alphaPolicy(softBand)), ...
+    .75 * mean(alphaLegacy(softBand)), ...
+    'detail band 的 Fine 处理量必须明显低于 legacy。');
+verifyLessThanOrEqual(testCase, ...
+    mean(policyDiagnostics.smoothing.midAlphaMap(softBand)), ...
+    .40 * mean(legacyDiagnostics.smoothing.midAlphaMap(softBand)), ...
+    'detail band 的 Mid 处理量必须明显低于 legacy。');
+graySource = im2double(rgb2gray(sourceImage));
+grayPolicy = im2double(rgb2gray(policyOut));
+grayLegacy = im2double(rgb2gray(legacyOut));
+faceScale = min(faceBox(3:4));
+sigma = max(1, .008 * faceScale);
+hpPolicy = grayPolicy - imgaussfilt(grayPolicy, sigma, 'Padding', 'replicate');
+hpLegacy = grayLegacy - imgaussfilt(grayLegacy, sigma, 'Padding', 'replicate');
+verifyGreaterThanOrEqual(testCase, mean(abs(hpPolicy(softBand))), ...
+    mean(abs(hpLegacy(softBand))) - 1e-12, ...
+    'detail band 的高频细节能量不得低于 legacy。');
+
+% 光晕：美白 consumer 未迁移，美白-only 输出与 legacy 逐位一致；
+%   whitening 字段携带 detail band 的假白退让档位。
+whiteningParams = struct('smoothingStrength', 0, 'whiteningStrength', 100);
+whiteningPolicyOut = beautifyImage(sourceImage, whiteningParams, faceBox, ...
+    context);
+whiteningLegacyOut = beautifyImage(sourceImage, whiteningParams, faceBox, ...
+    legacyContext);
+verifyEqual(testCase, whiteningPolicyOut, whiteningLegacyOut, ...
+    '美白-only 输出必须与 legacy 逐位一致。');
+verifyGreaterThanOrEqual(testCase, min(protection.whitening(softBand)), ...
+    .85 * min(detailBand(softBand)) - 1e-12, ...
+    'whitening 字段必须在 detail band 内携带假白光晕退让。');
+
+% 分级保护确实作用到输出：带内变化、带外零变化（合成 fixture 上空间
+%   卷积的亚 0.5 泄漏被量化隐藏；真实图实测带外泄漏 <= 0.02%，见
+%   tests/beauty-regression-baseline.md 的 T20 章节）。
+diffMap = mean(abs(double(policyOut) - double(legacyOut)), 3);
+inBand = detailBand > .5 | transitionBand > .5;
+verifyTrue(testCase, nnz(diffMap(inBand) > 0) > 0, ...
+    '分级保护必须在带内产生可观测的输出差异。');
+verifyEqual(testCase, nnz(diffMap(~inBand) > 0), 0, ...
+    '合成 fixture 上输出差异不得泄漏到 evidence 带外。');
+end
+
+function [sourceImage, faceBox, context] = eyeLipPolicyFixture
+%EYLIPPOLICYFIXTURE 带眼/唇语义的合成人像（公式与
+%   testPortraitBeautyHelpers 的 evidencePortraitFixture 一致风格），
+%   通过生产链 buildBeautyContextFromParsing 携带 policy evidence。
+imageHeight = 240;
+imageWidth = 320;
+[xGrid, yGrid] = meshgrid(1:imageWidth, 1:imageHeight);
+faceWidth = round(0.46 * imageWidth);
+faceHeight = round(0.73 * imageHeight);
+faceX = round((imageWidth - faceWidth) / 2);
+faceY = round(0.12 * imageHeight);
+faceBox = [faceX, faceY, faceWidth, faceHeight];
+centerX = faceX + faceWidth / 2;
+centerY = faceY + faceHeight / 2;
+radialDistance = ((xGrid - centerX) / (faceWidth / 2)) .^ 2 + ...
+    ((yGrid - centerY) / (faceHeight / 2)) .^ 2;
+faceRegion = radialDistance <= 0.82;
+skinRegion = radialDistance <= 0.45;
+texture = 12 * sin(2 * pi * xGrid / 12) .* sin(2 * pi * yGrid / 10);
+backgroundColor = [55, 65, 75];
+skinColor = [172, 128, 108];
+sourceImage = zeros(imageHeight, imageWidth, 3, 'uint8');
+for channel = 1:3
+    channelData = backgroundColor(channel) * ones(imageHeight, imageWidth);
+    texturedSkin = skinColor(channel) + texture;
+    channelData(faceRegion) = texturedSkin(faceRegion);
+    sourceImage(:, :, channel) = uint8(min(max(round(channelData), 0), 255));
+end
+eyeRegion = ((xGrid - (centerX - 38)) / 13) .^ 2 + ...
+    ((yGrid - (centerY - 30)) / 6) .^ 2 <= 1;
+lipRegion = ((xGrid - centerX) / 20) .^ 2 + ...
+    ((yGrid - (centerY + 52)) / 6) .^ 2 <= 1;
+parsing = emptyParsing([imageHeight, imageWidth]);
+parsing.regions.skin = double(skinRegion);
+parsing.regionConfidence.skin = double(skinRegion);
+parsing.regions.leftEye = double(eyeRegion & skinRegion);
+parsing.regionConfidence.leftEye = double(eyeRegion & skinRegion);
+parsing.regions.upperLip = double(lipRegion & skinRegion);
+parsing.regionConfidence.upperLip = double(lipRegion & skinRegion);
+parsing.regions.lowerLip = double(lipRegion & skinRegion);
+parsing.regionConfidence.lowerLip = double(lipRegion & skinRegion);
+context = buildBeautyContextFromParsing(sourceImage, faceBox, parsing);
+end
+
 function contract = makeRegressionRepairContract(beautyMasks, ...
     protection, blemishMap)
 %MAKEREGRESSIONREPAIRCONTRACT 复现生产端

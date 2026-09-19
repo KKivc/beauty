@@ -663,16 +663,21 @@ beautifyImage(sourceImage, params, faceBox, prepared);
 verifyEqual(testCase, prepared.evidence, rebuilt.evidence, 'AbsTol', 0);
 end
 
-function testPolicyEvidenceDoesNotModifyProtectionOrOutput(testCase)
-%TESTPOLICYEVIDENCEDOESNOTMODIFYPROTECTIONOROUTPUT evidence 不得直接
-%   决定、覆盖或修改生产 protection 与最终 RGB：即使把全部 evidence
-%   字段篡改为全 1，重新生成的 protection 与端到端输出仍 bit-exact。
+function testPolicyEvidenceFeedsOnlyStageProtection(testCase)
+%TESTPOLICYEVIDENCEFEEDSONLYSTAGEPROTECTION evidence 层的只读边界与
+%   T20 消费边界：篡改任何 evidence 字段都不得改变 buildBeautyMasks 的
+%   v3.1 产物（evidence 不回写保护 mask）；V4 stage protection 只消费
+%   periocular/lip 两个语义字段——篡改其余字段时端到端输出逐位不变
+%   （T06 边界保持），篡改 periocular/lip 时输出经 policy 通道变化
+%   （T20 正控制），且两种情形下 hard identity 区域 RGB 都与源图逐位
+%   相等（hard 来自未被篡改的 beautyMasks 产物）。
 [sourceImage, faceBox, parsing] = evidencePortraitFixture();
 prepared = prepareBeautyContext(sourceImage, faceBox, parsing, ...
     emptyBodyParsing(size(sourceImage, [1 2])));
 params = struct('smoothingStrength', 100, 'whiteningStrength', 15);
+cleanBareContext = rmfield(prepared, 'runtimeCache');
 cleanOutput = beautifyImage(sourceImage, params, faceBox, ...
-    rmfield(prepared, 'runtimeCache'));
+    cleanBareContext);
 
 regeneratedNames = {'textureProtectionMask', 'structureProtectionMask', ...
     'whiteningProtectionMask', 'chromaProtectionMask', ...
@@ -684,12 +689,13 @@ for index = 1:numel(evidenceNames)
     tampered.evidence.(evidenceNames{index}) = ...
         ones(size(sourceImage, [1, 2]));
 end
-cleanBare = rmfield(prepared, ...
+cleanMasksInput = rmfield(prepared, ...
     regeneratedNames(isfield(prepared, regeneratedNames)));
-tamperedBare = rmfield(tampered, ...
+tamperedMasksInput = rmfield(tampered, ...
     regeneratedNames(isfield(tampered, regeneratedNames)));
-cleanMasks = masks.buildBeautyMasks(sourceImage, cleanBare, faceBox);
-tamperedMasks = masks.buildBeautyMasks(sourceImage, tamperedBare, faceBox);
+cleanMasks = masks.buildBeautyMasks(sourceImage, cleanMasksInput, faceBox);
+tamperedMasks = masks.buildBeautyMasks(sourceImage, tamperedMasksInput, ...
+    faceBox);
 maskNames = {'textureProtectionMask', 'structureProtectionMask', ...
     'whiteningProtectionMask', 'chromaProtectionMask', ...
     'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
@@ -699,9 +705,316 @@ for index = 1:numel(maskNames)
         cleanMasks.(maskNames{index}), 'AbsTol', 0);
 end
 
+% 只篡改 stage protection 不消费的五个 evidence 字段：输出逐位不变。
+nonConsumedNames = {'nostril', 'noseStructure', 'edgeDetail', ...
+    'structureGradient', 'darkDetail'};
+nonConsumedTampered = prepared;
+for index = 1:numel(nonConsumedNames)
+    nonConsumedTampered.evidence.(nonConsumedNames{index}) = ...
+        ones(size(sourceImage, [1, 2]));
+end
+nonConsumedBare = rmfield(nonConsumedTampered, ...
+    regeneratedNames(isfield(nonConsumedTampered, regeneratedNames)));
+nonConsumedOutput = beautifyImage(sourceImage, params, faceBox, ...
+    nonConsumedBare);
+verifyEqual(testCase, nonConsumedOutput, cleanOutput, ...
+    'stage protection 不消费的 evidence 字段不得影响输出。');
+
+% 篡改 periocular/lip（T20 policy 消费字段）：输出经 policy 通道变化，
+% hard identity 区域仍与源图逐位相等。
 tamperedOutput = beautifyImage(sourceImage, params, faceBox, ...
     rmfield(tampered, 'runtimeCache'));
-verifyEqual(testCase, tamperedOutput, cleanOutput);
+verifyNotEqual(testCase, tamperedOutput, cleanOutput, ...
+    'T20 stage protection 必须消费 periocular/lip evidence。');
+[~, cleanDiagnostics] = beautifyImage(sourceImage, params, faceBox, ...
+    cleanBareContext);
+hard = cleanDiagnostics.beautyMasks.hardProtectionMask >= .999;
+hardRgb = repmat(hard, [1, 1, 3]);
+verifyTrue(testCase, nnz(hard) > 0, 'fixture 必须产生非空 hard 区域。');
+verifyEqual(testCase, tamperedOutput(hardRgb), sourceImage(hardRgb), ...
+    'hard identity 区域 RGB 不得因 evidence 篡改而改变。');
+end
+
+function testEyeLipPolicyBandsFollowEvidenceContract(testCase)
+%TESTEYLIPPOLICYBANDSFOLLOWEVIDENCECONTRACT T20 eye/lip 三带分级保护的
+%   受控 contract 断言（直接调用 buildStageProtectionMasks，屏蔽几何
+%   噪声）：
+%     identity core —— hard 字段与输入 hardProtectionMask 逐位相等，
+%       不新增任何 hard 像素；
+%     soft detail band —— evidence=1 的非 hard 像素抬升到固定档位
+%       smoothingFine/repairFine/baseLuminance=.95、smoothingMid=.90、
+%       whitening=.85、tone=.90（仅唇侧；.95 取检测细节保护区间
+%       .92--.99 中点，.90/.85 与检测细节档位对齐，见 builder 头注）；
+%     skin transition band —— 仅封顶 texture 通道：
+%       smoothingFine <= 1-.55*transitionBand（legacy texture=1 的满
+%       保护环带在 evidence=.30 处重新打开到 .5776 的处理量）；
+%     证据零带（partial V4 / 缺省输入）时与 T07 legacy 折叠逐位相等；
+%     非法 evidence（尺寸/取值/类型）fail-fast。
+    [fixture, evidence, hardIdentity] = eyeLipPolicyUnitFixture();
+    legacyZero = masks.buildStageProtectionMasks(fixture.masksZero);
+    policyZero = masks.buildStageProtectionMasks(fixture.masksZero, evidence);
+    legacyFull = masks.buildStageProtectionMasks(fixture.masksFull);
+    policyFull = masks.buildStageProtectionMasks(fixture.masksFull, evidence);
+
+    % identity core：hard 原样拷贝，不新增任何 hard 像素。
+    verifyEqual(testCase, policyZero.hard, hardIdentity, 'AbsTol', 0);
+    verifyEqual(testCase, policyFull.hard, legacyFull.hard, 'AbsTol', 0);
+    detailBand = max(smoothStep(evidence.periocular, .50, .78), ...
+        smoothStep(evidence.lip, .55, .85));
+    softDetailBand = detailBand > .5 & hardIdentity == 0;
+    verifyTrue(testCase, nnz(softDetailBand) > 0 && nnz(hardIdentity) > 0, ...
+        'fixture 必须同时包含非 hard 的 detail band 与 hard identity。');
+
+    % soft detail band：非 hard 的 evidence=1 像素抬升到固定档位。
+    eyePoint = fixture.eyeDetailPoint;
+    verifyEqual(testCase, policyZero.smoothingFine(eyePoint(1), eyePoint(2)), ...
+        .95, 'AbsTol', 1e-12);
+    verifyEqual(testCase, policyZero.smoothingMid(eyePoint(1), eyePoint(2)), ...
+        .90, 'AbsTol', 1e-12);
+    verifyEqual(testCase, policyZero.repairFine(eyePoint(1), eyePoint(2)), ...
+        .95, 'AbsTol', 1e-12);
+    verifyEqual(testCase, policyZero.repairMid(eyePoint(1), eyePoint(2)), ...
+        .95, 'AbsTol', 1e-12);
+    verifyEqual(testCase, policyZero.baseLuminance(eyePoint(1), eyePoint(2)), ...
+        .95, 'AbsTol', 1e-12);
+    verifyEqual(testCase, policyZero.whitening(eyePoint(1), eyePoint(2)), ...
+        .85, 'AbsTol', 1e-12);
+    verifyEqual(testCase, policyZero.tone(eyePoint(1), eyePoint(2)), 0, ...
+        'AbsTol', 1e-12, '眼周色度无 identity 语义，tone 不得被眼带抬升。');
+    lipPoint = fixture.lipDetailPoint;
+    verifyEqual(testCase, policyZero.tone(lipPoint(1), lipPoint(2)), .90, ...
+        'AbsTol', 1e-12, '唇色是 identity 色度，唇 detail band 必须进入 tone 保护。');
+
+    % skin transition band：只封顶 texture 通道，打开满保护环带。
+    transitionPoint = fixture.transitionPoint;
+    t = min(max((.30 - .08) / (.40 - .08), 0), 1);
+    expectedCap = 1 - .55 * (t .^ 2 * (3 - 2 * t));
+    verifyEqual(testCase, ...
+        policyFull.smoothingFine(transitionPoint(1), transitionPoint(2)), ...
+        expectedCap, 'AbsTol', 1e-12);
+    verifyEqual(testCase, ...
+        legacyFull.smoothingFine(transitionPoint(1), transitionPoint(2)), 1, ...
+        'AbsTol', 1e-12, 'fixture 须以 texture=1 复现 legacy 满保护环带。');
+    transitionBand = max(smoothStep(evidence.periocular, .08, .40), ...
+        smoothStep(evidence.lip, .12, .50)) .* (1 - detailBand);
+    activeTransition = transitionBand > 0;
+    verifyTrue(testCase, ...
+        all(policyFull.smoothingFine(activeTransition) <= ...
+        1 - .55 * transitionBand(activeTransition) + 1e-12), ...
+        'transition band 内 Fine 保护不得超过 1-.55*transitionBand 封顶。');
+
+    % 证据零带：与 T07 legacy 折叠逐位相等（两组 mask 产物都验证）。
+    zeroEvidence = struct('periocular', zeros(fixture.imageSize), ...
+        'lip', zeros(fixture.imageSize));
+    fieldNames = fieldnames(legacyZero);
+    for fieldIndex = 1:numel(fieldNames)
+        fieldName = fieldNames{fieldIndex};
+        zeroPolicyZero = masks.buildStageProtectionMasks( ...
+            fixture.masksZero, zeroEvidence);
+        zeroPolicyFull = masks.buildStageProtectionMasks( ...
+            fixture.masksFull, zeroEvidence);
+        verifyEqual(testCase, zeroPolicyZero.(fieldName), ...
+            legacyZero.(fieldName), 'AbsTol', 0);
+        verifyEqual(testCase, zeroPolicyFull.(fieldName), ...
+            legacyFull.(fieldName), 'AbsTol', 0);
+        singleArgPolicy = masks.buildStageProtectionMasks(fixture.masksZero);
+        verifyEqual(testCase, singleArgPolicy.(fieldName), ...
+            legacyZero.(fieldName), 'AbsTol', 0);
+    end
+
+    % 带外（evidence 全零像素）逐位还原 legacy。
+    outside = evidence.periocular == 0 & evidence.lip == 0;
+    for fieldIndex = 1:numel(fieldNames)
+        fieldName = fieldNames{fieldIndex};
+        verifyEqual(testCase, ...
+            policyFull.(fieldName)(outside), legacyFull.(fieldName)(outside), ...
+            'AbsTol', 0, 'evidence 带外的 stage 字段必须逐位等于 legacy。');
+    end
+
+    % 非法 evidence fail-fast，不静默修正。
+    badSize = evidence;
+    badSize.periocular = evidence.periocular(1:10, 1:10);
+    verifyError(testCase, @() masks.buildStageProtectionMasks( ...
+        fixture.masksZero, badSize), 'masks:InvalidEvidence');
+    badRange = evidence;
+    badRange.lip = evidence.lip * 2;
+    verifyError(testCase, @() masks.buildStageProtectionMasks( ...
+        fixture.masksZero, badRange), 'masks:InvalidEvidence');
+    badNaN = evidence;
+    badNaN.periocular = evidence.periocular;
+    badNaN.periocular(2, 2) = NaN;
+    verifyError(testCase, @() masks.buildStageProtectionMasks( ...
+        fixture.masksZero, badNaN), 'masks:InvalidEvidence');
+end
+
+function testEyeLipPolicyWiringPreservesIdentityAndProcessability(testCase)
+%TESTEYLIPPOLICYWIRINGPRESERVESIDENTITYANDPROCESSABILITY T20 生产链路
+%   （beautifyImage 经 bridge evidence 转发）端到端断言：
+%     identity core 进 hard、soft band 不新增 hard、hard RGB 精确回源；
+%     带外（背景/普通脸颊）alphaMap 逐位等于 legacy，背景输出逐位等于
+%     源图；detail band 内 Fine/Mid 处理量下降（结构保留），transition
+%     band 处理量不低于 legacy（无未处理环带）；美白-only 输出与 legacy
+%     逐位一致（美白 consumer 未迁移，光晕诊断不恶化）；cached 与
+%     uncached 输出逐位一致。
+[sourceImage, faceBox, parsing] = evidencePortraitFixture();
+context = prepareBeautyContext(sourceImage, faceBox, parsing, ...
+    emptyBodyParsing(size(sourceImage, [1, 2])));
+bareContext = rmfield(context, 'runtimeCache');
+legacyContext = rmfield(bareContext, 'evidence');
+params = struct('smoothingStrength', 100, 'whiteningStrength', 0);
+
+[policyOut, policyDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, bareContext);
+[legacyOut, legacyDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, legacyContext);
+
+[beautyMasks, ~] = masks.buildBeautyMasks(sourceImage, bareContext, faceBox);
+protection = masks.buildStageProtectionMasks(beautyMasks, bareContext.evidence);
+legacyProtection = masks.buildStageProtectionMasks(beautyMasks);
+hardMask = protection.hard >= .999;
+verifyTrue(testCase, isequal(protection.hard, legacyProtection.hard), ...
+    'T20 不得改变 hard identity。');
+verifyTrue(testCase, nnz(hardMask) > 0, ...
+    '眼/唇语义必须产生非空 hard identity 区域。');
+
+[xGrid, yGrid] = meshgrid(1:size(sourceImage, 2), 1:size(sourceImage, 1));
+centerX = faceBox(1) + faceBox(3) / 2;
+centerY = faceBox(2) + faceBox(4) / 2;
+radialDistance = ((xGrid - centerX) / (faceBox(3) / 2)) .^ 2 + ...
+    ((yGrid - centerY) / (faceBox(4) / 2)) .^ 2;
+eyeCoreRow = round(centerY - 30);
+eyeCoreCol = round(centerX - 38);
+lipCoreRow = round(centerY + 52);
+lipCoreCol = round(centerX);
+verifyEqual(testCase, hardMask(eyeCoreRow, eyeCoreCol), true, ...
+    '眼球语义核心必须位于 hard identity。');
+verifyEqual(testCase, hardMask(lipCoreRow, lipCoreCol), true, ...
+    '唇部语义核心必须位于 hard identity。');
+verifyEqual(testCase, policyOut(repmat(hardMask, [1, 1, 3])), ...
+    sourceImage(repmat(hardMask, [1, 1, 3])), ...
+    'hard identity 区域 RGB 必须与源图逐位相等。');
+
+eyeField = bareContext.evidence.periocular;
+lipField = bareContext.evidence.lip;
+detailBand = max(smoothStep(eyeField, .50, .78), ...
+    smoothStep(lipField, .55, .85));
+transitionBand = max(smoothStep(eyeField, .08, .40), ...
+    smoothStep(lipField, .12, .50)) .* (1 - detailBand);
+softBand = detailBand > .5 & ~hardMask;
+transitionSoft = transitionBand > .5 & ~hardMask;
+outside = eyeField == 0 & lipField == 0;
+verifyTrue(testCase, nnz(softBand) > 0 && nnz(transitionSoft) > 0, ...
+    'fixture 必须产生非空 soft detail band 与 transition band。');
+
+% 带外（背景与普通脸颊）逐位不变：policy 层与最终 alphaMap 双重守卫。
+alphaPolicy = policyDiagnostics.smoothing.alphaMap;
+alphaLegacy = legacyDiagnostics.smoothing.alphaMap;
+verifyEqual(testCase, protection.smoothingFine(outside), ...
+    legacyProtection.smoothingFine(outside), 'AbsTol', 0, ...
+    'evidence 带外的 smoothingFine 必须逐位等于 legacy。');
+verifyEqual(testCase, alphaPolicy(outside), alphaLegacy(outside), ...
+    'AbsTol', 0, 'evidence 带外的 Fine alphaMap 必须逐位等于 legacy。');
+background = radialDistance >= 1.15;
+verifyEqual(testCase, policyOut(repmat(background, [1, 1, 3])), ...
+    sourceImage(repmat(background, [1, 1, 3])), ...
+    '背景区域输出必须与源图逐位相等。');
+
+% detail band：Fine/Mid 处理量受控下降（保护抬升；探针实测 Fine 比值
+%   ≈.50、Mid 比值≈.07，阈值留有几何余量且远低于 1）。
+verifyLessThanOrEqual(testCase, mean(alphaPolicy(softBand)), ...
+    .75 * mean(alphaLegacy(softBand)), ...
+    'detail band 的 Fine 处理量必须明显低于 legacy（identity 细节保留）。');
+verifyLessThanOrEqual(testCase, ...
+    mean(policyDiagnostics.smoothing.midAlphaMap(softBand)), ...
+    .40 * mean(legacyDiagnostics.smoothing.midAlphaMap(softBand)), ...
+    'detail band 的 Mid 处理量必须明显低于 legacy（睫毛/唇缘中频细节此前被全强度磨除）。');
+
+% transition band：处理量不低于 legacy（皮肤过渡带不得被冻结成环带）。
+verifyGreaterThanOrEqual(testCase, mean(alphaPolicy(transitionSoft)), ...
+    mean(alphaLegacy(transitionSoft)) - 1e-12, ...
+    'transition band 的 Fine 处理量不得低于 legacy（眼周皮肤仍可处理）。');
+
+% 结构保留：detail band 高频能量不低于 legacy。
+graySource = im2double(rgb2gray(sourceImage));
+grayPolicy = im2double(rgb2gray(policyOut));
+grayLegacy = im2double(rgb2gray(legacyOut));
+faceScale = min(faceBox(3:4));
+sigma = max(1, .008 * faceScale);
+hpPolicy = grayPolicy - imgaussfilt(grayPolicy, sigma, 'Padding', 'replicate');
+hpLegacy = grayLegacy - imgaussfilt(grayLegacy, sigma, 'Padding', 'replicate');
+verifyGreaterThanOrEqual(testCase, mean(abs(hpPolicy(softBand))), ...
+    mean(abs(hpLegacy(softBand))) - 1e-12, ...
+    'detail band 的高频细节能量不得低于 legacy。');
+
+% 美白-only 输出与 legacy 逐位一致（whitening consumer 未迁移，不恶化）。
+whiteningParams = struct('smoothingStrength', 0, 'whiteningStrength', 100);
+whiteningPolicyOut = beautifyImage(sourceImage, whiteningParams, faceBox, ...
+    bareContext);
+whiteningLegacyOut = beautifyImage(sourceImage, whiteningParams, faceBox, ...
+    legacyContext);
+verifyEqual(testCase, whiteningPolicyOut, whiteningLegacyOut, ...
+    '美白-only 输出必须与 legacy 逐位一致。');
+verifyGreaterThanOrEqual(testCase, ...
+    min(protection.whitening(softBand)), ...
+    .85 * min(detailBand(softBand)) - 1e-12, ...
+    'whitening 字段必须在 detail band 内携带 >= .85*detailBand 的假白光晕退让。');
+
+% cached 与 uncached 输出逐位一致（evidence 经缓存指纹同源转发）。
+[cachedOut, cachedDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, context);
+verifyTrue(testCase, cachedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, cachedOut, policyOut, ...
+    'cached 路径必须与 uncached 逐位一致。');
+end
+
+function [fixture, evidence, hardIdentity] = eyeLipPolicyUnitFixture
+%EYLIPPOLICYUNITFIXTURE 构造受控的 Beauty Masks 与 eye/lip evidence：
+%   eye/lip 硬核（rows 18--23）周围一圈 evidence=1 的 soft detail band，
+%   再外圈 evidence=.30 的 transition band，其余像素 evidence=0。
+imageSize = [40, 60];
+[xGrid, yGrid] = meshgrid(1:imageSize(2), 1:imageSize(1));
+eyeCore = xGrid >= 8 & xGrid <= 20 & yGrid >= 18 & yGrid <= 23;
+lipCore = xGrid >= 38 & xGrid <= 50 & yGrid >= 18 & yGrid <= 23;
+hardIdentity = double(eyeCore | lipCore);
+eyeSoftRing = (xGrid >= 7 & xGrid <= 21 & yGrid >= 17 & yGrid <= 24) & ~eyeCore;
+lipSoftRing = (xGrid >= 37 & xGrid <= 51 & yGrid >= 17 & yGrid <= 24) & ~lipCore;
+eyeOuterRing = (xGrid >= 5 & xGrid <= 23 & yGrid >= 15 & yGrid <= 26) & ...
+    ~(eyeCore | eyeSoftRing);
+lipOuterRing = (xGrid >= 35 & xGrid <= 53 & yGrid >= 15 & yGrid <= 26) & ...
+    ~(lipCore | lipSoftRing);
+eyeField = zeros(imageSize);
+eyeField(eyeSoftRing) = 1;
+eyeField(eyeOuterRing) = .30;
+lipField = zeros(imageSize);
+lipField(lipSoftRing) = 1;
+lipField(lipOuterRing) = .30;
+lipField(lipCore) = 1;
+evidence = struct('periocular', eyeField, 'lip', lipField);
+fixture = struct( ...
+    'imageSize', imageSize, ...
+    'masksZero', unitMasks(zeros(imageSize), hardIdentity, imageSize), ...
+    'masksFull', unitMasks(ones(imageSize), hardIdentity, imageSize), ...
+    'eyeDetailPoint', [17, 14], ...
+    'lipDetailPoint', [24, 44], ...
+    'transitionPoint', [16, 14]);
+end
+
+function masksStruct = unitMasks(texture, hard, imageSize)
+%UNITMASKS 构建只含 buildStageProtectionMasks 必需字段的 mask 产物。
+masksStruct = struct( ...
+    'textureProtectionMask', texture, ...
+    'structureProtectionMask', zeros(imageSize), ...
+    'chromaProtectionMask', zeros(imageSize), ...
+    'whiteningProtectionMask', zeros(imageSize), ...
+    'hardProtectionMask', hard, ...
+    'noseMask', zeros(imageSize), ...
+    'faceSkinMask', zeros(imageSize));
+end
+
+function value = smoothStep(inputValue, low, high)
+%SMOOTHSTEP 复现生产 smoothstep 曲线（t^2*(3-2t)）。
+t = min(max((double(inputValue) - low) / max(high - low, eps), 0), 1);
+value = t .^ 2 .* (3 - 2 * t);
 end
 
 function [sourceImage, faceBox, skinRegion, backgroundRegion] = ...
@@ -829,7 +1142,11 @@ function params = defaultParams
 params = struct('smoothingStrength', 10, 'whiteningStrength', 10);
 end
 
-function testInjectedParsingProducesV3Context(testCase)
+function testInjectedParsingProducesV4CanonicalContext(testCase)
+%TESTINJECTEDPARSINGPRODUCESV4CANONICALCONTEXT 注入语义经生产链构建后
+%   得到 V4 canonical Context（T08 有意切换点：schemaVersion 从 '3.1'
+%   升级为 '4.0'，compat alias 保留），buildBeautyMasks 的 hard 保护
+%   仍由注入语义驱动。
 image = uint8(ones(40, 40, 3) * 128);
 parsing = syntheticParsingForContext([40 40]);
 parsing.regions.skin(10:30, 10:30) = 1;
@@ -838,7 +1155,7 @@ parsing.regions.hair(10:13, 10:30) = 1;
 parsing.regionConfidence.hair(10:13, 10:30) = 1;
 context = prepareBeautyContext(image, [5 5 30 30], parsing, ...
     emptyBodyParsing(size(image, [1 2])));
-verifyEqual(testCase, context.schemaVersion, '3.1');
+verifyEqual(testCase, context.schemaVersion, '4.0');
 verifyEqual(testCase, numel(fieldnames(context.regions)), 19);
 [beautyMasks, ~] = masks.buildBeautyMasks(image, context, [5 5 30 30]);
 verifyEqual(testCase, beautyMasks.hardProtectionMask(12, 20), 1);

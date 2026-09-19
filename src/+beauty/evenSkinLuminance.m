@@ -1,14 +1,45 @@
 function [luminanceResult, diagnostics] = evenSkinLuminance( ...
-        frequency, beautyMasks, smoothingStrength)
+        frequency, beautyMasks, smoothingStrength, baseLuminanceContract)
 %EVENSKINLUMINANCE 对皮肤 Base 亮度执行局部均匀化。
 %   本模块只读取 frequency.base。可靠皮肤的归一化加权局部参考用于
 %   生成目标 Base；输出 baseDelta 已经包含全部作用权重，合成阶段不再
 %   重复乘权，也不在此处渲染 RGB。
+%
+%   T16：可选第 4 参数 baseLuminanceContract 是 Base Luminance 的
+%   stage contract，由 beautifyImage 生产端从与生产门控共用的同一份
+%   beautyMasks 产物拼装传入（T12/T13 范式）。提供时 feature/
+%   reference support 的保护输入只来自 contract，不再自行组合 general
+%   texture/chroma/structure/hard masks；低频参考、亮度校正与输出公
+%   式不变。字段语义：
+%     baseLuminance — T07 发布的 stage protection 快照
+%                     baseLuminance = 1 - (1 - structure) .*
+%                     (1 - max(texture, chroma))；该折叠含 1-x 补码
+%                     往返舍入，无法逐位还原门控积 (1 - structure) .*
+%                     (1 - max(texture, chroma))，因此快照不参与输出
+%                     算术，只作为 T07 参考门由诊断（baseGateSnapshot）
+%                     与测试消费；
+%     hard          — hard identity（T07 单独发布），按生产原位组合
+%                     进 referenceReliability/supportMap 的 (1-hard)
+%                     乘子；
+%     structureGate — 未折叠结构门 1 - structure（reference
+%                     reliability 与 supportMap 共用）；
+%     featureGate   — 未折叠 feature 门 1 - max(texture, chroma)
+%                     （texture 与 chroma 的组合留在生产端）。
+%   运行期由生产端按与 legacy 完全相同的表达式、同一份 mask 产物计
+%   算未折叠字段，消费侧按生产原式、原顺序重建门控，与 legacy 路径
+%   逐位等价（bit-exact）。缺字段 fail-fast，不在函数内部重新拼装，
+%   也不静默回退；未提供第 4 参的旧调用方走 legacy 兼容路径，行为
+%   不变。processability（skinMask）与强度（strengthMap）不属于
+%   protection，两条路径都继续从 beautyMasks 读取；runtime
+%   reliability（referenceReliability/referenceWeight/
+%   referenceCoverage）计算保留，但不再重解释 general 保护 masks 的
+%   区域语义。
 
 if nargin < 3
     error('beauty:InvalidEvenLuminanceInput', ...
         'Base 亮度均匀化需要频率、Beauty Masks 和磨皮强度。');
 end
+useStageContract = nargin >= 4 && ~isempty(baseLuminanceContract);
 validateFrequency(frequency);
 imageSize = size(frequency.base);
 validateMasks(beautyMasks, imageSize);
@@ -22,27 +53,41 @@ end
 base = double(frequency.base);
 skinMask = readMask(beautyMasks, 'skinMask', imageSize);
 strengthMap = readMask(beautyMasks, 'strengthMap', imageSize);
-structureProtection = readMask(beautyMasks, ...
-    'structureProtectionMask', imageSize);
-hardProtection = readOptionalMask(beautyMasks, ...
-    'hardProtectionMask', imageSize);
-textureProtection = readOptionalMask(beautyMasks, ...
-    'textureProtectionMask', imageSize);
-[chromaProtection, hasChromaProtection] = resolveChromaProtectionMask( ...
-    beautyMasks, imageSize, 'beauty:InvalidEvenLuminanceInput', ...
-    'beauty:ChromaProtectionConflict');
-if ~hasChromaProtection
-    chromaProtection = zeros(imageSize);
-end
 faceSkinMask = readOptionalMask(beautyMasks, 'faceSkinMask', imageSize);
+% T16：保护门控来源二选一。stage 路径只消费 contract（快照不参与
+% 输出算术）；legacy 路径保持原解释与数值。两条路径的三个未折叠门
+% 控按同一表达式、同一份 mask 产物取得，数值逐位一致。
+if useStageContract
+    baseLuminanceContract = validateBaseLuminanceContract( ...
+        baseLuminanceContract, imageSize);
+    structureGate = baseLuminanceContract.structureGate;
+    hardProtectionGate = 1 - baseLuminanceContract.hard;
+    featureGate = baseLuminanceContract.featureGate;
+else
+    structureProtection = readMask(beautyMasks, ...
+        'structureProtectionMask', imageSize);
+    hardProtection = readOptionalMask(beautyMasks, ...
+        'hardProtectionMask', imageSize);
+    textureProtection = readOptionalMask(beautyMasks, ...
+        'textureProtectionMask', imageSize);
+    [chromaProtection, hasChromaProtection] = resolveChromaProtectionMask( ...
+        beautyMasks, imageSize, 'beauty:InvalidEvenLuminanceInput', ...
+        'beauty:ChromaProtectionConflict');
+    if ~hasChromaProtection
+        chromaProtection = zeros(imageSize);
+    end
+    featureProtection = max(cat(3, textureProtection, ...
+        chromaProtection), [], 3);
+    structureGate = 1 - structureProtection;
+    hardProtectionGate = 1 - hardProtection;
+    featureGate = 1 - featureProtection;
+end
 
 % 参考权重与作用权重分开：前者只决定局部参考是否可信，后者决定
 % 当前像素实际校正多少。这样五官和强结构不会污染邻域参考，也不会
 % 通过同一张权重在最终合成时被再次衰减。
-featureProtection = max(cat(3, textureProtection, chromaProtection), [], 3);
-referenceReliability = skinMask .* strengthMap .* ...
-    (1 - structureProtection) .* (1 - hardProtection) .* ...
-    (1 - featureProtection);
+referenceReliability = skinMask .* strengthMap .* structureGate .* ...
+    hardProtectionGate .* featureGate;
 referenceReliability = min(max(referenceReliability, 0), 1);
 
 faceScale = readFaceScale(frequency, beautyMasks, imageSize);
@@ -85,9 +130,6 @@ ratio = double(smoothingStrength) / 100;
 baseCurve = ratio ^ .85;
 baseAmplitudeGain = .06;
 baseWeightCurve = baseAmplitudeGain .* baseCurve;
-structureGate = 1 - structureProtection;
-hardProtectionGate = 1 - hardProtection;
-featureGate = 1 - featureProtection;
 regionalSkinWeight = min(skinMask, strengthMap);
 supportMap = baseWeightCurve .* regionalSkinWeight .* structureGate .* ...
     hardProtectionGate .* featureGate .* referenceCoverage;
@@ -139,8 +181,6 @@ diagnostics = struct( ...
     'structureGate', structureGate, ...
     'hardProtectionGate', hardProtectionGate, ...
     'featureGate', featureGate, ...
-    'chromaProtectionMask', chromaProtection, ...
-    'toneProtectionMask', chromaProtection, ...
     'referenceReliability', referenceReliability, ...
     'referenceWeight', referenceWeight, ...
     'referenceCoverage', referenceCoverage, ...
@@ -160,6 +200,34 @@ diagnostics = struct( ...
     'frequencyUnchanged', true, ...
     'imageSize', [imageSize, 3], ...
     'smoothingStrength', double(smoothingStrength));
+if useStageContract
+    % T16：stage 路径不再报告 chroma/tone 兼容 alias（保护输入由
+    % contract 承载），新增 T07 baseLuminance 快照的参考门；runtime
+    % 门控积 structureGate·featureGate 与 1 - 快照一致（≤1e-15，1-x
+    % 补码往返舍入），由测试断言衔接 T07 语义。
+    diagnostics.baseGateSnapshot = 1 - baseLuminanceContract.baseLuminance;
+else
+    diagnostics.chromaProtectionMask = chromaProtection;
+    diagnostics.toneProtectionMask = chromaProtection;
+end
+end
+
+function contract = validateBaseLuminanceContract(contract, imageSize)
+%VALIDATEBASELUMINANCECONTRACT 校验 Base Luminance stage contract（T16）。
+%   必需字段：baseLuminance（T07 零运行期耦合快照）、hard（hard
+%   identity）、structureGate/featureGate（生产端按生产原式计算的未折
+%   叠门控字段）。缺字段或取值无效一律 fail-fast，不在函数内部重新拼
+%   装，也不静默回退到 general masks 解释。
+if ~isstruct(contract) || ~isscalar(contract) || ...
+        ~all(isfield(contract, {'baseLuminance', 'hard', ...
+        'structureGate', 'featureGate'}))
+    error('beauty:InvalidEvenLuminanceInput', ...
+        'Base Luminance stage contract 必须是包含 baseLuminance、hard、structureGate 和 featureGate 的标量结构。');
+end
+contract.baseLuminance = readMask(contract, 'baseLuminance', imageSize);
+contract.hard = readMask(contract, 'hard', imageSize);
+contract.structureGate = readMask(contract, 'structureGate', imageSize);
+contract.featureGate = readMask(contract, 'featureGate', imageSize);
 end
 
 function validateFrequency(frequency)

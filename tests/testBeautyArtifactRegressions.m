@@ -175,6 +175,74 @@ verifyEqual(testCase, tamperedDiagnostics.runtimeCache.status, ...
 verifyEqual(testCase, tamperedOutput, uncachedOutput);
 end
 
+function testRuntimeEvidenceCachedUncachedAndRegeneratedAreBitExact(testCase)
+% T11：runtime evidence（blemish map / frequency 分解）在 uncached、
+%   cached、篡改缓存后安全重建三条路径下必须 bit-exact 一致；缓存命中
+%   时直接消费缓存产物，组装的运行期 evidence 不因来源不同而改变，
+%   最终 RGB 也不漂移。
+imageSize = [120, 160];
+[yGrid, xGrid] = ndgrid(1:imageSize(1), 1:imageSize(2));
+luma = 0.55 + 0.02 * sin(2 * pi * xGrid / 23) .* ...
+    sin(2 * pi * yGrid / 19);
+sourceImage = grayToUint8Rgb(luma);
+faceBox = [1, 1, imageSize(2), imageSize(1)];
+context = plainSkinContext(imageSize, faceBox);
+[beautyMasks, maskDiagnostics] = masks.buildBeautyMasks(sourceImage, ...
+    context, faceBox);
+context.runtimeCache = buildBeautyRuntimeCache(sourceImage, faceBox, ...
+    beautyMasks, maskDiagnostics, struct( ...
+    'status', 'generated', ...
+    'sourceSchemaVersion', '3.1', ...
+    'message', '回归测试生成运行时产物。'));
+params = struct('smoothingStrength', 80, 'whiteningStrength', 30);
+
+[uncachedOutput, uncachedDiagnostics] = beautifyImage(sourceImage, ...
+    params, faceBox, rmfield(context, 'runtimeCache'));
+verifyFalse(testCase, uncachedDiagnostics.reusedRuntimeCache);
+[cachedOutput, cachedDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, context);
+verifyTrue(testCase, cachedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, cachedOutput, uncachedOutput);
+
+% blemish map：cached == uncached == 缓存存储的产物字段（命中缓存时
+%   runtime evidence 直接来自缓存产物，不重算）。
+verifyEqual(testCase, cachedDiagnostics.blemishMap, ...
+    uncachedDiagnostics.blemishMap, 'AbsTol', 0);
+verifyEqual(testCase, cachedDiagnostics.blemishMap, ...
+    context.runtimeCache.blemishMap, 'AbsTol', 0);
+evidenceNames = {'fineEvidence', 'midEvidence', 'chromaEvidence', ...
+    'skinCandidate'};
+for index = 1:numel(evidenceNames)
+    verifyEqual(testCase, ...
+        cachedDiagnostics.blemish.(evidenceNames{index}), ...
+        uncachedDiagnostics.blemish.(evidenceNames{index}), 'AbsTol', 0);
+end
+
+% frequency 分解：数值频带与重建误差一致（缓存诊断带版本戳，只比较
+%   数值字段，不比较戳）。
+bandNames = {'base', 'mid', 'fine'};
+for index = 1:numel(bandNames)
+    verifyEqual(testCase, ...
+        cachedDiagnostics.frequency.(bandNames{index}), ...
+        uncachedDiagnostics.frequency.(bandNames{index}), 'AbsTol', 0);
+end
+verifyEqual(testCase, cachedDiagnostics.frequency.reconstructionError, ...
+    uncachedDiagnostics.frequency.reconstructionError, 'AbsTol', 0);
+verifyEqual(testCase, cachedDiagnostics.frequency.fineSigma, ...
+    uncachedDiagnostics.frequency.fineSigma, 'AbsTol', 0);
+
+% 篡改缓存版本后安全重建：blemish map 与最终 RGB 仍与 uncached 一致。
+context.runtimeCache.artifactVersion = 'v0.0';
+[tamperedOutput, tamperedDiagnostics] = beautifyImage(sourceImage, ...
+    params, faceBox, context);
+verifyFalse(testCase, tamperedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, tamperedDiagnostics.runtimeCache.status, ...
+    'regenerated');
+verifyEqual(testCase, tamperedDiagnostics.blemishMap, ...
+    uncachedDiagnostics.blemishMap, 'AbsTol', 0);
+verifyEqual(testCase, tamperedOutput, uncachedOutput);
+end
+
 function rgb = grayToUint8Rgb(luma)
 value = uint8(min(max(round(luma * 255), 0), 255));
 rgb = cat(3, value, value, value);

@@ -4,6 +4,15 @@ function [blemishMap, diagnostics] = buildBlemishMap( ...
 %   瑕疵图不读取任何美颜强度，因此同一输入在不同滑块档位下保持
 %   同一分类结果。Fine、Mid 和色度证据先分别归一化，再合成为一张
 %   连续的 [0, 1] 置信度图；结构保护只在后续修复时限制修改量。
+%
+%   运行期 evidence 定位（T11）：本函数是 blemish 运行期 evidence 的
+%   唯一生产者，输入仍是 BeautyMasks 与频率分解，数值逻辑（阈值、
+%   权重、平滑）冻结不变。产物由 beautifyImage 组装进局部
+%   runtimeEvidence 结构供 stage 消费；不写入持久化 policy-time
+%   Context（不进 V4 分层、不进缓存兼容判定），与
+%   masks.buildBeautyPolicyEvidence 的 policy-time evidence 层无
+%   依赖关系。后续 Repair/Tone consumer 应从 runtimeEvidence 读取
+%   本图，而不是假设它存在于静态 Context。
 
 validateInput(inputImage, frequency, beautyMasks);
 imageSize = size(inputImage, 1:2);

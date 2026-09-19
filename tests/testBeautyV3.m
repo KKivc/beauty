@@ -267,6 +267,87 @@ verifyEqual(testCase, whiteningDetails.supportMap, whiteningSupport, ...
     'AbsTol', 1e-12);
 end
 
+function testRuntimeEvidenceAssemblesProducerArtifactsBitExact(testCase)
+%TESTRUNTIMEEVIDENCEASSEMBLESPRODUCERARTIFACTSBITEXACT T11：beautifyImage
+%   内部组装的运行期 evidence（frequency/blemish）必须与独立调用
+%   producer 的产物 bit-exact 一致，证明编排层只搬运 runtime evidence、
+%   不改变任何数值；blemish map 不读取美颜强度，不同参数组合下完全一致。
+[image, faceBox, parsing] = fixtureImage(120, 160);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([120, 160]));
+uncachedContext = rmfield(context, 'runtimeCache');
+params = struct('smoothingStrength', 60, 'whiteningStrength', 30);
+[~, diagnostics] = beautifyImage(image, params, faceBox, uncachedContext);
+
+[beautyMasks, ~] = masks.buildBeautyMasks(image, uncachedContext, faceBox);
+[frequency, decompositionDiagnostics] = beauty.decomposeSkinFrequency( ...
+    image, faceBox);
+[blemishMap, blemishDiagnostics] = beauty.buildBlemishMap( ...
+    image, frequency, beautyMasks);
+
+% blemish map 与 blemish 运行期证据：与 producer 逐字段 bit-exact。
+verifyEqual(testCase, diagnostics.blemishMap, blemishMap, 'AbsTol', 0);
+evidenceNames = {'fineEvidence', 'midEvidence', 'chromaEvidence', ...
+    'skinCandidate', 'structureProtectionMask'};
+for index = 1:numel(evidenceNames)
+    verifyEqual(testCase, ...
+        diagnostics.blemish.(evidenceNames{index}), ...
+        blemishDiagnostics.(evidenceNames{index}), 'AbsTol', 0);
+end
+
+% frequency 分解：与 producer bit-exact。
+bandNames = {'base', 'mid', 'fine'};
+for index = 1:numel(bandNames)
+    verifyEqual(testCase, ...
+        diagnostics.frequency.(bandNames{index}), ...
+        decompositionDiagnostics.(bandNames{index}), 'AbsTol', 0);
+end
+verifyEqual(testCase, diagnostics.frequency.reconstructionError, ...
+    decompositionDiagnostics.reconstructionError, 'AbsTol', 0);
+verifyEqual(testCase, diagnostics.frequency.fineSigma, ...
+    decompositionDiagnostics.fineSigma, 'AbsTol', 0);
+verifyEqual(testCase, diagnostics.frequency.mediumSigma, ...
+    decompositionDiagnostics.mediumSigma, 'AbsTol', 0);
+
+% blemish map 不读取强度：不同参数组合下与 producer 完全一致。
+strengthCombos = [0, 100; 100, 0; 100, 100; 25, 75];
+for index = 1:size(strengthCombos, 1)
+    comboParams = struct( ...
+        'smoothingStrength', strengthCombos(index, 1), ...
+        'whiteningStrength', strengthCombos(index, 2));
+    [~, comboDiagnostics] = beautifyImage(image, comboParams, faceBox, ...
+        uncachedContext);
+    verifyEqual(testCase, comboDiagnostics.blemishMap, blemishMap, ...
+        'AbsTol', 0);
+end
+end
+
+function testRuntimeEvidenceStaysOutOfPersistedPolicyTimeContext(testCase)
+%TESTRUNTIMEEVIDENCESTAYSOUTOFPERSISTEDPOLICYTIMECONTEXT T11 验收：
+%   runtime evidence（frequency/blemish）不得成为持久化 policy-time
+%   Context 的必要输入——不进 V4 canonical 分层（semantic/
+%   processability/evidence/protection），不出现在 T06 policy-time
+%   evidence 层，规范化往返后也不引入运行期字段。
+[image, faceBox, parsing] = fixtureImage(120, 160);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([120, 160]));
+
+runtimeNames = {'runtimeEvidence', 'blemishMap', 'blemish', 'frequency'};
+verifyEqual(testCase, isfield(context, runtimeNames), ...
+    [false, false, false, false], ...
+    '持久化 Context 不得携带 runtime evidence 字段。');
+verifyTrue(testCase, isfield(context, 'evidence'));
+verifyEqual(testCase, isfield(context.evidence, ...
+    {'blemishMap', 'blemish', 'frequency', 'fine', 'mid', 'base'}), ...
+    false(1, 6), ...
+    'policy-time evidence 层显式不含 blemish/frequency 结果。');
+
+reread = normalizeBeautyContext(image, faceBox, context);
+verifyEqual(testCase, isfield(reread, runtimeNames), ...
+    [false, false, false, false], ...
+    '规范化往返后 Context 不得引入 runtime evidence 字段。');
+end
+
 function [image, faceBox, parsing] = fixtureImage(height, width)
 image = uint8(ones(height, width, 3) * 145);
 [xGrid, yGrid] = meshgrid(1:width, 1:height);

@@ -94,6 +94,120 @@ verifyEqual(testCase, migrated.runtimeCache.schemaVersion, '3.1');
 verifyEqual(testCase, migrated.runtimeCache.migration.status, 'regenerated');
 end
 
+function testV4ReaderModeCacheReusesAndMatchesUncached(testCase)
+%TESTV4READERMODECACHEREUSESANDMATCHESUNCACHED V4 reader 模式下缓存
+%   复用与重建必须等价：合法 V4 分层 Context 携带运行时缓存时复用，
+%   剥离缓存后重建，两者最终 RGB bit-exact；缓存级 Context 契约戳
+%   升为 '4.0'（模拟 V4 producer 落戳）时，只要 algorithmVersion 和
+%   artifactVersion 不变，缓存仍然有效（schema 管 Context 契约，
+%   artifact 管缓存兼容）。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+v31 = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+v4 = rmfield(v31, 'runtimeCache');
+v4.schemaVersion = '4.0';
+v4.semantic = struct('regions', v31.regions, ...
+    'confidence', v31.regionConfidence);
+v4.processability = struct('skin', v31.skinMask > .5);
+v4.diagnostics = struct('note', 'cache reader fixture');
+
+params = struct('smoothingStrength', 50, 'whiteningStrength', 25);
+[uncachedOutput, uncachedDiagnostics] = beautifyImage(image, params, ...
+    faceBox, v4);
+verifyFalse(testCase, uncachedDiagnostics.reusedRuntimeCache);
+
+withCache = v4;
+withCache.runtimeCache = v31.runtimeCache;
+[cachedOutput, cachedDiagnostics] = beautifyImage(image, params, ...
+    faceBox, withCache);
+verifyTrue(testCase, cachedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, cachedOutput, uncachedOutput);
+
+v4Stamped = withCache;
+v4Stamped.runtimeCache.schemaVersion = '4.0';
+v4Stamped.runtimeCache.artifactInfo.schemaVersion = '4.0';
+v4Stamped.runtimeCache.artifacts.schemaVersion = '4.0';
+v4Stamped.runtimeCache.beautyMasks.schemaVersion = '4.0';
+v4Stamped.runtimeCache.frequency.schemaVersion = '4.0';
+v4Stamped.runtimeCache.maskDiagnostics.schemaVersion = '4.0';
+v4Stamped.runtimeCache.decompositionDiagnostics.schemaVersion = '4.0';
+v4Stamped.runtimeCache.blemishDiagnostics.schemaVersion = '4.0';
+[v4StampedOutput, v4StampedDiagnostics] = beautifyImage(image, params, ...
+    faceBox, v4Stamped);
+verifyTrue(testCase, v4StampedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, v4StampedOutput, uncachedOutput);
+end
+
+function testIncompatibleCacheMetadataAlwaysRebuilds(testCase)
+%TESTINCOMPATIBLECACHEMETADATAALWAYSREBUILDS 缓存版本元数据不兼容
+%   （artifactVersion、algorithmVersion、未知 schema 形态、产物清单
+%   落戳、Mask 指纹不一致）必须全部触发重建而不是误命中，且重建输出
+%   与无缓存路径 bit-exact。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+params = struct('smoothingStrength', 50, 'whiteningStrength', 25);
+[uncachedOutput, ~] = beautifyImage(image, params, faceBox, ...
+    rmfield(context, 'runtimeCache'));
+
+tampered = context;
+tampered.runtimeCache.artifactVersion = 'v3.0';
+[output, diagnostics] = beautifyImage(image, params, faceBox, tampered);
+verifyFalse(testCase, diagnostics.reusedRuntimeCache);
+verifyEqual(testCase, diagnostics.runtimeCache.status, 'regenerated');
+verifyEqual(testCase, output, uncachedOutput);
+
+tampered = context;
+tampered.runtimeCache.algorithmVersion = 'v3.3';
+[output, diagnostics] = beautifyImage(image, params, faceBox, tampered);
+verifyFalse(testCase, diagnostics.reusedRuntimeCache);
+verifyEqual(testCase, diagnostics.runtimeCache.status, 'regenerated');
+verifyEqual(testCase, output, uncachedOutput);
+
+tampered = context;
+tampered.runtimeCache.schemaVersion = '9.9';
+[output, diagnostics] = beautifyImage(image, params, faceBox, tampered);
+verifyFalse(testCase, diagnostics.reusedRuntimeCache);
+verifyEqual(testCase, diagnostics.runtimeCache.status, 'regenerated');
+verifyEqual(testCase, output, uncachedOutput);
+
+tampered = context;
+tampered.runtimeCache.artifactInfo.blemishMap = 'v3.0';
+[output, diagnostics] = beautifyImage(image, params, faceBox, tampered);
+verifyFalse(testCase, diagnostics.reusedRuntimeCache);
+verifyEqual(testCase, output, uncachedOutput);
+
+tampered = context;
+tampered.runtimeCache.beautyMasks.skinMask(1, 1) = ...
+    1 - tampered.runtimeCache.beautyMasks.skinMask(1, 1);
+[output, diagnostics] = beautifyImage(image, params, faceBox, tampered);
+verifyFalse(testCase, diagnostics.reusedRuntimeCache);
+verifyEqual(testCase, output, uncachedOutput);
+end
+
+function testV4ContextWithoutCompatAliasNeverReusesCache(testCase)
+%TESTV4CONTEXTWITHOUTCOMPATALIASNEVERREUSESCACHE V4 分层 Context 缺少
+%   compat alias 时无法核对缓存 Mask 指纹，必须走安全重建（此处表现
+%   为重建路径因缺少 v3 基础字段而报错），绝不允许静默复用缓存产物：
+%   若发生误命中，beautifyImage 会直接返回缓存结果而不报错。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+fragment = rmfield(context, 'runtimeCache');
+fragment.schemaVersion = '4.0';
+fragment = rmfield(fragment, {'skinMask', 'faceSkinMask', ...
+    'nonFaceSkinMask', 'textureProtectionMask', ...
+    'structureProtectionMask', 'whiteningProtectionMask', ...
+    'chromaProtectionMask', 'toneProtectionMask', 'strengthMap', ...
+    'faceStrengthMap', 'nonFaceStrengthMap'});
+fragment.semantic = struct('regions', context.regions);
+fragmentWithCache = fragment;
+fragmentWithCache.runtimeCache = context.runtimeCache;
+verifyError(testCase, @() beautifyImage(image, struct( ...
+    'smoothingStrength', 50, 'whiteningStrength', 25), faceBox, ...
+    fragmentWithCache), 'masks:InvalidContext');
+end
+
 function testResizedContextCarriesCompleteSchema(testCase)
 [image, faceBox, parsing] = fixtureContext(40, 60);
 context = prepareBeautyContext(image, faceBox, parsing, ...

@@ -3,6 +3,18 @@ function [runtimeCache, diagnostics] = buildBeautyRuntimeCache( ...
 %BUILDBEAUTYRUNTIMECACHE 构建带版本和产物信息的 v3.1 运行时缓存。
 %   缓存中的 Mask、频率分解和瑕疵图都绑定当前输入图像、人脸框及算法
 %   版本。历史缓存不得通过补 alias 直接获得当前产物版本。
+%
+%   三个版本号职责（与 beautyPipelineContract 一致）：
+%     schemaVersion — Context 公共契约形态（v3.1 compat / V4
+%       layered），产物记录按当前契约形态落戳；缓存校验读者需同时
+%       理解两种形态。
+%     algorithmVersion — 生产行为版本，产物由当前算法生成时落戳。
+%     artifactVersion — 缓存兼容版本；Context schema 迁移不得改动
+%       该版本，否则既有缓存会被无意义地全量重建。
+%   缓存记录本身与 Context 形态无关（产物均为 v3 兼容字段），因此
+%   本入口可为 v3.1 compat 与 V4 layered Context 构建同一形态的
+%   运行时缓存；来源 Context 的契约形态记录在 migration.
+%   sourceSchemaVersion 中，仅作诊断，不参与缓存兼容判定。
 
 if nargin < 4 || isempty(maskDiagnostics)
     [beautyMasks, maskDiagnostics] = masks.buildBeautyMasks( ...

@@ -138,6 +138,43 @@ verifyGreaterThan(testCase, bridgeAfter, shadowAfter, ...
     '美白后仍须保留亮度排序。');
 end
 
+function testTamperedCacheArtifactVersionRegeneratesWithoutRgbDrift(testCase)
+% 缓存 artifactVersion 被篡改时必须重建而不是误命中；复用、篡改重建
+% 与无缓存三条路径的最终 RGB 必须完全一致，防止缓存复用缺陷悄悄
+% 改变美颜结果。
+imageSize = [120, 160];
+[yGrid, xGrid] = ndgrid(1:imageSize(1), 1:imageSize(2));
+luma = 0.55 + 0.02 * sin(2 * pi * xGrid / 23) .* ...
+    sin(2 * pi * yGrid / 19);
+sourceImage = grayToUint8Rgb(luma);
+faceBox = [1, 1, imageSize(2), imageSize(1)];
+context = plainSkinContext(imageSize, faceBox);
+[beautyMasks, maskDiagnostics] = masks.buildBeautyMasks(sourceImage, ...
+    context, faceBox);
+context.runtimeCache = buildBeautyRuntimeCache(sourceImage, faceBox, ...
+    beautyMasks, maskDiagnostics, struct( ...
+    'status', 'generated', ...
+    'sourceSchemaVersion', '3.1', ...
+    'message', '回归测试生成运行时产物。'));
+params = struct('smoothingStrength', 80, 'whiteningStrength', 30);
+
+[uncachedOutput, uncachedDiagnostics] = beautifyImage(sourceImage, ...
+    params, faceBox, rmfield(context, 'runtimeCache'));
+verifyFalse(testCase, uncachedDiagnostics.reusedRuntimeCache);
+[cachedOutput, cachedDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, context);
+verifyTrue(testCase, cachedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, cachedOutput, uncachedOutput);
+
+context.runtimeCache.artifactVersion = 'v0.0';
+[tamperedOutput, tamperedDiagnostics] = beautifyImage(sourceImage, ...
+    params, faceBox, context);
+verifyFalse(testCase, tamperedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, tamperedDiagnostics.runtimeCache.status, ...
+    'regenerated');
+verifyEqual(testCase, tamperedOutput, uncachedOutput);
+end
+
 function rgb = grayToUint8Rgb(luma)
 value = uint8(min(max(round(luma * 255), 0), 255));
 rgb = cat(3, value, value, value);

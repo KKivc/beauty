@@ -22,6 +22,15 @@ function context = rebuildBeautyDerivedMasks(inputImage, context, faceBox)
 %   组合推导 smoothingFine/smoothingMid/repairFine/repairMid/
 %   baseLuminance/tone/whitening/hard；hard identity 与
 %   strengthMap/effectStrengthMap 保持独立，不并入 stage 字段。
+%
+%   T09 起，本桥接同时是 resize/recompute 契约的重算点：
+%   resizeBeautyContext 的四参数路径在合并目标尺寸皮肤域后调用本桥
+%   接，soft protection、二值 hard identity 与 image-dependent policy
+%   evidence 全部在目标分辨率重新生成，任何 resize 流程都不得缩放预
+%   览侧的这些产物（hard 缩放产生的灰边禁止进入 compose identity）；
+%   三参数轻量路径不带目标原图，不得伪造这些分层（输出 v3.1 compat
+%   形态）。semantic/processability 分层不归本桥接管：由各入口在皮
+%   肤域最终确定后调用 buildBeautySemanticLayers 刷新。
 
 context = clearDerivedFields(context);
 [beautyMasks, maskDiagnostics] = masks.buildBeautyMasks(inputImage, ...

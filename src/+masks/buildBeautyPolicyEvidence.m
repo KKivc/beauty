@@ -18,6 +18,11 @@ function [evidence, metadata] = buildBeautyPolicyEvidence( ...
 %     * 显式不包含 blemish map 与 frequency decomposition 结果：本函数
 %       不调用 beauty.buildBlemishMap/beauty.decomposeSkinFrequency，
 %       因此构建 evidence 不要求先运行任何运行期阶段，无依赖环。
+%     * T09 resize 契约：本层全部字段都依赖输入图像内容（texture/
+%       structure 静态诊断与暗部残差均由 inputImage 推导），因此带目
+%       标原图的 resize 路径必须经 rebuildBeautyDerivedMasks 在目标分
+%       辨率重算本层；没有目标原图的轻量路径不得发布本层，也不得用
+%       imresize 缩放预览 evidence 充当目标分辨率证据。
 %     * 所有字段都是 HxW double、实数、有限、取值 [0,1]；mask 语义的
 %       来源/版本元数据不能混入 evidence 层（normalizeBeautyContextV4
 %       把 evidence 的每个字段都按 mask 校验），由第二输出返回并由

@@ -378,6 +378,188 @@ verifySize(testCase, savedOutput, [80, 120, 3]);
 verifyClass(testCase, savedOutput, 'uint8');
 end
 
+function testResizeRefreshesCanonicalLayersAtTargetSize(testCase)
+%TESTRESIZEREFRESHESCANONICALLAYERSATTARGETSIZE T09 契约：四参数 resize
+%   在合并缩放皮肤域后必须按最终 regions/skinMask/bodySkinMask 刷新
+%   semantic/processability 分层，分层与 compat alias bit-exact 一致。
+%   夹具注入 SCHP 手臂身体皮肤，保证合并确实向皮肤域添加解析语义之外
+%   的区域（零 SCHP 下合并可能恰好无操作，掩盖陈旧分层）。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+preview = prepareBeautyContext(image, faceBox, parsing, ...
+    armBodyParsing([40, 60]));
+verifyTrue(testCase, any(preview.bodySkinMask(:) > .5), ...
+    '手臂夹具必须产生身体皮肤。');
+verifyTrue(testCase, any(preview.nonFaceSkinMask(:) > .5), ...
+    '手臂夹具必须在脸外皮肤中留下手臂区域。');
+
+targetSize = [80, 120];
+targetFaceBox = [20, 16, 60, 48];
+targetImage = imresize(image, targetSize, 'bilinear');
+resized = resizeBeautyContext(preview, [targetSize, 3], ...
+    targetFaceBox, targetImage);
+
+verifyTrue(testCase, any(resized.bodySkinMask(:) > .5), ...
+    '目标尺寸 Context 必须保留缩放后的身体皮肤。');
+verifyTrue(testCase, nnz(resized.skinMask > .5) > ...
+    nnz(resized.faceSkinMask > .5), ...
+    '合并后的皮肤域必须比脸内皮肤多出手臂区域。');
+verifyEqual(testCase, resized.processability.skin, ...
+    resized.skinMask, 'AbsTol', 0, ...
+    'processability.skin 必须与最终合并后的 skinMask 一致。');
+verifyEqual(testCase, resized.semantic.bodySkin, ...
+    resized.bodySkinMask, 'AbsTol', 0, ...
+    'semantic.bodySkin 必须与缩放后的 bodySkinMask 一致。');
+verifyEqual(testCase, resized.semantic.regions, ...
+    resized.regions, 'AbsTol', 0);
+verifyEqual(testCase, resized.semantic.confidence, ...
+    resized.regionConfidence, 'AbsTol', 0);
+verifySize(testCase, resized.processability.skin, targetSize);
+verifySize(testCase, resized.semantic.bodySkin, targetSize);
+end
+
+function testResizedSemanticProbabilitiesAreResizedAndClamped(testCase)
+%TESTRESIZEDSEMANTICPROBABILITIESARERESIZEDANDCLAMPED T09 契约：四参数
+%   路径的 semantic probabilities/confidence 必须逐类双线性插值缩放并
+%   重新裁剪 [0,1]，与规范流程期望值 bit-exact。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+preview = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+targetSize = [80, 120];
+resized = resizeBeautyContext(preview, [targetSize, 3], ...
+    [20, 16, 60, 48], imresize(image, targetSize, 'bilinear'));
+names = faceParsingClassNames();
+fieldNames = {'semanticProbabilities', 'semanticConfidence'};
+for index = 1:numel(fieldNames)
+    fieldName = fieldNames{index};
+    verifyEqual(testCase, size(resized.(fieldName)), ...
+        [targetSize, numel(names)]);
+    source = preview.(fieldName);
+    expected = zeros([targetSize, numel(names)], 'single');
+    for classIndex = 1:numel(names)
+        expected(:, :, classIndex) = single(min(1, max(0, imresize( ...
+            double(source(:, :, classIndex)), targetSize, 'bilinear'))));
+    end
+    verifyEqual(testCase, resized.(fieldName), expected, 'AbsTol', 0, ...
+        sprintf('%s 必须等于逐类双线性缩放加 [0,1] 裁剪。', fieldName));
+end
+end
+
+function testResizedProtectionHardStaysBinaryAtTargetSize(testCase)
+%TESTRESIZEDPROTECTIONHARDSTAYSBINARYATTARGETSIZE T09 契约：protection.
+%   hard 在四参数路径由目标图像重建，生成即二值，缩放灰边不得进入
+%   compose identity（hard 区域最终 RGB 必须与源图一致）。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+preview = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+verifyTrue(testCase, any(preview.protection.hard(:) >= .999), ...
+    '夹具必须产生非空 hard identity 区域。');
+targetSize = [80, 120];
+targetFaceBox = [20, 16, 60, 48];
+targetImage = imresize(image, targetSize, 'bilinear');
+resized = resizeBeautyContext(preview, [targetSize, 3], ...
+    targetFaceBox, targetImage);
+hard = resized.protection.hard;
+verifyTrue(testCase, all(hard(:) == 0 | hard(:) == 1), ...
+    'resize 后 protection.hard 必须保持二值，不允许出现缩放灰边。');
+verifyTrue(testCase, any(hard(:) >= .999));
+verifyEqual(testCase, double(hard), double( ...
+    resized.runtimeCache.beautyMasks.hardProtectionMask), 'AbsTol', 0, ...
+    'protection.hard 必须与目标尺寸重建的 hard identity 一致。');
+params = struct('smoothingStrength', 100, 'whiteningStrength', 15);
+[output, diagnostics] = beautifyImage(targetImage, params, ...
+    targetFaceBox, rmfield(resized, 'runtimeCache'));
+hardRgb = repmat(diagnostics.beautyMasks.hardProtectionMask >= .999, ...
+    1, 1, 3);
+verifyEqual(testCase, output(hardRgb), targetImage(hardRgb), ...
+    'hard identity 区域的最终 RGB 必须与源图一致。');
+end
+
+function testResizedEvidenceRecomputesFromTargetImage(testCase)
+%TESTRESIZEDEVIDENCERECOMPUTESFROMTARGETIMAGE T09 契约：带目标原图的
+%   resize 必须在目标分辨率重算 image-dependent policy evidence——与
+%   直接桥接重建 bit-exact，不得等于缩放预览 evidence，且目标图像内
+%   容变化必须反映到 evidence。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+preview = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60])), 'runtimeCache');
+targetSize = [80, 120];
+targetFaceBox = [20, 16, 60, 48];
+targetImage = imresize(image, targetSize, 'bilinear');
+resized = resizeBeautyContext(preview, [targetSize, 3], ...
+    targetFaceBox, targetImage);
+
+rebuilt = rebuildBeautyDerivedMasks(targetImage, ...
+    rmfield(resized, 'runtimeCache'), targetFaceBox);
+verifyEqual(testCase, rebuilt.evidence, resized.evidence, 'AbsTol', 0, ...
+    'resize 输出的 evidence 必须与目标分辨率桥接重建 bit-exact。');
+
+imageDependent = {'edgeDetail', 'structureGradient', 'darkDetail'};
+for index = 1:numel(imageDependent)
+    name = imageDependent{index};
+    scaledPreview = imresize(preview.evidence.(name), targetSize, ...
+        'bilinear');
+    verifyFalse(testCase, isequal(resized.evidence.(name), ...
+        scaledPreview), ...
+        sprintf('%s 必须在目标分辨率重算，不得缩放预览 evidence。', name));
+end
+
+changedImage = targetImage;
+changedImage(30:45, 40:60, :) = uint8(235);
+changed = resizeBeautyContext(preview, [targetSize, 3], ...
+    targetFaceBox, changedImage);
+for index = 1:numel(imageDependent)
+    name = imageDependent{index};
+    verifyFalse(testCase, isequal(changed.evidence.(name), ...
+        resized.evidence.(name)), ...
+        sprintf('目标图像变化必须改变 %s。', name));
+end
+end
+
+function testLightweightResizeIsCompatibilityPath(testCase)
+%TESTLIGHTWEIGHTRESIZEISCOMPATIBILITYPATH T09 契约：三参数轻量 resize
+%   是显式 compatibility path——输出 v3.1 compat 形态，丢弃 V4
+%   canonical 分层，不生成 runtimeCache；保存链路不得复用预览缓存，
+%   即使强行挂上预览缓存也必须安全重建并与无缓存路径 bit-exact。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+preview = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+resized = resizeBeautyContext(preview, [80, 120, 3], [20, 16, 60, 48]);
+verifyEqual(testCase, resized.schemaVersion, '3.1');
+verifyFalse(testCase, any(isfield(resized, {'semantic', ...
+    'processability', 'evidence', 'protection', 'diagnostics', ...
+    'runtimeCache'})), ...
+    '轻量兼容路径不得携带 canonical 分层或 runtime cache。');
+verifyEqual(testCase, resized.migrationDiagnostics.status, 'resized');
+
+maskNames = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
+    'textureProtectionMask', 'structureProtectionMask', ...
+    'whiteningProtectionMask', 'chromaProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'nonFaceStrengthMap'};
+for index = 1:numel(maskNames)
+    value = resized.(maskNames{index});
+    verifySize(testCase, value, [80, 120]);
+    verifyTrue(testCase, all(isfinite(value(:))) && ...
+        all(value(:) >= 0) && all(value(:) <= 1), ...
+        sprintf('轻量缩放字段 %s 必须保持在 [0,1]。', maskNames{index}));
+end
+
+params = struct('smoothingStrength', 50, 'whiteningStrength', 25);
+targetImage = imresize(image, [80, 120], 'bilinear');
+targetFaceBox = [20, 16, 60, 48];
+[noCacheOut, noCacheDiagnostics] = beautifyImage(targetImage, ...
+    params, targetFaceBox, resized);
+verifyFalse(testCase, noCacheDiagnostics.reusedRuntimeCache);
+
+withStaleCache = resized;
+withStaleCache.runtimeCache = preview.runtimeCache;
+[staleOut, staleDiagnostics] = beautifyImage(targetImage, params, ...
+    targetFaceBox, withStaleCache);
+verifyFalse(testCase, staleDiagnostics.reusedRuntimeCache, ...
+    '预览缓存不得经轻量兼容路径进入保存链路。');
+verifyEqual(testCase, staleOut, noCacheOut);
+end
+
 function testBridgeUnifiesDerivedFieldsAcrossEntries(testCase)
 %TESTBRIDGEUNIFIESDERIVEDFIELDSACROSSENTRIES 三个入口的派生字段必须由
 %   rebuildBeautyDerivedMasks 统一回填：同一输入下 build 与 prepare
@@ -861,6 +1043,15 @@ end
 
 function options = emptyBodyParsing(imageSize)
 options = struct('probabilities', zeros([imageSize, 20], 'single'));
+end
+
+function options = armBodyParsing(imageSize)
+%ARMBODYPARSING 注入左手臂高置信 SCHP 概率：与解析皮肤部分重叠（保证
+%   主人物连通），部分超出解析语义（模拟身体皮肤覆盖解析之外）。
+options = struct('probabilities', zeros([imageSize, 20], 'single'));
+armRegion = false(imageSize);
+armRegion(26:38, 18:32) = true;
+options.probabilities(:, :, 15) = double(armRegion);
 end
 
 function union = semanticUnionOf(context, names)

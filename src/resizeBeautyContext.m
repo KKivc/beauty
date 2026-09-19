@@ -1,10 +1,43 @@
 function resizedContext = resizeBeautyContext(context, targetImageSize, ...
         targetFaceBox, targetImage)
 %RESIZEBEAUTYCONTEXT 将 v3.0/v3.1/V4 Context 迁移到另一尺寸。
+%   T09 起本入口是 V4 Context preview↔full-size 之间唯一的 resize/
+%   recompute 契约点，两条路径的规则如下。
+%
+%   四参数路径（带目标原图，authoritative recompute，输出 '4.0'）：
+%     1. semantic probabilities/confidence — 逐类双线性插值缩放并重新
+%        裁剪 [0,1]，再在目标尺寸由 buildBeautyContextFromParsing 重建
+%        semantic 分层（分组语义按同一 union 规则从缩放后概率重推）。
+%     2. processability 与 semantic.bodySkin — 先合并缩放后的脸外/
+%        SCHP 身体皮肤得到最终皮肤域，再由 buildBeautySemanticLayers
+%        按"最终 regions + 最终皮肤域"刷新分层；分层不得停留在合并
+%        前的旧值。源 Context 缺少 bodySkinMask 时 bodySkin 语义保持
+%        全零，不把颈部解析语义伪造成 body。
+%     3. soft protection（protection 层七个 stage 字段）与全部 compat
+%        派生字段 — 由 rebuildBeautyDerivedMasks 在目标分辨率重算，
+%        不缩放预览侧数值。
+%     4. protection.hard — 由目标图像的 hardProtectionMask 原样重建，
+%        生成即二值；本契约禁止任何路径把缩放产生的灰边带入 compose
+%        identity。
+%     5. image-dependent policy evidence（periocular/nostril/
+%        noseStructure/lip/edgeDetail/structureGradient/darkDetail，
+%        按当前 builder 全部依赖图像内容）— 由桥接在目标分辨率重算，
+%        禁止只缩放预览 evidence。
+%     6. runtimeCache — 在目标尺寸全量重建，是唯一可被保存链路当作
+%        full authoritative 复用的 resize 缓存。
+%
+%   三参数轻量路径（无目标原图，显式 compatibility path，输出 '3.1'）：
+%     只用双线性插值 + 裁剪 [0,1] 缩放 v3.1 compat 字段，供旧 consumer
+%     与诊断入口继续消费。V4 源的 canonical 分层在此显式丢弃——缺失
+%     目标原图时不得伪造分层，也不得用缩放值冒充目标分辨率的
+%     evidence/protection；不生成 runtimeCache。migrationDiagnostics.
+%     status='resized' 是兼容路径标记（同时允许下游按部分语义规范
+%     化），下游保存链路不得把该产物当作 full authoritative Context，
+%     也不得借它复用预览缓存。
+%
 %   T08 起生产链输出 V4 分层 Context，源 Context 允许是 '4.0'：带目标
 %   原图的分支在目标尺寸上从语义重新构建全部派生字段与 canonical 分
-%   层；三参数轻量分支只缩放 compat alias 字段，输出保持 v3.1 形态
-%   （分层刷新契约由后续 Ticket 处理，缺失目标原图时不得伪造分层）。
+%   层；三参数轻量分支只缩放 compat alias 字段，输出保持 v3.1 形态。
 
 if ~isstruct(context) || ~isscalar(context)
     error('resizeBeautyContext:InvalidContext', ...
@@ -47,12 +80,25 @@ if hasTargetImage
     rebuilt = rebuildBeautyDerivedMasks(targetImage, rebuilt, targetFaceBox);
     resizedContext = normalizeBeautyContext(targetImage, ...
         double(targetFaceBox), rebuilt);
+    % T09 分层刷新契约：合并缩放皮肤后，semantic/processability 必须
+    % 以最终 regions 与皮肤域重建（与 prepareBeautyContext 的刷新纪律
+    % 一致），不得停留在 build 阶段基于合并前皮肤域的初版分层。源
+    % Context 缺少 bodySkinMask 时 bodySkin 语义保持全零，不伪造 body。
+    if isfield(context, 'bodySkinMask')
+        layerBodySkin = resizedContext.bodySkinMask;
+    else
+        layerBodySkin = [];
+    end
+    [resizedContext.semantic, resizedContext.processability] = ...
+        buildBeautySemanticLayers(resizedContext.regions, ...
+        resizedContext.regionConfidence, resizedContext.skinMask, ...
+        layerBodySkin);
     [runtimeMasks, maskDiagnostics] = masks.buildBeautyMasks( ...
         targetImage, resizedContext, double(targetFaceBox));
     migration = struct( ...
         'status', 'resizedAndRegenerated', ...
         'sourceSchemaVersion', schemaVersionText(context.schemaVersion), ...
-        'message', '原尺寸 Context 已按目标图像重新生成运行时派生产物。');
+        'message', '原尺寸 Context 已按目标图像重建 V4 分层、派生字段与运行时缓存。');
     resizedContext.migrationDiagnostics = migration;
     resizedContext.runtimeCache = buildBeautyRuntimeCache( ...
         targetImage, double(targetFaceBox), runtimeMasks, maskDiagnostics, migration);
@@ -81,8 +127,10 @@ resizedChroma = resizeLightweightMask(sourceChroma, targetSize);
 resizedStrength = resizeLightweightMask(context.strengthMap, targetSize);
 resizedFaceStrength = resizeLightweightMask(context.faceStrengthMap, targetSize);
 resizedNonFaceStrength = resizeLightweightMask(context.nonFaceStrengthMap, targetSize);
-% 轻量分支没有目标原图，无法重建/缩放 canonical 分层，输出保持
-% v3.1 形态（仅 compat alias），由旧 normalize 路径继续消费。
+% 轻量分支没有目标原图，无法重建/缩放 canonical 分层：V4 源的分层
+% 在此显式丢弃（不得用缩放值冒充目标分辨率的 evidence/protection），
+% 输出保持 v3.1 兼容形态（仅 compat alias），由旧 normalize 路径继续
+% 消费；兼容路径标记见 migrationDiagnostics。
 resizedContext = struct( ...
     'skinMask', resizedSkin, ...
     'faceSkinMask', resizedFaceSkin, ...
@@ -102,7 +150,7 @@ resizedContext = struct( ...
     'migrationDiagnostics', struct( ...
     'status', 'resized', ...
     'sourceSchemaVersion', schemaVersionText(context.schemaVersion), ...
-    'message', '已按目标尺寸缩放 v3.1 Context 派生字段。'), ...
+    'message', '轻量兼容迁移：仅缩放 v3.1 compat 派生字段，未重建 V4 分层与运行时缓存。'), ...
     'protectionMasks', struct( ...
     'texture', resizedTexture, ...
     'structure', resizedStructure, ...

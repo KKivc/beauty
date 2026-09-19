@@ -322,6 +322,164 @@ canonicalOutput = beautifyImage(targetImage, params, targetFaceBox, rebuiltCanon
 verifyEqual(testCase, legacyOutput, canonicalOutput);
 end
 
+function testNormalizeReadsCanonicalV4LayeredContext(testCase)
+%TESTNORMALIZEREADSCANONICALV4LAYEREDCONTEXT V4 reader 分支：接受合法
+%   分层 Context，规范化 canonical 层，不改写顶层 compat alias。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60])), 'runtimeCache');
+v4 = v31;
+v4.schemaVersion = '4.0';
+v4.semantic = struct('regions', v31.regions, ...
+    'confidence', v31.regionConfidence);
+v4.processability = struct('skin', v31.skinMask > .5);
+v4.evidence = struct('edgeDetail', reshape(single(0:2399) / 2399, 40, 60));
+v4.protection = struct('hard', ones(40, 60));
+v4.diagnostics = struct('note', 'reader fixture');
+
+normalized = normalizeBeautyContext(image, faceBox, v4);
+verifyEqual(testCase, normalized.schemaVersion, '4.0');
+verifyEqual(testCase, fieldnames(normalized.semantic), ...
+    {'regions'; 'confidence'});
+verifyEqual(testCase, normalized.semantic.regions.skin, ...
+    v31.regions.skin, 'AbsTol', 0);
+verifyEqual(testCase, normalized.semantic.confidence.nose, ...
+    v31.regionConfidence.nose, 'AbsTol', 0);
+verifyEqual(testCase, normalized.processability.skin, ...
+    double(v31.skinMask > .5), 'AbsTol', 0);
+verifyEqual(testCase, normalized.evidence.edgeDetail, ...
+    double(reshape(single(0:2399) / 2399, 40, 60)), 'AbsTol', 0);
+verifyEqual(testCase, normalized.protection.hard, ones(40, 60), 'AbsTol', 0);
+% compat alias 与 canonical layer 分离：顶层 legacy 字段原样保留，
+% canonical protection 不被 legacy general mask 覆盖。
+verifyEqual(testCase, normalized.textureProtectionMask, ...
+    v31.textureProtectionMask, 'AbsTol', 0);
+verifyEqual(testCase, normalized.skinMask, v31.skinMask, 'AbsTol', 0);
+verifyEqual(testCase, normalized.semanticProbabilities, ...
+    v31.semanticProbabilities, 'AbsTol', 0);
+verifyEqual(testCase, normalized.imageSize, [40, 60, 3]);
+verifyEqual(testCase, normalized.faceBox, double(faceBox));
+verifyEqual(testCase, normalized.faceScale, 24);
+end
+
+function testNormalizeAcceptsPartialV4Contexts(testCase)
+%TESTNORMALIZEACCEPTSPARTIALV4CONTEXTS 部分分层（partial V4）同样合法：
+%   只带 semantic 或只带 protection 的 V4 Context 都能通过 reader。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60])), 'runtimeCache');
+semanticOnly = v31;
+semanticOnly.schemaVersion = '4.0';
+semanticOnly.semantic = struct('regions', v31.regions);
+normalized = normalizeBeautyContext(image, faceBox, semanticOnly);
+verifyEqual(testCase, normalized.schemaVersion, '4.0');
+verifyEqual(testCase, normalized.semantic.regions.skin, ...
+    v31.regions.skin, 'AbsTol', 0);
+verifyFalse(testCase, any(isfield(normalized, ...
+    {'processability', 'evidence', 'protection'})));
+
+fragment.schemaVersion = '4.0';
+fragment.protection = struct('hard', zeros(40, 60));
+normalizedFragment = normalizeBeautyContext(image, faceBox, fragment);
+verifyEqual(testCase, normalizedFragment.schemaVersion, '4.0');
+verifyEqual(testCase, normalizedFragment.protection.hard, ...
+    zeros(40, 60), 'AbsTol', 0);
+% 片段缺失身份字段时由当前输入图像补齐
+verifyEqual(testCase, normalizedFragment.imageSize, [40, 60, 3]);
+verifyEqual(testCase, normalizedFragment.faceBox, double(faceBox));
+verifyFalse(testCase, isfield(normalizedFragment, 'semantic'));
+end
+
+function testNormalizeRejectsMalformedV4Contexts(testCase)
+%TESTNORMALIZERECTSMALFORMEDV4CONTEXTS 缺 canonical 层、层结构非法、
+%   未知语义类别、Mask 越界/尺寸不符、身份字段冲突与未知版本都必须报错。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60])), 'runtimeCache');
+
+aliasOnly = v31;
+aliasOnly.schemaVersion = '4.0';
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, aliasOnly), ...
+    'normalizeBeautyContextV4:InvalidStructure');
+
+emptySemantic = aliasOnly;
+emptySemantic.semantic = struct();
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, emptySemantic), ...
+    'normalizeBeautyContextV4:InvalidStructure');
+
+unknownClass = aliasOnly;
+unknownClass.semantic = struct('regions', ...
+    struct('unknownRegion', zeros(40, 60)));
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, unknownClass), ...
+    'normalizeBeautyContextV4:InvalidSemantic');
+
+outOfRange = aliasOnly;
+outOfRange.protection = struct('hard', ones(40, 60));
+outOfRange.protection.hard(1, 1) = 1.5;
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, outOfRange), ...
+    'normalizeBeautyContextV4:InvalidMask');
+
+wrongSize = aliasOnly;
+wrongSize.evidence = struct('edgeDetail', zeros(39, 60));
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, wrongSize), ...
+    'normalizeBeautyContextV4:InvalidMask');
+
+sizeMismatch = aliasOnly;
+sizeMismatch.semantic = struct('regions', v31.regions);
+sizeMismatch.imageSize = [39, 60, 3];
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, sizeMismatch), ...
+    'normalizeBeautyContextV4:SizeMismatch');
+
+badDiagnostics = aliasOnly;
+badDiagnostics.semantic = struct('regions', v31.regions);
+badDiagnostics.diagnostics = 'not-a-struct';
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, badDiagnostics), ...
+    'normalizeBeautyContextV4:InvalidStructure');
+
+nonStructLayer = aliasOnly;
+nonStructLayer.protection = zeros(40, 60);
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, nonStructLayer), ...
+    'normalizeBeautyContextV4:InvalidStructure');
+
+legacyFieldV4 = aliasOnly;
+legacyFieldV4.semantic = struct('regions', v31.regions);
+legacyFieldV4.featureProtectionMask = zeros(40, 60);
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, legacyFieldV4), ...
+    'normalizeBeautyContext:LegacyFields');
+
+unsupportedMinor = aliasOnly;
+unsupportedMinor.semantic = struct('regions', v31.regions);
+unsupportedMinor.schemaVersion = '4.1';
+verifyError(testCase, @() normalizeBeautyContext(image, faceBox, unsupportedMinor), ...
+    'normalizeBeautyContext:UnsupportedVersion');
+end
+
+function testNormalizeV4IsIdempotent(testCase)
+%TESTNORMALIZEV4ISIDEMPOTENT 同一合法 V4 输入连续 normalize 两次结果
+%   bit-exact：logical → double 转换与身份字段补齐都是幂等规范化。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60])), 'runtimeCache');
+v4 = rmfield(v31, {'imageSize', 'faceBox', 'faceScale'});
+v4.schemaVersion = '4.0';
+v4.semantic = struct('regions', v31.regions, ...
+    'confidence', v31.regionConfidence);
+v4.processability = struct('skin', v31.skinMask > .5, ...
+    'faceSkin', v31.faceSkinMask > .5);
+v4.protection = struct('hard', ones(40, 60, 'logical'));
+v4.diagnostics = struct('note', 'idempotent fixture');
+verifyTrue(testCase, islogical(v4.processability.skin));
+verifyTrue(testCase, islogical(v4.protection.hard));
+
+first = normalizeBeautyContext(image, faceBox, v4);
+second = normalizeBeautyContext(image, faceBox, first);
+verifyEqual(testCase, second, first);
+verifyEqual(testCase, first.processability.skin, ...
+    double(v31.skinMask > .5), 'AbsTol', 0);
+verifyEqual(testCase, first.processability.faceSkin, ...
+    double(v31.faceSkinMask > .5), 'AbsTol', 0);
+end
+
 function [image, faceBox, parsing] = fixtureContext(height, width)
 image = uint8(ones(height, width, 3) * 145);
 image(17:24, 28:32, :) = 105;

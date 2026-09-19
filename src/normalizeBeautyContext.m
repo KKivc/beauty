@@ -3,6 +3,10 @@ function beautyContext = normalizeBeautyContext(inputImage, faceBox, context)
 %   处理入口只接受 v3 Context；派生保护 Mask 缺失时由 package 根据
 %   当前图像和语义概率补齐，不再转换或保留 v2 字段。v3.0 的色度
 %   字段会在此处补齐为 v3.1 的规范字段和兼容 alias。
+%   V4 expand 阶段：schemaVersion='4.0' 的分层 Context 走只读
+%   reader 分支（结构校验 + 规范化，不重建派生 Mask、不改写
+%   compat alias）；v3.0/v3.1 输入路径保持不变，生产链仍输出
+%   v3.1 Context。
 
 validateImage(inputImage);
 if nargin < 2
@@ -19,9 +23,16 @@ if ~isstruct(context) || ~isscalar(context)
         'Beauty Context 必须是标量结构体。');
 end
 rejectLegacyFields(context);
+if isV4Version(context)
+    % V4 reader 分支：canonical 分层字段由共享入口校验并规范化，
+    % 顶层 compat alias 原样保留，不在此重建派生 Mask。
+    beautyContext = normalizeBeautyContextV4(context, size(inputImage), ...
+        faceBox);
+    return;
+end
 if ~isV3Version(context)
     error('normalizeBeautyContext:UnsupportedVersion', ...
-        '只接受 Beauty Context 版本 3.0 或 3.1。');
+        '只接受 Beauty Context 版本 3.0、3.1 或 4.0。');
 end
 
 imageSize = size(inputImage);
@@ -113,6 +124,23 @@ if isstring(value) && isscalar(value)
 end
 valid = ischar(value) && size(value, 1) == 1 && ...
     any(strcmp(value, {'3.0', '3.1'}));
+end
+
+function valid = isV4Version(context)
+if ~isfield(context, 'schemaVersion') || isempty(context.schemaVersion)
+    valid = false;
+    return;
+end
+value = context.schemaVersion;
+if isnumeric(value) && isreal(value) && isscalar(value) && ...
+        isfinite(value)
+    valid = value == 4;
+    return;
+end
+if isstring(value) && isscalar(value)
+    value = char(value);
+end
+valid = ischar(value) && size(value, 1) == 1 && strcmp(value, '4.0');
 end
 
 function context = normalizeSemanticFields(context, imageSize)

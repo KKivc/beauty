@@ -127,6 +127,125 @@ verifyEqual(testCase, output(repmat(diagnostics.beautyMasks.hardProtectionMask >
     [1, 1, 3])));
 end
 
+function testMigrationToV4CanonicalKeepsAliasesSeparate(testCase)
+%TESTMIGRATIONTOV4CANONICALKEEPSALIASESSEPARATE v3.1 → V4 canonical：
+%   semantic/diagnostics 为 canonical 层；legacy general masks 仅保留为
+%   顶层 compat alias，绝不进入 canonical 层；迁移产物可被 reader 读回。
+[image, faceBox, parsing] = fixtureImage(96, 128);
+v31 = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([96, 128]));
+v4 = migrateBeautyContext(v31, '4.0');
+
+verifyEqual(testCase, v4.schemaVersion, '4.0');
+verifyTrue(testCase, all(isfield(v4.semantic, {'regions', 'confidence'})));
+verifyEqual(testCase, v4.semantic.regions.skin, v31.regions.skin, ...
+    'AbsTol', 0);
+verifyEqual(testCase, v4.semantic.confidence.skin, ...
+    v31.regionConfidence.skin, 'AbsTol', 0);
+verifyEqual(testCase, v4.diagnostics.sourceSchemaVersion, '3.1');
+verifyEqual(testCase, v4.diagnostics.canonicalLayers, ...
+    {'semantic', 'diagnostics'});
+verifyEqual(testCase, v4.diagnostics.deferredLayers, ...
+    {'processability', 'evidence', 'protection'});
+verifyFalse(testCase, any(isfield(v4, ...
+    {'processability', 'evidence', 'protection'})));
+verifyEqual(testCase, v4.textureProtectionMask, ...
+    v31.textureProtectionMask, 'AbsTol', 0);
+verifyEqual(testCase, v4.skinMask, v31.skinMask, 'AbsTol', 0);
+verifyEqual(testCase, v4.semanticProbabilities, ...
+    v31.semanticProbabilities, 'AbsTol', 0);
+verifyEqual(testCase, v4.runtimeCache.schemaVersion, '3.1');
+verifyEqual(testCase, v4.migrationDiagnostics.status, 'regenerated');
+
+reread = normalizeBeautyContext(image, faceBox, v4);
+verifyEqual(testCase, reread.schemaVersion, '4.0');
+verifyEqual(testCase, reread.semantic.regions.skin, ...
+    v4.semantic.regions.skin, 'AbsTol', 0);
+end
+
+function testMigrationToV4WithoutImageUsesCanonicalSemantic(testCase)
+%TESTMIGRATIONTOV4WITHOUTIMAGEUSESCANONICALSEMANTIC 无原图时迁移到
+%   V4：canonical semantic 取自 v3 语义字段，色度字段走既有 alias 迁移。
+[image, faceBox, parsing] = fixtureImage(96, 128);
+v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([96, 128])), 'runtimeCache');
+v4 = migrateBeautyContext(v31, '4.0');
+
+verifyEqual(testCase, v4.schemaVersion, '4.0');
+verifyEqual(testCase, v4.semantic.regions.nose, v31.regions.nose, ...
+    'AbsTol', 0);
+verifyEqual(testCase, v4.semantic.confidence.nose, ...
+    v31.regionConfidence.nose, 'AbsTol', 0);
+verifyEqual(testCase, v4.migrationDiagnostics.status, 'aliasMigrated');
+verifyEqual(testCase, v4.diagnostics.sourceSchemaVersion, '3.1');
+verifyFalse(testCase, any(isfield(v4, ...
+    {'processability', 'evidence', 'protection'})));
+verifyTrue(testCase, isfield(v4.diagnostics, 'compatAliases'));
+end
+
+function testMigrationFromV30ToV4Canonical(testCase)
+%TESTMIGRATIONFROMV30TOV4CANONICAL 旧 v3.0 Context（无色度规范字段）
+%   迁移到 V4：diagnostics 记录来源版本，色度 alias 迁移结果一致。
+[image, faceBox, parsing] = fixtureImage(96, 128);
+v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([96, 128])), 'runtimeCache');
+legacy = rmfield(v31, 'chromaProtectionMask');
+legacy.schemaVersion = '3.0';
+v4 = migrateBeautyContext(legacy, '4.0');
+
+verifyEqual(testCase, v4.schemaVersion, '4.0');
+verifyEqual(testCase, v4.diagnostics.sourceSchemaVersion, '3.0');
+verifyEqual(testCase, v4.chromaProtectionMask, ...
+    v4.toneProtectionMask, 'AbsTol', 0);
+verifyEqual(testCase, v4.semantic.regions.skin, legacy.regions.skin, ...
+    'AbsTol', 0);
+verifyEqual(testCase, v4.migrationDiagnostics.status, 'aliasMigrated');
+end
+
+function testMigrationToV4IsIdempotent(testCase)
+%TESTMIGRATIONTOV4ISIDEMPOTENT 对同一合法 V4 输入连续 migrate/normalize
+%   两次结果 bit-exact。
+[image, faceBox, parsing] = fixtureImage(96, 128);
+v31 = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([96, 128]));
+v4 = migrateBeautyContext(v31, '4.0');
+again = migrateBeautyContext(v4, '4.0');
+verifyEqual(testCase, again, v4);
+
+first = normalizeBeautyContext(image, faceBox, v4);
+second = normalizeBeautyContext(image, faceBox, first);
+verifyEqual(testCase, second, first);
+end
+
+function testMigrationTargetSchemaIsExplicitAndValidated(testCase)
+%TESTMIGRATIONTARGETSCHEMAISEXPLICITANDVALIDATED 默认目标仍为 v3.1；
+%   V4 目标必须显式声明；V4 输入不允许降级到 v3.1；with-image 形式
+%   同样支持显式 V4 目标并保持幂等。
+[image, faceBox, parsing] = fixtureImage(96, 128);
+v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([96, 128])), 'runtimeCache');
+
+verifyError(testCase, @() migrateBeautyContext(v31, '9.9'), ...
+    'migrateBeautyContext:UnsupportedTarget');
+
+explicitV31 = migrateBeautyContext(v31, 'v3.1');
+verifyEqual(testCase, explicitV31.schemaVersion, '3.1');
+verifyEqual(testCase, explicitV31.migrationDiagnostics.status, ...
+    'aliasMigrated');
+
+v4 = migrateBeautyContext(v31, '4.0');
+verifyError(testCase, @() migrateBeautyContext(v4), ...
+    'migrateBeautyContext:UnsupportedVersion');
+
+v4WithImage = migrateBeautyContext(image, faceBox, v31, '4.0');
+verifyEqual(testCase, v4WithImage.schemaVersion, '4.0');
+verifyEqual(testCase, v4WithImage.semantic.regions.skin, ...
+    v31.regions.skin, 'AbsTol', 0);
+verifyEqual(testCase, v4WithImage.runtimeCache.schemaVersion, '3.1');
+reread = migrateBeautyContext(image, faceBox, v4WithImage, '4.0');
+verifyEqual(testCase, reread, v4WithImage);
+end
+
 function [image, faceBox, parsing] = fixtureImage(height, width)
 image = uint8(ones(height, width, 3) * 145);
 [xGrid, yGrid] = meshgrid(1:width, 1:height);

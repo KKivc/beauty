@@ -323,14 +323,19 @@ end
 end
 
 function validateProductionContract(contract)
+% T08 起（6aec9f7）生产 Context 契约由 '3.1' compat 有意切换为 '4.0'
+%   canonical 分层（架构 schema expand）；algorithmVersion='v3.2' 与
+%   artifactVersion='v3.1' 冻结不变，本诊断的公式复算口径不受影响。
+%   守卫随之对齐当前生产契约：schemaVersion 之外的两个版本仍严格冻结，
+%   防止本入口在未来契约漂移后静默跑在错误依赖上。
 required = {'schemaVersion', 'algorithmVersion', 'artifactVersion'};
 if ~isstruct(contract) || ~isscalar(contract) || ...
         ~all(isfield(contract, required)) || ...
-        ~strcmp(char(contract.schemaVersion), '3.1') || ...
+        ~strcmp(char(contract.schemaVersion), '4.0') || ...
         ~strcmp(char(contract.algorithmVersion), 'v3.2') || ...
         ~strcmp(char(contract.artifactVersion), 'v3.1')
     error('diagnoseRepairMidTextureGateConsumption:InvalidProductionContract', ...
-        '生产依赖必须是当前 Issue 08 使用的 v3.2、Schema 3.1、产物 3.1。');
+        '生产依赖必须是当前 v3.2 算法、Schema 4.0 canonical、产物 3.1 契约。');
 end
 end
 

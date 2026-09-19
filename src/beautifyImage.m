@@ -125,16 +125,15 @@ stageProtection = masks.buildStageProtectionMasks(beautyMasks);
 [smoothedFrequency, smoothingDiagnostics] = beauty.smoothSkinTexture( ...
     runtimeEvidence.frequency, beautyMasks, smoothingStrength, ...
     runtimeEvidence.blemishMap, stageProtection);
-% T14：Fine repair 只消费生产端拼装的 stage contract（T07 零瑕疵快照
-%   repairFine/hard + runtime blemish 放宽后的未折叠门控字段），与
-%   smoothing 的 stage contract 同源（同一份 beautyMasks 产物推导）；
-%   Mid 权重与共享 referenceReliability 在 repairSkinBlemishes 内部
-%   继续走 legacy 兼容逻辑，直至 T15 迁移。
-repairFineContract = makeRepairFineStageContract(beautyMasks, ...
+% T14/T15：Fine/Mid repair 只消费生产端拼装的 stage contract（T07 零
+%   瑕疵快照 repairFine/repairMid/hard + runtime blemish 放宽后的未折
+%   叠门控字段），与 smoothing 的 stage contract 同源（同一份
+%   beautyMasks 产物推导）。
+repairContract = makeRepairStageContract(beautyMasks, ...
     stageProtection, runtimeEvidence.blemishMap);
 [repairedFrequency, repairDiagnostics] = beauty.repairSkinBlemishes( ...
     smoothedFrequency, beautyMasks, runtimeEvidence.blemishMap, ...
-    smoothingStrength, repairFineContract);
+    smoothingStrength, repairContract);
 [baseLuminance, baseLuminanceDiagnostics] = beauty.evenSkinLuminance( ...
     runtimeEvidence.frequency, beautyMasks, smoothingStrength);
 [skinTone, skinToneDiagnostics] = beauty.normalizeSkinTone(inputImage, ...
@@ -213,37 +212,42 @@ evidence = struct( ...
     'blemishDiagnostics', blemishDiagnostics);
 end
 
-function contract = makeRepairFineStageContract(beautyMasks, ...
+function contract = makeRepairStageContract(beautyMasks, ...
     stageProtection, blemishMap)
-%MAKEREPAIRFINESTAGECONTRACT 组装 Fine repair 的 stage contract（T14）。
+%MAKEREPAIRSTAGECONTRACT 组装 Repair（Fine/Mid）的 stage contract
+%   （T14/T15）。
 %   快照与 hard 取自 T07 protection 分层（与生产门控共用同一份
-%   beautyMasks 产物推导）；三个未折叠 runtime 门控字段按
-%   repairSkinBlemishes 的生产原式从同一份产物 + 本次调用的 runtime
-%   blemishMap 计算，保证消费侧重建与 legacy 路径逐位等价：
+%   beautyMasks 产物推导）；未折叠门控字段按 repairSkinBlemishes 的
+%   生产原式从同一份产物 + 本次调用的 runtime blemishMap 计算，保证
+%   消费侧重建与 legacy 路径逐位等价：
 %     blemishRelaxedGate — 零瑕疵参考门 + runtime 放宽量
 %                          1 - structure·(1 - .90·blemish)
 %                          （structureGate0 = 1 - structure 恒成立）；
 %     strongStructureCap — 1 - .65·strongStructure（强结构固定下限）；
-%     textureGate        — 1 - texture（v3.2 线性纹理门）。
-%   textureGate 单独发布的原因：生产链在结构门与纹理门之间对权重做
-%   [0,1] 截断，折叠进门控积会在截断饱和区改变结果；repairFine 的
-%   1-x 补码往返亦有舍入，因此快照不参与输出算术，只作为零瑕疵参考
-%   由消费侧诊断与测试消费。runtime 耦合字段不进入 policy-time
-%   protection 分层（T07 边界），只在本次调用的 call site 组装，不写
-%   入 runtimeEvidence（后者只承载 producer 产物，见
-%   makeRuntimeEvidence）；cached/uncached 路径共用同一份 beautyMasks
-%   产物，组装结果一致。
+%     textureGate        — 1 - texture（v3.2 线性纹理门）；
+%     noseMidGate        — 1 - .50·nose（Mid 鼻部门；repair 侧无
+%                          alphaCurve，纯静态）。
+%   textureGate/noseMidGate 单独发布的原因：生产链在结构门与纹理/
+%   鼻部门之间对权重做 [0,1] 截断，折叠进门控积会在截断饱和区改变
+%   结果；repairFine/repairMid 的 1-x 补码往返亦有舍入，因此快照不参
+%   与输出算术，只作为零瑕疵参考由消费侧诊断与测试消费。runtime 耦
+%   合字段不进入 policy-time protection 分层（T07 边界），只在本次调
+%   用的 call site 组装，不写入 runtimeEvidence（后者只承载 producer
+%   产物，见 makeRuntimeEvidence）；cached/uncached 路径共用同一份
+%   beautyMasks 产物，组装结果一致。
 hard = stageProtection.hard;
 hardFeatureBand = bwdist(hard >= .999) <= 3;
 strongStructure = smoothStep(beautyMasks.structureProtectionMask, ...
     .70, .90) .* double(hardFeatureBand);
 contract = struct( ...
     'repairFine', stageProtection.repairFine, ...
+    'repairMid', stageProtection.repairMid, ...
     'hard', hard, ...
     'blemishRelaxedGate', 1 - beautyMasks.structureProtectionMask .* ...
     (1 - .90 * blemishMap), ...
     'strongStructureCap', 1 - .65 * strongStructure, ...
-    'textureGate', 1 - beautyMasks.textureProtectionMask);
+    'textureGate', 1 - beautyMasks.textureProtectionMask, ...
+    'noseMidGate', 1 - .50 * beautyMasks.noseMask);
 end
 
 function value = smoothStep(inputValue, low, high)

@@ -560,6 +560,85 @@ verifyFalse(testCase, staleDiagnostics.reusedRuntimeCache, ...
 verifyEqual(testCase, staleOut, noCacheOut);
 end
 
+function testFullSizeSaveChainCacheEquivalence(testCase)
+%TESTFULLSIZESAVECHAINCACHEEQUIVALENCE T10 验收：GUI 保存链路
+%   （preview Context → 四参数 authoritative resize → beautifyImage）
+%   的缓存纪律。1) 保存缓存必须在目标原图上全量重建，预览缓存不得
+%   直接充当保存缓存；2) 缓存命中与剥离缓存重建的最终 RGB bit-exact；
+%   3) 两条路径发布的 V4 stage protection 层与缓存产物的保护 mask 关
+%   键统计（nnz/sum 摘要）一致；4) 强行把预览缓存挂进保存链路必须拒
+%   绝复用、安全重建，且输出与统计均与无缓存路径一致。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+preview = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+targetSize = [80, 120];
+targetFaceBox = [20, 16, 60, 48];
+targetImage = imresize(image, targetSize, 'bilinear');
+full = resizeBeautyContext(preview, [targetSize, 3], targetFaceBox, ...
+    targetImage);
+params = struct('smoothingStrength', 50, 'whiteningStrength', 25);
+
+% 1) 保存链路缓存是目标尺寸全量重建：挂在原尺寸输入上，与预览缓存
+%    （预览尺寸输入）不同。
+verifyEqual(testCase, full.runtimeCache.inputImage, targetImage);
+verifyEqual(testCase, full.runtimeCache.imageSize, [targetSize, 3]);
+verifyFalse(testCase, isequal(full.runtimeCache, preview.runtimeCache), ...
+    '保存链路缓存不得是预览缓存。');
+
+[cachedOutput, cachedDiagnostics] = beautifyImage(targetImage, params, ...
+    targetFaceBox, full);
+verifyTrue(testCase, cachedDiagnostics.reusedRuntimeCache);
+[rebuiltOutput, rebuiltDiagnostics] = beautifyImage(targetImage, ...
+    params, targetFaceBox, rmfield(full, 'runtimeCache'));
+verifyFalse(testCase, rebuiltDiagnostics.reusedRuntimeCache);
+
+% 2) 最终 RGB bit-exact。
+verifyEqual(testCase, cachedOutput, rebuiltOutput);
+
+% 3) stage protection 等价：缓存复用与重建产物的保护 mask 关键统计
+%    一致；由重建产物推导的 V4 stage 层与保存链路 Context 发布的
+%    protection 一致。
+assertProtectionStatsEqual(testCase, cachedDiagnostics.beautyMasks, ...
+    rebuiltDiagnostics.beautyMasks, '缓存复用与重建');
+verifyEqual(testCase, ...
+    masks.buildStageProtectionMasks(rebuiltDiagnostics.beautyMasks), ...
+    full.protection, 'AbsTol', 0, ...
+    '重建产物推导的 stage 层必须与保存链路 Context 发布的 protection 一致。');
+
+% 4) 预览缓存混入保存链路：拒绝复用并安全重建，输出与统计不变。
+polluted = full;
+polluted.runtimeCache = preview.runtimeCache;
+[pollutedOutput, pollutedDiagnostics] = beautifyImage(targetImage, ...
+    params, targetFaceBox, polluted);
+verifyFalse(testCase, pollutedDiagnostics.reusedRuntimeCache, ...
+    '预览缓存不得经保存链路误命中。');
+verifyEqual(testCase, pollutedDiagnostics.runtimeCache.status, ...
+    'regenerated');
+verifyEqual(testCase, pollutedOutput, rebuiltOutput);
+assertProtectionStatsEqual(testCase, pollutedDiagnostics.beautyMasks, ...
+    rebuiltDiagnostics.beautyMasks, '污染缓存重建');
+end
+
+function assertProtectionStatsEqual(testCase, cachedMasks, rebuiltMasks, label)
+%ASSERTPROTECTIONSTATSEQUAL T10 口径：逐保护字段比较 nnz(>0)、
+%   nnz(>=.999) 与 sum 摘要——同时覆盖软保护权重总量与二值 identity。
+names = {'textureProtectionMask'; 'structureProtectionMask'; ...
+    'whiteningProtectionMask'; 'chromaProtectionMask'; ...
+    'toneProtectionMask'; 'protectionMask'; 'noseMask'; ...
+    'hardProtectionMask'};
+for index = 1:numel(names)
+    name = names{index};
+    verifyEqual(testCase, protectionStats(cachedMasks.(name)), ...
+        protectionStats(rebuiltMasks.(name)), 'AbsTol', 0, ...
+        sprintf('%s路径的 %s 关键统计必须一致。', label, name));
+end
+end
+
+function stats = protectionStats(mask)
+mask = double(mask);
+stats = [nnz(mask > 0), nnz(mask >= .999), sum(mask(:))];
+end
+
 function testBridgeUnifiesDerivedFieldsAcrossEntries(testCase)
 %TESTBRIDGEUNIFIESDERIVEDFIELDSACROSSENTRIES 三个入口的派生字段必须由
 %   rebuildBeautyDerivedMasks 统一回填：同一输入下 build 与 prepare

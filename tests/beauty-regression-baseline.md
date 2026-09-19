@@ -32,3 +32,35 @@ report = runBeautyRegression('Assert', true);
 ```
 
 本地真人图只通过 `runBeautyRegression('PrivateSmoke', entries)` 参数化传入；报告只返回聚合指标和数量，不保存路径、EXIF 或人物信息。2026-09-16 已使用用户提供的 `D:\桌面\人脸\人脸` 完成第二、第三阶段 smoke；本基线不替代 GUI 手动视觉结论。
+
+## V4 架构迁移兼容基线（T01）
+
+V4 迁移期间（只改架构、不改效果）的一切 Ticket 必须对本基线保持 bit-exact 等价。
+
+- Oracle commit：`e889f31ab04de3d10f21be3c3a6f1b09df19dd80`（main）。
+- 契约版本：`schemaVersion=3.1`、`algorithmVersion=v3.2`、`artifactVersion=v3.1`。
+- 记录时间：2026-09-19，MATLAB R2024a，Windows。
+- 比较口径：架构兼容阶段全部 bit-exact。最终 RGB 以 SHA-256（输出 `uint8` 列优先字节序；R2024a 无原生 `sha256`，经 JVM `MessageDigest` 计算）断言；零强度输出、hard identity 区域、cached/uncached 输出、预览/原尺寸路径要求精确相等。基线 commit 上已实测两次全量重算、缓存复用与重算输出完全一致，因此不设数值容差，禁止视觉阈值。
+
+### 合成 oracle（`tests/testMaskSystemV4CompatibilityBaseline.m`）
+
+- 样本来源：测试内确定性合成 fixture（解析公式 + 注入语义 + 零 SCHP 概率；不读外部图片、无随机数、无模型推理）：rich 180×260（皮肤/脖颈/鼻侧影/雀斑/硬保护眼部，公式复用 `runBeautyRegression`）；compact 120×160（正弦皮肤纹理 + 眼/唇语义，公式复用 `testBeautyV3`）。
+- 固定参数组合与最终 RGB digest：
+
+| fixture | smoothing | whitening | SHA-256 |
+| --- | ---: | ---: | --- |
+| rich | 100 | 0 | `8ef2bf0ec01c681a2ee1d649220581ff7bf3dbb9cb650b5a37db9cab78682dc6` |
+| rich | 0 | 100 | `58ab2f354176fb258dcef67e01ff65d5c4c2b98f0085902cfe16c604281bfe80` |
+| rich | 100 | 15 | `6716ed9ef1db1c9a3f91c5c1aa877732a92398e2452abdacd6d3aefc9fac21f9` |
+| rich | 50 | 25 | `b18986f62ffa6952b2252160dc79264448d2fac9c16b935cf6b4e966104dc6fe` |
+| compact | 100 | 15 | `012175a4b7b63b06bd73dd8a3dd638c811d4fcde24d544047e4b154b6e4b6304` |
+| 预览路径（0.5 缩放，rich） | 100 | 15 | `dc6539302f6c001509f0cb69a95ae87691d852e551ba915b83ba98e10e3b89b2` |
+| 原尺寸路径（preview→resize 重建，rich） | 100 | 15 | `31e9168c9dc1d74d3a0c40104c64eb40bd1d74ce6e1eb57e4f748db96c7a1ef7` |
+
+- 零强度（0/0）输出必须与源图完全一致；hard identity 区域（`hardProtectionMask >= .999`）RGB 必须与源图完全一致；cached/uncached 输出必须完全一致。
+
+### 真实图 oracle（`tests/runIssue08Validation.m`）
+
+- 固定 77 链路（私有图路径仅存在于该既有入口，产物写入系统临时目录，不在提交中出现）：参数 `smoothingStrength=100, whiteningStrength=15`，faceBox `[95 79 286 372]`，语义取自冻结 context（剥离 runtimeCache 与派生 Mask 后由当前生产链重建）。
+- e889f31 输出 digest：`ce17e323dc4208d973ccae4b4a2cc122b2fed75fe7500088197c5278806bdc4c`，当前生产输出必须 bit-exact 一致；hard identity 区域（82266 像素）相对源图变化必须为 0。
+- 注意：`%TEMP%\image_beauty_issue02_probe\77_v32_probe.mat` 是 issue08 入口的内部重建夹具，其输出与 e889f31 生产输出不同（实测最大 RGB 差 118），不得当作 T01 oracle。

@@ -2,6 +2,12 @@ function summary = runIssue08Validation()
 %RUNISSUE08VALIDATION 验证低/中置信逐眼 soft support 及固定 77 回归。
 %   该入口只使用固定 77 v3.2 MAT 作为基线输入；候选生产算法来自
 %   当前工作树，输出和诊断全部写入系统临时目录。
+%   T01 兼容基线：当前工作树输出还必须与 main@e889f31
+%   (schemaVersion=3.1 / algorithmVersion=v3.2 / artifactVersion=v3.1)
+%   的固定 77 链路输出 bit-exact 一致，hard identity 区域相对源图的
+%   变化必须为 0。摘要口径为输出 uint8 列优先字节序的 SHA-256。
+%   注意：issue02 probe MAT 是本入口的重建夹具，其输出与 e889f31
+%   生产输出不同（实测最大 RGB 差 118），不得当作 T01 oracle。
 
 projectRoot = fileparts(fileparts(mfilename('fullpath')));
 addpath(fullfile(projectRoot, 'src'), '-begin');
@@ -57,6 +63,15 @@ if recomputeMaxRgbDifference ~= 0
         '两次无缓存候选计算不一致：%.17g。', recomputeMaxRgbDifference);
 end
 
+% T01 兼容基线：e889f31 冻结的固定 77 链路输出（bit-exact oracle）。
+expectedOutputDigest = 'ce17e323dc4208d973ccae4b4a2cc122b2fed75fe7500088197c5278806bdc4c';
+actualOutputDigest = rgbSha256Digest(output);
+if ~strcmp(actualOutputDigest, expectedOutputDigest)
+    error('runIssue08Validation:CompatibilityBaselineMismatch', ...
+        '当前生产输出与 e889f31 兼容基线不一致：期望 %s，实际 %s。', ...
+        expectedOutputDigest, actualOutputDigest);
+end
+
 texture = diagnostics.mask.texture;
 roi = makeRoiMask([165 205 150 100], size(inputImage, 1:2));
 baseRoi = baseDiagnostics.mask.texture;
@@ -94,6 +109,11 @@ hard3 = repmat(diagnostics.beautyMasks.hardProtectionMask >= .999, ...
     1, 1, 3);
 summary.candidateHardProtectionMaxRgbChange = max(abs(double( ...
     output(hard3)) - double(inputImage(hard3))), [], 'all');
+if summary.candidateHardProtectionMaxRgbChange ~= 0
+    error('runIssue08Validation:HardIdentityChanged', ...
+        'hard identity 区域相对源图发生变化：%.17g。', ...
+        summary.candidateHardProtectionMaxRgbChange);
+end
 summary.roiDefinitions = struct('browEye', [165 205 150 100], ...
     'hair', [80 90 90 70], 'background', [465 20 40 140], ...
     'noseBridge', [160 295 90 50], 'noseWing', [155 325 80 45]);
@@ -128,6 +148,17 @@ present = names(isfield(context, names));
 if ~isempty(present)
     context = rmfield(context, present);
 end
+end
+
+function digest = rgbSha256Digest(image)
+%RGBSHA256DIGEST 输出 RGB 的 SHA-256（uint8 列优先字节序）。
+%   R2024a 无原生 sha256，使用 JVM MessageDigest（与
+%   testMaskSystemV4CompatibilityBaseline 的 rgbDigest 同一口径）。
+bytes = uint8(image(:)).';
+messageDigest = java.security.MessageDigest.getInstance('SHA-256');
+messageDigest.update(bytes);
+digest = lower(reshape(dec2hex(typecast(messageDigest.digest(), ...
+    'uint8'), 2).', 1, []));
 end
 
 function value = maxEvidence(context, name, roi)

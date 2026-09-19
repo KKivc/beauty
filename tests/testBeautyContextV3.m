@@ -479,12 +479,17 @@ end
 function testNormalizeAcceptsPartialV4Contexts(testCase)
 %TESTNORMALIZEACCEPTSPARTIALV4CONTEXTS 部分分层（partial V4）同样合法：
 %   只带 semantic 或只带 protection 的 V4 Context 都能通过 reader。
-[image, faceBox, parsing] = fixtureContext(40, 60);
-v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
-    emptyBodyParsing([40, 60])), 'runtimeCache');
-semanticOnly = v31;
-semanticOnly.schemaVersion = '4.0';
-semanticOnly.semantic = struct('regions', v31.regions);
+	[image, faceBox, parsing] = fixtureContext(40, 60);
+	v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+	    emptyBodyParsing([40, 60])), 'runtimeCache');
+	semanticOnly = v31;
+	semanticOnly.schemaVersion = '4.0';
+	% T05 起生产 Context 自带 processability 分层；本用例验证"只有
+	% semantic 层"的 partial V4，须先剥离生产链附加的分层。
+	if isfield(semanticOnly, 'processability')
+	    semanticOnly = rmfield(semanticOnly, 'processability');
+	end
+	semanticOnly.semantic = struct('regions', v31.regions);
 normalized = normalizeBeautyContext(image, faceBox, semanticOnly);
 verifyEqual(testCase, normalized.schemaVersion, '4.0');
 verifyEqual(testCase, normalized.semantic.regions.skin, ...
@@ -511,10 +516,16 @@ function testNormalizeRejectsMalformedV4Contexts(testCase)
 v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60])), 'runtimeCache');
 
-aliasOnly = v31;
-aliasOnly.schemaVersion = '4.0';
-verifyError(testCase, @() normalizeBeautyContext(image, faceBox, aliasOnly), ...
-    'normalizeBeautyContextV4:InvalidStructure');
+	aliasOnly = v31;
+	aliasOnly.schemaVersion = '4.0';
+	% T05 起生产 Context 自带 semantic/processability 分层；alias-only
+	% 夹具须剥离全部 canonical 层，才能构造真正"只有 compat alias"的
+	% V4 Context。
+	canonicalLayers = {'semantic', 'processability'};
+	aliasOnly = rmfield(aliasOnly, ...
+	    canonicalLayers(isfield(aliasOnly, canonicalLayers)));
+	verifyError(testCase, @() normalizeBeautyContext(image, faceBox, aliasOnly), ...
+	    'normalizeBeautyContextV4:InvalidStructure');
 
 emptySemantic = aliasOnly;
 emptySemantic.semantic = struct();
@@ -594,6 +605,61 @@ verifyEqual(testCase, first.processability.faceSkin, ...
     double(v31.faceSkinMask > .5), 'AbsTol', 0);
 end
 
+function testSemanticLayersPublishParsingSemantics(testCase)
+%TESTSEMANTICLAYERSPUBLISHPARSINGSEMANTICS build 与 prepare 都必须发
+%   布 V4 semantic/processability 分层：build 阶段（未合并 SCHP）的
+%   bodySkin 语义为全零（Face Parsing 19 类没有 body 类别）；prepare
+%   合并后按最终皮肤域刷新；分层与旧字段保持 bit-exact。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+fromParsing = buildBeautyContextFromParsing(image, faceBox, parsing);
+verifyTrue(testCase, all(isfield(fromParsing, ...
+    {'semantic', 'processability'})));
+verifyEqual(testCase, fromParsing.semantic.bodySkin, zeros(40, 60), ...
+    'AbsTol', 0, ...
+    'SCHP 合并前 bodySkin 语义必须为全零，不得伪造 body 区域。');
+verifyEqual(testCase, fromParsing.processability.skin, ...
+    fromParsing.skinMask, 'AbsTol', 0);
+verifyEqual(testCase, fromParsing.semantic.regions, ...
+    fromParsing.regions, 'AbsTol', 0);
+verifyEqual(testCase, fromParsing.semantic.faceSkin, ...
+    semanticUnionOf(fromParsing, {'skin', 'nose', 'leftEar', 'rightEar'}), ...
+    'AbsTol', 0);
+
+prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60])), 'runtimeCache');
+verifyEqual(testCase, prepared.semantic.bodySkin, prepared.bodySkinMask, ...
+    'AbsTol', 0);
+verifyEqual(testCase, prepared.processability.skin, prepared.skinMask, ...
+    'AbsTol', 0);
+verifyEqual(testCase, prepared.semantic.regions, prepared.regions, ...
+    'AbsTol', 0);
+verifyEqual(testCase, prepared.semantic.confidence, ...
+    prepared.regionConfidence, 'AbsTol', 0);
+end
+
+function testProductionLayersPassV4Reader(testCase)
+%TESTPRODUCTIONLAYERSPASSV4READER 生产链附加的 semantic/processability
+%   分层必须通过 T03 V4 reader 的结构校验，分组语义字段在 reader 路
+%   径中原样保留。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+prepared = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+v4 = rmfield(prepared, 'runtimeCache');
+v4.schemaVersion = '4.0';
+normalized = normalizeBeautyContext(image, faceBox, v4);
+verifyEqual(testCase, normalized.schemaVersion, '4.0');
+verifyEqual(testCase, normalized.processability.skin, ...
+    prepared.skinMask, 'AbsTol', 0);
+verifyEqual(testCase, normalized.semantic.regions, ...
+    prepared.regions, 'AbsTol', 0);
+verifyEqual(testCase, normalized.semantic.confidence, ...
+    prepared.regionConfidence, 'AbsTol', 0);
+verifyEqual(testCase, normalized.semantic.faceSkin, ...
+    prepared.semantic.faceSkin, 'AbsTol', 0);
+verifyEqual(testCase, normalized.semantic.bodySkin, ...
+    prepared.semantic.bodySkin, 'AbsTol', 0);
+end
+
 function [image, faceBox, parsing] = fixtureContext(height, width)
 image = uint8(ones(height, width, 3) * 145);
 image(17:24, 28:32, :) = 105;
@@ -618,4 +684,14 @@ end
 
 function options = emptyBodyParsing(imageSize)
 options = struct('probabilities', zeros([imageSize, 20], 'single'));
+end
+
+function union = semanticUnionOf(context, names)
+%SEMANTICUNIONOF 在测试侧复现生产 semanticUnion 配方。
+union = zeros(size(context.skinMask));
+for index = 1:numel(names)
+    union = max(union, min(context.regions.(names{index}), ...
+        context.regionConfidence.(names{index})));
+end
+union = min(max(double(union), 0), 1);
 end

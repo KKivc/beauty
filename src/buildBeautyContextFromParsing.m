@@ -34,6 +34,11 @@ context.faceSkinMask = probabilityMask(faceProbability, faceScale);
 context.nonFaceSkinMask = max(context.skinMask - ...
     min(context.skinMask, context.faceSkinMask), 0);
 context.bodySkinMask = context.nonFaceSkinMask;
+% V4 分层初版：semantic/processability 只依赖解析语义与当前皮肤域，
+% 不读取 protection。SCHP 身体皮肤尚未合并，bodySkin 语义为全零，
+% prepareBeautyContext 合并后会统一刷新。
+[context.semantic, context.processability] = buildBeautySemanticLayers( ...
+    regions, confidence, context.skinMask, []);
 context = rebuildBeautyDerivedMasks(inputImage, context, faceBox);
 end
 

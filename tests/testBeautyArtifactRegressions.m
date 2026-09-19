@@ -244,11 +244,12 @@ verifyEqual(testCase, tamperedOutput, uncachedOutput);
 end
 
 function testFineStageContractWiringIsBitExactAndCacheStable(testCase)
-% T12：生产管线（beautifyImage）把本次 beautyMasks 产物推导的 stage
-%   protection 传给 Fine smoothing；Fine alphaMap 必须与独立
-%   stage-contract 重算 bit-exact 一致，统计保护图与 Mid 兼容门控保持
-%   生产原值，cached/uncached 两条路径的最终 RGB 与 Fine alphaMap 完全
-%   一致（缓存复用不得改变 stage contract 的消费结果）。
+% T12/T13：生产管线（beautifyImage）把本次 beautyMasks 产物推导的
+%   stage protection 传给 smoothing；Fine alphaMap 必须与独立
+%   stage-contract 重算 bit-exact 一致，统计保护图保持生产原值，Mid
+%   alphaMap 与 contract 派生的 midGate 重算 bit-exact（T13），cached/
+%   uncached 两条路径的最终 RGB 与 Fine alphaMap 完全一致（缓存复用
+%   不得改变 stage contract 的消费结果）。
 imageSize = [160, 200];
 [yGrid, xGrid] = ndgrid(1:imageSize(1), 1:imageSize(2));
 luma = 0.55 + 0.02 * sin(2 * pi * xGrid / 23) .* ...
@@ -284,13 +285,14 @@ verifyTrue(testCase, nnz(hard) > 0, ...
 verifyEqual(testCase, ...
     nnz(uncachedDiagnostics.smoothing.alphaMap(hard)), 0);
 
-% 统计路径与 Mid 兼容门控保持生产原值。
+% 统计路径保持生产原值；T13 起 Mid 门控由 stage contract 派生为单一
+% midGate（α 插值归属 effect-strength 侧的凸组合），midAlphaMap 与
+% alphaMap .* midGate 逐像素 bit-exact。
 verifyEqual(testCase, uncachedDiagnostics.smoothing.protectionMask, ...
     beautyMasks.protectionMask, 'AbsTol', 0);
 verifyEqual(testCase, uncachedDiagnostics.smoothing.midAlphaMap, ...
     uncachedDiagnostics.smoothing.alphaMap .* ...
-    uncachedDiagnostics.smoothing.midStructureGate .* ...
-    uncachedDiagnostics.smoothing.noseMidGate, 'AbsTol', 0);
+    uncachedDiagnostics.smoothing.midGate, 'AbsTol', 0);
 
 % cached 路径：stage protection 从缓存的同一份 beautyMasks 产物推导，
 % 最终 RGB 与 Fine alphaMap 必须 bit-exact 一致。

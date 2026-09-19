@@ -1,15 +1,55 @@
 function [repairedFrequency, diagnostics] = repairSkinBlemishes( ...
-        frequency, beautyMasks, blemishMap, smoothingStrength)
+        frequency, beautyMasks, blemishMap, smoothingStrength, ...
+        repairFineContract)
 %REPAIRSKINBLEMISHES 对瑕疵位置执行受控的 Fine/Mid 局部修复。
 %   普通皮肤仍由 smoothSkinTexture 处理；本函数只读取固定的瑕疵图，
 %   低置信度只衰减 Fine，中高置信度才少量收敛 Mid。Base 始终不变，
 %   且所有修复权重都由 structureProtectionMask 和
 %   textureProtectionMask 连续限制。
+%
+%   T14：可选第 5 参数 repairFineContract 是 Fine repair 的 stage
+%   contract，由 beautifyImage 生产端从与生产门控共用的同一份
+%   beautyMasks 产物和本次调用的 runtime blemish evidence 拼装传入
+%   （T12/T13 范式）。提供时 fineWeight 的门控不再自行组合 general
+%   texture/structure/hard masks，而是从 contract 按生产原式、原顺序
+%   重建：
+%     structureGateFine = min(blemishRelaxedGate, strongStructureCap)
+%     fineWeight = clamp(W .* structureGateFine, 0, 1) .* textureGate
+%   字段语义：
+%     repairFine         — T07 发布的零瑕疵参考快照 repairFine =
+%                          1 - structureGate0·(1 - texture)；消费侧读
+%                          取为零瑕疵参考门（诊断 fineGateZeroBlemish
+%                          与测试断言消费）；
+%     hard               — hard identity（T07 单独发布），按生产原位
+%                          组合进 allowed 的 (1-hard) 乘子；
+%     blemishRelaxedGate — 零瑕疵参考门 + runtime blemish 放宽量：
+%                          structureGate0 + .90·structure·blemish
+%                          （= 1 - structure·(1 - .90·blemish)，其中
+%                          structureGate0 = 1 - structure 恒成立）；
+%     strongStructureCap — 强结构固定下限 1 - .65·strongStructure；
+%     textureGate        — v3.2 线性纹理门 1 - texture，单独发布。
+%   textureGate 必须独立于结构门发布：生产链在结构门与纹理门之间对
+%   权重做 [0,1] 截断（clamp(W·structureGate)·textureGate），把纹理折
+%   叠进门控积会在截断饱和区改变结果（实测饱和像素偏差 ~0.1 量级）；
+%   且 repairFine 的 1-x 补码往返有舍入，无法逐位还原门控积。因此快照
+%   的 texture 折叠只保留为零瑕疵参考，运行期由生产端按与
+%   repairSkinBlemishes 完全相同的表达式、同一份 mask/blemish 产物计
+%   算三个未折叠字段，消费侧重建与 legacy 路径逐位等价（bit-exact）。
+%   repairFine 的语义（零瑕疵参考 + runtime 放宽单调松弛）由测试断言：
+%   blemish = 0 时 structureGateFine·textureGate 与 1 - repairFine 一致
+%   （≤1e-15），blemish > 0 时相对快照只增不减。缺字段 fail-fast，不
+%   在函数内部重新拼装，也不静默回退；未提供第 5 参的旧调用方走
+%   legacy 兼容路径，行为不变。
+%   textureProtection/structureProtection/hardProtection 的残余读取只
+%   服务尚未迁移的 Mid 修复、chromaWeight 与共享 referenceReliability
+%   （T15 迁移后收口），Fine 权重路径不再读取 general texture/
+%   structure masks。
 
 if nargin < 4
     error('beauty:InvalidBlemishRepair', ...
         '瑕疵修复需要频率、Beauty Masks、瑕疵图和磨皮强度。');
 end
+useStageContract = nargin >= 5 && ~isempty(repairFineContract);
 validateFrequency(frequency);
 imageSize = frequency.imageSize(1:2);
 validateMasks(beautyMasks, imageSize);
@@ -29,16 +69,30 @@ textureProtection = readMask(beautyMasks, ...
     'textureProtectionMask', imageSize);
 hardProtection = readOptionalMask(beautyMasks, ...
     'hardProtectionMask', imageSize);
+if useStageContract
+    % T14：缺字段或取值无效 fail-fast，不静默回退拼装。
+    repairFineContract = validateRepairFineContract(repairFineContract, ...
+        imageSize);
+end
 
 profile = beautySmoothingProfile(smoothingStrength);
-allowed = min(skinMask, strengthMap) .* (1 - hardProtection);
+% T14：stage 路径的 (1-hard) 乘子按 T07 边界约定从 contract.hard 组合；
+% legacy 路径保持读取 beautyMasks.hardProtectionMask。生产端两条来源
+% 同 artifact bit-exact 同值；共享 structureGate（Mid/strongStructure
+% 带）继续读取 beautyMasks，直至 T15 迁移收口。
+if useStageContract
+    hardGate = repairFineContract.hard;
+else
+    hardGate = hardProtection;
+end
+allowed = min(skinMask, strengthMap) .* (1 - hardGate);
 nonFaceStrength = readOptionalMask(beautyMasks, ...
     'nonFaceStrengthMap', imageSize);
 nonFacePixels = nonFaceStrength > .01;
 if any(nonFacePixels(:))
     allowed(nonFacePixels) = profile.outsideFaceStrength .* ...
         min(skinMask(nonFacePixels), nonFaceStrength(nonFacePixels)) .* ...
-        (1 - hardProtection(nonFacePixels));
+        (1 - hardGate(nonFacePixels));
 end
 normalRepairCurve = min(profile.blemishStrength / (.75 ^ .85), 1);
 highEndRepairCurve = max(profile.blemishStrength - .75 ^ .85, 0);
@@ -78,9 +132,23 @@ highEndConfidence = highConfidence .* double(blobMask) .* globalGate;
 noseMidGate = 1 - .50 * noseMask;
 repairCurveMap = normalRepairCurve * ones(imageSize);
 repairCurveMap = min(max(repairCurveMap, 0), 1);
-fineWeight = repairCurveMap .* (repairEvidence + .25 * highConfidence) .* ...
-    allowed .* structureGate + (highEndRepairCurve .* ...
-    highEndConfidence) .* allowed .* structureGate;
+if useStageContract
+    % T14 stage 路径：Fine 门控只从 stage contract 按生产原式、原顺序
+    % 重建（字段语义与逐位等价推导见函数头注），Fine 不再自行组合
+    % general texture/structure/hard masks；runtime blemish 放宽量由
+    % 生产端在零瑕疵参考门上重建后随 contract 传入。
+    fineGateRuntime = min(repairFineContract.blemishRelaxedGate, ...
+        repairFineContract.strongStructureCap);
+    fineWeight = repairCurveMap .* (repairEvidence + .25 * highConfidence) .* ...
+        allowed .* fineGateRuntime + (highEndRepairCurve .* ...
+        highEndConfidence) .* allowed .* fineGateRuntime;
+else
+    % legacy 兼容路径（未提供 repairFineContract 的调用方）：行为与
+    % v3.2 完全一致。
+    fineWeight = repairCurveMap .* (repairEvidence + .25 * highConfidence) .* ...
+        allowed .* structureGate + (highEndRepairCurve .* ...
+        highEndConfidence) .* allowed .* structureGate;
+end
 mediumWeight = repairCurveMap .* (.95 * mediumConfidence + ...
     .40 * highConfidence) .* allowed .* structureGate + ...
     (highEndRepairCurve .* ...
@@ -94,8 +162,14 @@ chromaWeight = min(max(chromaWeight, 0), 1);
 
 % 脸部和脸外的允许权重完成后统一应用线性纹理软保护；同一门控也
 % 从邻域参考采样中排除受保护纹理，避免保护区域反向影响附近修复。
+% T14：stage 路径的纹理门按生产原位（截断之后）从 contract 读取；
+% Mid 与 chromaWeight 尚未迁移，继续应用共享 textureGate。
 textureGate = 1 - textureProtection;
-fineWeight = fineWeight .* textureGate;
+if useStageContract
+    fineWeight = fineWeight .* repairFineContract.textureGate;
+else
+    fineWeight = fineWeight .* textureGate;
+end
 mediumWeight = mediumWeight .* textureGate;
 chromaWeight = chromaWeight .* textureGate;
 
@@ -193,6 +267,35 @@ diagnostics = struct( ...
     'baseUnchanged', isequal(repairedFrequency.base, frequency.base), ...
     'imageSize', [imageSize, 3], ...
     'smoothingStrength', double(smoothingStrength));
+if useStageContract
+    % T14：stage 路径新增重建门控与零瑕疵参考门快照；legacy 路径诊断
+    % 不变。
+    diagnostics.fineGateRuntime = fineGateRuntime;
+    diagnostics.fineGateZeroBlemish = 1 - repairFineContract.repairFine;
+end
+end
+
+function contract = validateRepairFineContract(contract, imageSize)
+%VALIDATEREPAIRFINECONTRACT 校验 Fine repair stage contract（T14）。
+%   必需字段：repairFine（T07 零瑕疵快照）、hard（hard identity）、
+%   blemishRelaxedGate/strongStructureCap/textureGate（生产端按生产原
+%   式计算的未折叠 runtime 门控字段）。缺字段或取值无效一律 fail-fast，
+%   不在函数内部重新拼装，也不静默回退到 general masks 解释。
+if ~isstruct(contract) || ~isscalar(contract) || ...
+        ~all(isfield(contract, {'repairFine', 'hard', ...
+        'blemishRelaxedGate', 'strongStructureCap', 'textureGate'}))
+    error('beauty:InvalidBlemishRepair', ...
+        'Fine repair stage contract 必须是包含 repairFine、hard、blemishRelaxedGate、strongStructureCap 和 textureGate 的标量结构。');
+end
+contract.repairFine = validateMask(contract.repairFine, imageSize, ...
+    'repairFine');
+contract.hard = validateMask(contract.hard, imageSize, 'hard');
+contract.blemishRelaxedGate = validateMask( ...
+    contract.blemishRelaxedGate, imageSize, 'blemishRelaxedGate');
+contract.strongStructureCap = validateMask( ...
+    contract.strongStructureCap, imageSize, 'strongStructureCap');
+contract.textureGate = validateMask(contract.textureGate, imageSize, ...
+    'textureGate');
 end
 
 function validateFrequency(frequency)

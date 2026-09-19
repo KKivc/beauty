@@ -186,6 +186,45 @@ verifyLessThanOrEqual(testCase, params.whiteningStrength, 20);
 verifyEqual(testCase, params.smoothingStrength, 45, 'AbsTol', 1e-12);
 end
 
+function testSkinToneConsumesStageContractInPipeline(testCase)
+%TESTSKINTONECONSUMESSTAGECONTRACTINPIPELINE T17：生产管线向肤色归一
+%   化注入 tone stage contract（beautifyImage.makeToneStageContract）：
+%   诊断不再报告 structure/chroma/tone 兼容 alias，改报 T07 tone 快照
+%   参考门 toneGateSnapshot；磨皮高档（ratio>.50）下 uniform 分支照常
+%   激活，strengthMap 继续独立控制效果幅度；输出保持输入尺寸与 uint8
+%   契约。
+imageSize = [96, 96];
+[xGrid, yGrid] = meshgrid(1:imageSize(2), 1:imageSize(1));
+chromaWobble = 6 * sin(2 * pi * xGrid / 23) .* sin(2 * pi * yGrid / 19);
+grayImage = uint8(min(255, max(0, round(150 + chromaWobble))));
+sourceImage = repmat(grayImage, [1, 1, 3]);
+faceBox = [1, 1, imageSize(2), imageSize(1)];
+context = simpleContext(imageSize, faceBox, true(imageSize), ...
+    true(imageSize));
+
+params = struct('smoothingStrength', 75, 'whiteningStrength', 0);
+[outputImage, diagnostics] = beautifyImage(sourceImage, params, faceBox, ...
+    context);
+verifySize(testCase, outputImage, [imageSize, 3]);
+verifyClass(testCase, outputImage, 'uint8');
+verifyTrue(testCase, nnz(diagnostics.skinTone.weightMap) > 0, ...
+    '样例必须产生非零 tone 权重，否则 wiring 断言无意义。');
+verifyGreaterThan(testCase, diagnostics.skinTone.uniformToneCurve, 0);
+verifyEqual(testCase, isfield(diagnostics.skinTone, ...
+    {'structureProtectionMask', 'chromaProtectionMask', ...
+    'toneProtectionMask'}), [false, false, false], ...
+    '管线 tone 诊断不得再报告兼容 alias 保护字段。');
+verifyTrue(testCase, isfield(diagnostics.skinTone, 'toneGateSnapshot'));
+verifyEqual(testCase, diagnostics.skinTone.hardProtectionMask, ...
+    diagnostics.beautyMasks.hardProtectionMask, 'AbsTol', 0);
+
+[beautyMasks, ~] = masks.buildBeautyMasks(sourceImage, ...
+    normalizeBeautyContext(sourceImage, faceBox, context), faceBox);
+protection = masks.buildStageProtectionMasks(beautyMasks);
+verifyEqual(testCase, diagnostics.skinTone.toneGateSnapshot, ...
+    1 - protection.tone, 'AbsTol', 0);
+end
+
 function amplitude = checkerAmplitude(imageData)
 grayImage = double(rgb2gray(imageData));
 oddPixels = grayImage(1:2:end, 1:2:end);

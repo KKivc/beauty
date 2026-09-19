@@ -60,8 +60,10 @@ function protection = buildStageProtectionMasks(beautyMasks)
 %       1 - structure；featureGate = 1 - .78*chroma；allowed 中的
 %       (1-hard) 单独保留）：tone = 1 - (1 - structure) .*
 %       (1 - .78*chroma)。已知残差：ratio>.50 的 uniform 分支使用
-%       (1-structure).*(1-chroma)（比本字段更强），属 T17 迁移时的
-%       消费侧课题。
+%       (1-structure).*(1-chroma)（比本字段更强），单快照无法同时
+%       表达两条分支；T17 起消费侧改由生产端拼装的未折叠
+%       uniformFeatureGate 字段精确重建该分支，本快照只作主分支参考
+%       （toneGateSnapshot）。
 %     whitening
 %       beauty.applySkinWhitening 的 supportBase 门控（featureSetback =
 %       1 - whitening；structureGate = 1 - structure，脸部（faceSkin

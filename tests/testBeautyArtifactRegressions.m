@@ -243,6 +243,70 @@ verifyEqual(testCase, tamperedDiagnostics.blemishMap, ...
 verifyEqual(testCase, tamperedOutput, uncachedOutput);
 end
 
+function testFineStageContractWiringIsBitExactAndCacheStable(testCase)
+% T12：生产管线（beautifyImage）把本次 beautyMasks 产物推导的 stage
+%   protection 传给 Fine smoothing；Fine alphaMap 必须与独立
+%   stage-contract 重算 bit-exact 一致，统计保护图与 Mid 兼容门控保持
+%   生产原值，cached/uncached 两条路径的最终 RGB 与 Fine alphaMap 完全
+%   一致（缓存复用不得改变 stage contract 的消费结果）。
+imageSize = [160, 200];
+[yGrid, xGrid] = ndgrid(1:imageSize(1), 1:imageSize(2));
+luma = 0.55 + 0.02 * sin(2 * pi * xGrid / 23) .* ...
+    sin(2 * pi * yGrid / 19);
+sourceImage = grayToUint8Rgb(luma);
+faceBox = [1, 1, imageSize(2), imageSize(1)];
+hardMask = (yGrid - 80) .^ 2 + (xGrid - 100) .^ 2 <= 12 ^ 2;
+context = plainSkinContext(imageSize, faceBox, hardMask);
+% 注入连续结构保护，使折叠后的 smoothingFine 覆盖 (0,1) 全程。
+context.structureProtectionMask = 0.92 * exp( ...
+    -((yGrid - 80) .^ 2) / (2 * 28 ^ 2));
+[beautyMasks, maskDiagnostics] = masks.buildBeautyMasks(sourceImage, ...
+    context, faceBox);
+protection = masks.buildStageProtectionMasks(beautyMasks);
+params = struct('smoothingStrength', 80, 'whiteningStrength', 30);
+
+[uncachedOutput, uncachedDiagnostics] = beautifyImage(sourceImage, ...
+    params, faceBox, context);
+
+% Fine alphaMap 与 stage contract 重算逐像素 bit-exact：
+% gate = 1 - max(protection.smoothingFine, protection.hard)。
+profile = beautySmoothingProfile(params.smoothingStrength);
+effectStrength = profile.alphaCurve .* beautyMasks.strengthMap;
+nonFacePixels = beautyMasks.nonFaceStrengthMap > .01;
+effectStrength(nonFacePixels) = profile.outsideFaceStrength .* ...
+    beautyMasks.nonFaceStrengthMap(nonFacePixels);
+fineGate = 1 - max(protection.smoothingFine, protection.hard);
+verifyEqual(testCase, uncachedDiagnostics.smoothing.alphaMap, ...
+    effectStrength .* fineGate, 'AbsTol', 0);
+hard = beautyMasks.hardProtectionMask >= .999;
+verifyTrue(testCase, nnz(hard) > 0, ...
+    '注入语义必须产生非空 hard identity 区域。');
+verifyEqual(testCase, ...
+    nnz(uncachedDiagnostics.smoothing.alphaMap(hard)), 0);
+
+% 统计路径与 Mid 兼容门控保持生产原值。
+verifyEqual(testCase, uncachedDiagnostics.smoothing.protectionMask, ...
+    beautyMasks.protectionMask, 'AbsTol', 0);
+verifyEqual(testCase, uncachedDiagnostics.smoothing.midAlphaMap, ...
+    uncachedDiagnostics.smoothing.alphaMap .* ...
+    uncachedDiagnostics.smoothing.midStructureGate .* ...
+    uncachedDiagnostics.smoothing.noseMidGate, 'AbsTol', 0);
+
+% cached 路径：stage protection 从缓存的同一份 beautyMasks 产物推导，
+% 最终 RGB 与 Fine alphaMap 必须 bit-exact 一致。
+context.runtimeCache = buildBeautyRuntimeCache(sourceImage, faceBox, ...
+    beautyMasks, maskDiagnostics, struct( ...
+    'status', 'generated', ...
+    'sourceSchemaVersion', '3.1', ...
+    'message', '回归测试生成运行时产物。'));
+[cachedOutput, cachedDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, context);
+verifyTrue(testCase, cachedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, cachedOutput, uncachedOutput);
+verifyEqual(testCase, cachedDiagnostics.smoothing.alphaMap, ...
+    uncachedDiagnostics.smoothing.alphaMap, 'AbsTol', 0);
+end
+
 function rgb = grayToUint8Rgb(luma)
 value = uint8(min(max(round(luma * 255), 0), 255));
 rgb = cat(3, value, value, value);

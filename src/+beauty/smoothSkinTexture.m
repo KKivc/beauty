@@ -1,8 +1,20 @@
 function [smoothedFrequency, diagnostics] = smoothSkinTexture( ...
-        frequency, beautyMasks, smoothingStrength, blemishMap)
+        frequency, beautyMasks, smoothingStrength, blemishMap, stageProtection)
 %SMOOTHSKINTEXTURE 以独立保留率图连续衰减 Fine 和 Mid 纹理。
 %   Base 始终不变；Fine 和 Mid 使用同一输入分解的不同保留率，
 %   结构、纹理和硬保护限制作用范围，鼻部 Mid 额外使用保守门控。
+%
+%   T12：可选第 5 参数 stageProtection 是 V4 stage contract 的
+%   protection 分层（masks.buildStageProtectionMasks 输出，至少含
+%   smoothingFine 与 hard）。提供时 Fine 门控只从 stage contract 读取：
+%   fineProtection = max(smoothingFine, hard)（T07 折叠推导，
+%   smoothingFine = 1 - (1-texture)·max(0,1-4·structure)，hard 保持生产
+%   原位的 max 合并），Fine 路径不再自行解释 general texture/structure
+%   masks；可处理皮肤统计（processableSkin → fineEnergy/blemishMean）
+%   改读生产端合并 protectionMask 产物，与 max(texture,structure,hard)
+%   bit-exact 同值。strength、频段分解、合成公式与 hard identity 不变。
+%   未提供 stageProtection 的旧调用方走 legacy 兼容路径，行为不变；
+%   Mid 分支尚未迁移，仍按原兼容逻辑消费 structure/nose 门控。
 
 if ~isstruct(frequency) || ~isscalar(frequency) || ...
         ~all(isfield(frequency, {'base', 'mid', 'fine', ...
@@ -21,8 +33,17 @@ imageSize = frequency.imageSize(1:2);
 validateBand(frequency.base, imageSize, 'base');
 validateBand(frequency.mid, imageSize, 'mid');
 validateBand(frequency.fine, imageSize, 'fine');
-requiredMaskFields = {'strengthMap', 'textureProtectionMask', ...
-    'structureProtectionMask'};
+useStageContract = nargin >= 5 && ~isempty(stageProtection);
+if useStageContract
+    % T12 stage 路径：Fine 不再读取 texture/structure 的自行解释结果，
+    % 必需字段收敛为 strengthMap、structure（Mid 兼容门控仍需）与生产
+    % 端合并 protectionMask（统计路径数据源）。
+    requiredMaskFields = {'strengthMap', 'structureProtectionMask', ...
+        'protectionMask'};
+else
+    requiredMaskFields = {'strengthMap', 'textureProtectionMask', ...
+        'structureProtectionMask'};
+end
 if ~all(isfield(beautyMasks, requiredMaskFields))
     error('beauty:InvalidMasks', 'v3 Beauty Masks 缺少必需字段。');
 end
@@ -37,20 +58,28 @@ if ~hasChromaProtection
 end
 strengthMap = validateMask(beautyMasks.strengthMap, imageSize, ...
     'strengthMap');
-textureProtection = validateMask(beautyMasks.textureProtectionMask, ...
-    imageSize, 'textureProtectionMask');
-structureProtection = validateMask(beautyMasks.structureProtectionMask, ...
-    imageSize, 'structureProtectionMask');
-hardProtection = optionalMask(beautyMasks, ...
-    'hardProtectionMask', imageSize);
+if useStageContract
+    stageProtection = validateStageProtection(stageProtection, imageSize);
+    protection = validateMask(beautyMasks.protectionMask, imageSize, ...
+        'protectionMask');
+    structureProtection = validateMask(beautyMasks.structureProtectionMask, ...
+        imageSize, 'structureProtectionMask');
+else
+    textureProtection = validateMask(beautyMasks.textureProtectionMask, ...
+        imageSize, 'textureProtectionMask');
+    structureProtection = validateMask(beautyMasks.structureProtectionMask, ...
+        imageSize, 'structureProtectionMask');
+    hardProtection = optionalMask(beautyMasks, ...
+        'hardProtectionMask', imageSize);
+    protection = max(cat(3, textureProtection, ...
+        structureProtection, hardProtection), [], 3);
+end
 if nargin < 4 || isempty(blemishMap)
     blemishMap = zeros(imageSize);
 else
     blemishMap = validateMask(blemishMap, imageSize, 'blemishMap');
 end
 
-protection = max(cat(3, textureProtection, ...
-    structureProtection, hardProtection), [], 3);
 profile = beautySmoothingProfile(smoothingStrength);
 ratio = double(smoothingStrength) / 100;
 processableSkin = strengthMap > .05 & protection < .80;
@@ -93,11 +122,25 @@ if all(isfield(beautyMasks, {'faceStrengthMap', 'nonFaceStrengthMap'}))
 else
     effectStrength = profile.alphaCurve .* strengthMap;
 end
-% 结构保护同时约束 Fine；直接使用原始保护值会让中等置信的
-% 连续结构仍有过大的残差衰减，因此在 Fine 侧也采用连续退让。
+% 结构保护同时约束 Fine 与 Mid；直接使用原始保护值会让中等置信的
+% 连续结构仍有过大的残差衰减，因此采用连续退让。T12 后该退让图在
+% Fine 侧已折叠进 stage contract 的 smoothingFine 字段，这里保留给
+% 尚未迁移的 Mid 兼容门控与诊断快照。
 fineStructureGate = max(0, 1 - 4 * structureProtection);
-fineProtection = max(textureProtection, hardProtection);
-alphaMap = effectStrength .* (1 - fineProtection) .* fineStructureGate;
+if useStageContract
+    % T12：Fine 门控只读 stage contract。hard 保持生产原位的 max 合并，
+    % gate = 1 - max(smoothingFine, hard)；与旧路径
+    % (1 - max(texture, hard)) .* fineStructureGate 仅差 1-x 补码与乘法
+    % 结合顺序的浮点噪声（≤1e-15，T07 推导基线 1.11e-16 同量级）。
+    fineProtection = max(stageProtection.smoothingFine, ...
+        stageProtection.hard);
+    alphaMap = effectStrength .* (1 - fineProtection);
+else
+    % legacy 兼容路径（未提供 stageProtection 的调用方）：Fine 仍直接
+    % 解释 general texture/structure masks，行为与 v3.2 完全一致。
+    fineProtection = max(textureProtection, hardProtection);
+    alphaMap = effectStrength .* (1 - fineProtection) .* fineStructureGate;
+end
 alphaMap = min(max(double(alphaMap), 0), 1);
 noseMask = optionalMask(beautyMasks, 'noseMask', imageSize);
 % 鼻部门控随当前 Alpha 连续增加，且与既有结构保护相乘；它不能绕过
@@ -139,6 +182,8 @@ smoothedFrequency.mediumRetentionMap = midRetentionMap;
 smoothedFrequency.actualMidRetentionMap = midRetentionMap;
 smoothedFrequency.midActualRetentionMap = midRetentionMap;
 smoothedFrequency.actualMediumRetentionMap = midRetentionMap;
+% fineProtectionMask 在 stage 路径下为折叠语义 max(smoothingFine,
+% hard)；legacy 路径保持原 max(texture, hard) 快照。
 diagnostics = struct( ...
     'alphaMap', alphaMap, ...
     'fineAlphaMap', alphaMap, ...
@@ -191,6 +236,22 @@ end
 function valid = isValidStrength(value)
 valid = isnumeric(value) && isreal(value) && isscalar(value) && ...
     isfinite(value) && value >= 0 && value <= 100;
+end
+
+function protection = validateStageProtection(protection, imageSize)
+%VALIDATESTAGEPROTECTION 校验 V4 stage contract 的 protection 分层输入。
+%   Fine consumer 只消费 smoothingFine 与 hard 两个字段（T12 目标读取
+%   集合：processability.skin（经 strengthMap）+ protection.smoothingFine
+%   + protection.hard + strengthMap）。缺字段或取值无效一律 fail-fast，
+%   不在函数内部重新拼装 protection，也不静默回退。
+if ~isstruct(protection) || ~isscalar(protection) || ...
+        ~all(isfield(protection, {'smoothingFine', 'hard'}))
+    error('beauty:InvalidMasks', ...
+        'stage protection 必须是包含 smoothingFine 和 hard 的标量结构。');
+end
+protection.smoothingFine = validateMask(protection.smoothingFine, ...
+    imageSize, 'smoothingFine');
+protection.hard = validateMask(protection.hard, imageSize, 'hard');
 end
 
 function validateBand(value, imageSize, name)

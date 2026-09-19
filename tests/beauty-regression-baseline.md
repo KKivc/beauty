@@ -42,6 +42,14 @@ V4 迁移期间（只改架构、不改效果）的一切 Ticket 必须对本基
 - 记录时间：2026-09-19，MATLAB R2024a，Windows。
 - 比较口径：架构兼容阶段全部 bit-exact。最终 RGB 以 SHA-256（输出 `uint8` 列优先字节序；R2024a 无原生 `sha256`，经 JVM `MessageDigest` 计算）断言；零强度输出、hard identity 区域、cached/uncached 输出、预览/原尺寸路径要求精确相等。基线 commit 上已实测两次全量重算、缓存复用与重算输出完全一致，因此不设数值容差，禁止视觉阈值。
 
+### T08 schema 切换记录（2026-09-19）
+
+T08 把默认生产 Context 从 `3.1` compat 形态有意切换为 `4.0` canonical 分层形态（架构 schema expand：发布 semantic/processability/evidence/protection/diagnostics 分层，保留 skinMask、textureProtectionMask 等迁移期 compat alias）。变更依据与影响范围：
+
+- 这是纯架构迁移：`algorithmVersion=v3.2`、`artifactVersion=v3.1` 不变，算法数值路径无任何改动；上表全部 RGB digest、零强度、hard identity、cached/uncached、预览/原尺寸 oracle 必须继续 bit-exact 一致（已在本批 MATLAB 进程内用改动前后 SHA-256 探针逐项复核，digest 全部一致）。
+- 上方契约版本行保留 e889f31 录制时的 `3.1` 快照；`testFrozenPipelineContract` 自 T08 起断言 `schemaVersion='4.0'`。
+- 缓存兼容仍由 `artifactVersion` 把握：`3.1` 戳旧缓存与 `4.0` 戳新缓存都是读者已知的合法形态，与 V4 Context 指纹一致时可安全复用，不一致时安全重建。
+
 ### 合成 oracle（`tests/testMaskSystemV4CompatibilityBaseline.m`）
 
 - 样本来源：测试内确定性合成 fixture（解析公式 + 注入语义 + 零 SCHP 概率；不读外部图片、无随机数、无模型推理）：rich 180×260（皮肤/脖颈/鼻侧影/雀斑/硬保护眼部，公式复用 `runBeautyRegression`）；compact 120×160（正弦皮肤纹理 + 眼/唇语义，公式复用 `testBeautyV3`）。

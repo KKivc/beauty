@@ -36,7 +36,12 @@ else
         beautyContext = normalizeBeautyContext(inputImage, faceBox, ...
             beautyContext);
     catch exception
-        if startsWith(exception.identifier, 'normalizeBeautyContext:')
+        % normalizeBeautyContext:*（v3 旧形态）与
+        % normalizeBeautyContextV4:*（T08 起 producer 主路径）两个错误
+        % 族都表示 Context 无效，统一包装为 beautifyImage:InvalidContext；
+        % 其余错误（如图像/工具箱问题）保持原样重抛。
+        if startsWith(exception.identifier, 'normalizeBeautyContext:') || ...
+                startsWith(exception.identifier, 'normalizeBeautyContextV4:')
             error('beautifyImage:InvalidContext', ...
                 'Beauty Context 无效：%s', exception.message);
         end

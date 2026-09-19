@@ -129,46 +129,63 @@ end
 
 function testMigrationToV4CanonicalKeepsAliasesSeparate(testCase)
 %TESTMIGRATIONTOV4CANONICALKEEPSALIASESSEPARATE v3.1 → V4 canonical：
-%   semantic/diagnostics 为 canonical 层；legacy general masks 仅保留为
-%   顶层 compat alias，绝不进入 canonical 层；迁移产物可被 reader 读回。
+%   T08 起迁移必须补齐 T05/T06/T07 遗留——源 Context 已携带的
+%   semantic 分组字段、processability/evidence/protection 分层与
+%   diagnostics.policyEvidence 元数据原样带入 canonical 层，不得再丢；
+%   legacy general masks 仅保留为顶层 compat alias；迁移产物可被
+%   reader 读回。夹具模拟 T05--T07 期间生产链输出的 v3.1 Context
+%   （带分层、契约戳 '3.1'）。
 [image, faceBox, parsing] = fixtureImage(96, 128);
-v31 = prepareBeautyContext(image, faceBox, parsing, ...
-    emptyBodyParsing([96, 128]));
+v31 = makeLayeredV31Context(image, faceBox, parsing);
 v4 = migrateBeautyContext(v31, '4.0');
 
 verifyEqual(testCase, v4.schemaVersion, '4.0');
-verifyTrue(testCase, all(isfield(v4.semantic, {'regions', 'confidence'})));
-verifyEqual(testCase, v4.semantic.regions.skin, v31.regions.skin, ...
-    'AbsTol', 0);
+verifyTrue(testCase, all(isfield(v4.semantic, ...
+    {'regions', 'confidence', 'faceSkin', 'bodySkin'})));
+verifyEqual(testCase, v4.semantic.regions.skin, ...
+    v31.semantic.regions.skin, 'AbsTol', 0);
 verifyEqual(testCase, v4.semantic.confidence.skin, ...
-    v31.regionConfidence.skin, 'AbsTol', 0);
+    v31.semantic.confidence.skin, 'AbsTol', 0);
+verifyEqual(testCase, v4.semantic.faceSkin, v31.semantic.faceSkin, ...
+    'AbsTol', 0);
+verifyEqual(testCase, v4.semantic.bodySkin, v31.semantic.bodySkin, ...
+    'AbsTol', 0);
+verifyEqual(testCase, v4.processability, v31.processability, 'AbsTol', 0);
+verifyEqual(testCase, v4.evidence, v31.evidence, 'AbsTol', 0);
+verifyEqual(testCase, v4.protection, v31.protection, 'AbsTol', 0);
+verifyEqual(testCase, v4.diagnostics.policyEvidence, ...
+    v31.diagnostics.policyEvidence);
 verifyEqual(testCase, v4.diagnostics.sourceSchemaVersion, '3.1');
 verifyEqual(testCase, v4.diagnostics.canonicalLayers, ...
-    {'semantic', 'diagnostics'});
-verifyEqual(testCase, v4.diagnostics.deferredLayers, ...
-    {'processability', 'evidence', 'protection'});
-verifyFalse(testCase, any(isfield(v4, ...
-    {'processability', 'evidence', 'protection'})));
+    {'semantic', 'processability', 'evidence', 'protection', ...
+    'diagnostics'});
+verifyEqual(testCase, v4.diagnostics.deferredLayers, {});
 verifyEqual(testCase, v4.textureProtectionMask, ...
     v31.textureProtectionMask, 'AbsTol', 0);
 verifyEqual(testCase, v4.skinMask, v31.skinMask, 'AbsTol', 0);
 verifyEqual(testCase, v4.semanticProbabilities, ...
     v31.semanticProbabilities, 'AbsTol', 0);
-verifyEqual(testCase, v4.runtimeCache.schemaVersion, '3.1');
+verifyEqual(testCase, v4.runtimeCache.schemaVersion, '4.0');
 verifyEqual(testCase, v4.migrationDiagnostics.status, 'regenerated');
 
 reread = normalizeBeautyContext(image, faceBox, v4);
 verifyEqual(testCase, reread.schemaVersion, '4.0');
 verifyEqual(testCase, reread.semantic.regions.skin, ...
     v4.semantic.regions.skin, 'AbsTol', 0);
+verifyEqual(testCase, reread.semantic.faceSkin, ...
+    v4.semantic.faceSkin, 'AbsTol', 0);
+verifyEqual(testCase, reread.evidence, v4.evidence, 'AbsTol', 0);
+verifyEqual(testCase, reread.protection, v4.protection, 'AbsTol', 0);
+verifyEqual(testCase, reread.diagnostics.policyEvidence, ...
+    v4.diagnostics.policyEvidence);
 end
 
 function testMigrationToV4WithoutImageUsesCanonicalSemantic(testCase)
 %TESTMIGRATIONTOV4WITHOUTIMAGEUSESCANONICALSEMANTIC 无原图时迁移到
-%   V4：canonical semantic 取自 v3 语义字段，色度字段走既有 alias 迁移。
+%   V4：canonical semantic 取自 v3 语义字段，色度字段走既有 alias 迁移；
+%   pre-T05 旧 Context（无分层）迁移后保持 partial V4。
 [image, faceBox, parsing] = fixtureImage(96, 128);
-v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
-    emptyBodyParsing([96, 128])), 'runtimeCache');
+v31 = makeLegacyV31Context(image, faceBox, parsing, false);
 v4 = migrateBeautyContext(v31, '4.0');
 
 verifyEqual(testCase, v4.schemaVersion, '4.0');
@@ -180,6 +197,10 @@ verifyEqual(testCase, v4.migrationDiagnostics.status, 'aliasMigrated');
 verifyEqual(testCase, v4.diagnostics.sourceSchemaVersion, '3.1');
 verifyFalse(testCase, any(isfield(v4, ...
     {'processability', 'evidence', 'protection'})));
+verifyEqual(testCase, v4.diagnostics.canonicalLayers, ...
+    {'semantic', 'diagnostics'});
+verifyEqual(testCase, v4.diagnostics.deferredLayers, ...
+    {'processability', 'evidence', 'protection'});
 verifyTrue(testCase, isfield(v4.diagnostics, 'compatAliases'));
 end
 
@@ -187,8 +208,7 @@ function testMigrationFromV30ToV4Canonical(testCase)
 %TESTMIGRATIONFROMV30TOV4CANONICAL 旧 v3.0 Context（无色度规范字段）
 %   迁移到 V4：diagnostics 记录来源版本，色度 alias 迁移结果一致。
 [image, faceBox, parsing] = fixtureImage(96, 128);
-v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
-    emptyBodyParsing([96, 128])), 'runtimeCache');
+v31 = makeLegacyV31Context(image, faceBox, parsing, false);
 legacy = rmfield(v31, 'chromaProtectionMask');
 legacy.schemaVersion = '3.0';
 v4 = migrateBeautyContext(legacy, '4.0');
@@ -204,7 +224,7 @@ end
 
 function testMigrationToV4IsIdempotent(testCase)
 %TESTMIGRATIONTOV4ISIDEMPOTENT 对同一合法 V4 输入连续 migrate/normalize
-%   两次结果 bit-exact。
+%   两次结果 bit-exact；pre-T05 旧 Context 的完整迁移路径同样幂等。
 [image, faceBox, parsing] = fixtureImage(96, 128);
 v31 = prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([96, 128]));
@@ -215,6 +235,11 @@ verifyEqual(testCase, again, v4);
 first = normalizeBeautyContext(image, faceBox, v4);
 second = normalizeBeautyContext(image, faceBox, first);
 verifyEqual(testCase, second, first);
+
+legacy = makeLegacyV31Context(image, faceBox, parsing, false);
+legacyV4 = migrateBeautyContext(legacy, '4.0');
+legacyAgain = migrateBeautyContext(legacyV4, '4.0');
+verifyEqual(testCase, legacyAgain, legacyV4);
 end
 
 function testMigrationTargetSchemaIsExplicitAndValidated(testCase)
@@ -222,8 +247,7 @@ function testMigrationTargetSchemaIsExplicitAndValidated(testCase)
 %   V4 目标必须显式声明；V4 输入不允许降级到 v3.1；with-image 形式
 %   同样支持显式 V4 目标并保持幂等。
 [image, faceBox, parsing] = fixtureImage(96, 128);
-v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
-    emptyBodyParsing([96, 128])), 'runtimeCache');
+v31 = makeLegacyV31Context(image, faceBox, parsing, false);
 
 verifyError(testCase, @() migrateBeautyContext(v31, '9.9'), ...
     'migrateBeautyContext:UnsupportedTarget');
@@ -237,11 +261,12 @@ v4 = migrateBeautyContext(v31, '4.0');
 verifyError(testCase, @() migrateBeautyContext(v4), ...
     'migrateBeautyContext:UnsupportedVersion');
 
-v4WithImage = migrateBeautyContext(image, faceBox, v31, '4.0');
+v4WithImage = migrateBeautyContext(image, faceBox, ...
+    makeLegacyV31Context(image, faceBox, parsing, true), '4.0');
 verifyEqual(testCase, v4WithImage.schemaVersion, '4.0');
 verifyEqual(testCase, v4WithImage.semantic.regions.skin, ...
     v31.regions.skin, 'AbsTol', 0);
-verifyEqual(testCase, v4WithImage.runtimeCache.schemaVersion, '3.1');
+verifyEqual(testCase, v4WithImage.runtimeCache.schemaVersion, '4.0');
 reread = migrateBeautyContext(image, faceBox, v4WithImage, '4.0');
 verifyEqual(testCase, reread, v4WithImage);
 end
@@ -300,4 +325,36 @@ end
 
 function options = emptyBodyParsing(imageSize)
 options = struct('probabilities', zeros([imageSize, 20], 'single'));
+end
+
+function context = stripCanonicalLayers(context)
+%STRIPCANONICALLAYERS 剥离 V4 canonical 分层，得到 pre-T05 旧 v3.1 形态。
+names = {'semantic', 'processability', 'evidence', 'protection', ...
+    'diagnostics'};
+names = names(isfield(context, names));
+if ~isempty(names)
+    context = rmfield(context, names);
+end
+end
+
+function context = makeLegacyV31Context(image, faceBox, parsing, withCache)
+%MAKELEGACYV31CONTEXT 构造 T08 之前生产链输出的 v3.1 compat Context：
+%   仅 compat alias 与 v3 语义字段，无 canonical 分层（pre-T05 形态）。
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing(size(image, [1, 2])));
+context = stripCanonicalLayers(context);
+context.schemaVersion = '3.1';
+if ~withCache
+    context = rmfield(context, 'runtimeCache');
+end
+end
+
+function context = makeLayeredV31Context(image, faceBox, parsing)
+%MAKELAYEREDV31CONTEXT 构造 T05--T07 期间生产链输出的 v3.1 Context：
+%   已携带 semantic/processability/evidence/protection/diagnostics
+%   分层，但契约戳仍为 '3.1'。
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing(size(image, [1, 2])));
+context.schemaVersion = '3.1';
+context.runtimeCache.schemaVersion = '3.1';
 end

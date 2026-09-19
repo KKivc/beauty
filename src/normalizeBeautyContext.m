@@ -1,12 +1,13 @@
 function beautyContext = normalizeBeautyContext(inputImage, faceBox, context)
-%NORMALIZEBEAUTYCONTEXT 验证并规范化最终 v3.1 Beauty Context。
-%   处理入口只接受 v3 Context；派生保护 Mask 缺失时由 package 根据
+%NORMALIZEBEAUTYCONTEXT 验证并规范化最终 Beauty Context。
+%   处理入口只接受 v3/V4 Context；派生保护 Mask 缺失时由 package 根据
 %   当前图像和语义概率补齐，不再转换或保留 v2 字段。v3.0 的色度
 %   字段会在此处补齐为 v3.1 的规范字段和兼容 alias。
-%   V4 expand 阶段：schemaVersion='4.0' 的分层 Context 走只读
-%   reader 分支（结构校验 + 规范化，不重建派生 Mask、不改写
-%   compat alias）；v3.0/v3.1 输入路径保持不变，生产链仍输出
-%   v3.1 Context。
+%   T08 起生产链（build/prepare/resize）默认输出 schemaVersion='4.0'
+%   的 V4 分层 Context：该形态走只读 reader 分支（结构校验 + 规范化，
+%   不重建派生 Mask、不改写 compat alias）；v3.0/v3.1 输入（历史
+%   Context、迁移目标 v3.1、轻量 resize 产物）仍走既有 v3 路径并
+%   保持输出 '3.1'，旧消费行为不回退。
 
 validateImage(inputImage);
 if nargin < 2
@@ -92,6 +93,8 @@ context.protectionMasks = struct( ...
     'whitening', context.whiteningProtectionMask, ...
     'chroma', context.chromaProtectionMask, ...
     'tone', context.chromaProtectionMask);
+% 旧 v3.0/v3.1 输入的规范化终点：保持 '3.1' 输出，旧消费行为不变；
+% 生产链自 T08 起输出 V4，不再经过本分支。
 context.schemaVersion = '3.1';
 context.imageSize = imageSize;
 context.faceBox = double(faceBox);

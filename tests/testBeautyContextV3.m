@@ -8,12 +8,15 @@ projectRoot = fileparts(fileparts(mfilename('fullpath')));
 addpath(fullfile(projectRoot, 'src'));
 end
 
-function testPrepareProducesCanonicalV31Context(testCase)
+function testPrepareProducesCanonicalV4Context(testCase)
+%TESTPREPAREPRODUCESCANONICALV4CONTEXT T08 起生产链默认输出 schema
+%   V4 的分层 Context（架构 expand，算法行为 v3.2 不变），同时保留
+%   迁移期 compat alias 与完整 runtime cache。
 [image, faceBox, parsing] = fixtureContext(40, 60);
 context = prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60]));
 
-verifyEqual(testCase, context.schemaVersion, '3.1');
+verifyEqual(testCase, context.schemaVersion, '4.0');
 required = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
     'textureProtectionMask', 'structureProtectionMask', ...
     'chromaProtectionMask', 'toneProtectionMask', 'strengthMap', ...
@@ -22,6 +25,10 @@ required = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
 verifyTrue(testCase, all(isfield(context, required)));
 verifyFalse(testCase, any(isfield(context, ...
     {'featureProtectionMask', 'hardProtectionMask'})));
+verifyTrue(testCase, all(isfield(context, ...
+    {'semantic', 'processability', 'evidence', 'protection', ...
+    'diagnostics'})));
+verifyTrue(testCase, isfield(context.diagnostics, 'policyEvidence'));
 verifyTrue(testCase, isfield(context, 'runtimeCache'));
 verifyEqual(testCase, context.runtimeCache.inputImage, image);
 verifyEqual(testCase, size(context.semanticProbabilities), [40, 60, 19]);
@@ -53,7 +60,9 @@ function testRuntimeCacheDeclaresCanonicalArtifacts(testCase)
 context = prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60]));
 cache = context.runtimeCache;
-verifyEqual(testCase, cache.schemaVersion, '3.1');
+% T08：缓存记录的契约戳随生产 Context 升为 '4.0'；缓存兼容仍由
+% artifactVersion（'v3.1'）把握。
+verifyEqual(testCase, cache.schemaVersion, '4.0');
 verifyEqual(testCase, cache.algorithmVersion, 'v3.2');
 verifyEqual(testCase, cache.artifactVersion, 'v3.1');
 verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.1');
@@ -61,8 +70,8 @@ verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.1');
 verifyEqual(testCase, cache.artifactInfo.blemishMap, 'v3.1');
 verifyEqual(testCase, cache.beautyMasks.chromaProtectionMask, ...
     cache.beautyMasks.toneProtectionMask, 'AbsTol', 0);
-verifyEqual(testCase, cache.frequency.schemaVersion, '3.1');
-verifyEqual(testCase, cache.blemishDiagnostics.schemaVersion, '3.1');
+verifyEqual(testCase, cache.frequency.schemaVersion, '4.0');
+verifyEqual(testCase, cache.blemishDiagnostics.schemaVersion, '4.0');
 end
 
 function testHistoricalRuntimeCacheIsRegenerated(testCase)
@@ -90,7 +99,8 @@ migrated = migrateBeautyContext(legacy);
 verifyEqual(testCase, migrated.schemaVersion, '3.1');
 verifyEqual(testCase, migrated.migrationDiagnostics.status, 'regenerated');
 verifyEqual(testCase, migrated.migrationDiagnostics.sourceSchemaVersion, '3.0');
-verifyEqual(testCase, migrated.runtimeCache.schemaVersion, '3.1');
+% 迁移重建的缓存按当前生产契约落戳（T08 起为 '4.0'）。
+verifyEqual(testCase, migrated.runtimeCache.schemaVersion, '4.0');
 verifyEqual(testCase, migrated.runtimeCache.migration.status, 'regenerated');
 end
 
@@ -185,6 +195,44 @@ verifyFalse(testCase, diagnostics.reusedRuntimeCache);
 verifyEqual(testCase, output, uncachedOutput);
 end
 
+function testLegacyStampedCacheMeetsV4ProducerContext(testCase)
+%TESTLEGACYSTAMPEDCACHEMEETSV4PRODUCERCONTEXT T08 风险覆盖：旧 '3.1'
+%   契约戳缓存与新 V4 分层 Context 相遇。'3.1' 仍是缓存读者的合法
+%   形态，缓存兼容由 artifactVersion 把握——Mask 指纹一致时安全复用，
+%   指纹不一致时必须安全重建且不误命中，重建输出与无缓存路径
+%   bit-exact。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+params = struct('smoothingStrength', 50, 'whiteningStrength', 25);
+[uncachedOutput, ~] = beautifyImage(image, params, faceBox, ...
+    rmfield(context, 'runtimeCache'));
+
+legacyStamped = context;
+legacyStamped.runtimeCache.schemaVersion = '3.1';
+legacyStamped.runtimeCache.artifactInfo.schemaVersion = '3.1';
+legacyStamped.runtimeCache.artifacts.schemaVersion = '3.1';
+legacyStamped.runtimeCache.beautyMasks.schemaVersion = '3.1';
+legacyStamped.runtimeCache.frequency.schemaVersion = '3.1';
+legacyStamped.runtimeCache.maskDiagnostics.schemaVersion = '3.1';
+legacyStamped.runtimeCache.decompositionDiagnostics.schemaVersion = '3.1';
+legacyStamped.runtimeCache.blemishDiagnostics.schemaVersion = '3.1';
+[output, diagnostics] = beautifyImage(image, params, faceBox, legacyStamped);
+verifyTrue(testCase, diagnostics.reusedRuntimeCache, ...
+    '旧 3.1 契约戳缓存与 V4 Context 指纹一致时必须可安全复用。');
+verifyEqual(testCase, output, uncachedOutput);
+
+tampered = legacyStamped;
+tampered.runtimeCache.beautyMasks.skinMask(1, 1) = ...
+    1 - tampered.runtimeCache.beautyMasks.skinMask(1, 1);
+[rebuiltOutput, rebuiltDiagnostics] = beautifyImage(image, params, ...
+    faceBox, tampered);
+verifyFalse(testCase, rebuiltDiagnostics.reusedRuntimeCache, ...
+    '指纹不一致时不得误命中旧缓存。');
+verifyEqual(testCase, rebuiltDiagnostics.runtimeCache.status, 'regenerated');
+verifyEqual(testCase, rebuiltOutput, uncachedOutput);
+end
+
 function testV4ContextWithoutCompatAliasNeverReusesCache(testCase)
 %TESTV4CONTEXTWITHOUTCOMPATALIASNEVERREUSESCACHE V4 分层 Context 缺少
 %   compat alias 时无法核对缓存 Mask 指纹，必须走安全重建（此处表现
@@ -206,6 +254,21 @@ fragmentWithCache.runtimeCache = context.runtimeCache;
 verifyError(testCase, @() beautifyImage(image, struct( ...
     'smoothingStrength', 50, 'whiteningStrength', 25), faceBox, ...
     fragmentWithCache), 'masks:InvalidContext');
+end
+
+function testBeautifyImageWrapsV4ReaderErrors(testCase)
+%TESTBEAUTIFYIMAGEWRAPSV4READERERRORS T08 风险覆盖：producer 切 V4 后
+%   normalizeBeautyContextV4:* 错误族成为主路径，beautifyImage 的
+%   fallback 必须同样把它包装为 beautifyImage:InvalidContext，而不是
+%   裸抛 reader 错误或改变错误语义。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60]));
+malformed = rmfield(context, 'runtimeCache');
+malformed.diagnostics = 'not-a-struct';
+verifyError(testCase, @() beautifyImage(image, struct( ...
+    'smoothingStrength', 50, 'whiteningStrength', 25), faceBox, ...
+    malformed), 'beautifyImage:InvalidContext');
 end
 
 function testResizedContextCarriesCompleteSchema(testCase)
@@ -267,12 +330,15 @@ legacyField.featureProtectionMask = zeros(40, 60);
 verifyError(testCase, @() normalizeBeautyContext(image, faceBox, legacyField), ...
     'normalizeBeautyContext:LegacyFields');
 
+% 生产 Context 为 V4 形态：imageSize 冲突由 V4 reader 报告。
 wrongSize = context;
 wrongSize.imageSize = [39, 60, 3];
 verifyError(testCase, @() normalizeBeautyContext(image, faceBox, wrongSize), ...
-    'normalizeBeautyContext:SizeMismatch');
+    'normalizeBeautyContextV4:SizeMismatch');
 
+% semanticProbabilities alias 校验属 v3 旧形态路径，用 '3.1' 夹具覆盖。
 wrongSemantic = context;
+wrongSemantic.schemaVersion = '3.1';
 wrongSemantic.semanticProbabilities = zeros(40, 60, 18, 'single');
 verifyError(testCase, @() normalizeBeautyContext(image, faceBox, wrongSemantic), ...
     'normalizeBeautyContext:InvalidSemantic');
@@ -292,7 +358,8 @@ targetFaceBox = [20, 16, 60, 48];
 savedContext = resizeBeautyContext(previewContext, ...
     [80, 120, 3], targetFaceBox, targetImage);
 
-verifyEqual(testCase, savedContext.schemaVersion, '3.1');
+% T08 起 4 参数 resize 在目标尺寸重建 V4 分层 Context。
+verifyEqual(testCase, savedContext.schemaVersion, '4.0');
 verifyEqual(testCase, savedContext.imageSize, [80, 120, 3]);
 verifyEqual(testCase, savedContext.faceBox, targetFaceBox);
 verifyEqual(testCase, size(savedContext.semanticProbabilities), [80, 120, 19]);
@@ -448,11 +515,14 @@ canonicalOnly = rmfield(canonical, {'toneProtectionMask', 'runtimeCache'});
 normalizedLegacy = normalizeBeautyContext(image, faceBox, legacy);
 normalizedCanonical = normalizeBeautyContext(image, faceBox, canonicalOnly);
 verifyEqual(testCase, normalizedLegacy.schemaVersion, '3.1');
-verifyEqual(testCase, normalizedCanonical.schemaVersion, '3.1');
+% T08 起 canonicalOnly 仍为 V4 形态，reader 只读不改写 alias。
+verifyEqual(testCase, normalizedCanonical.schemaVersion, '4.0');
 verifyEqual(testCase, normalizedLegacy.chromaProtectionMask, ...
     normalizedLegacy.toneProtectionMask, 'AbsTol', 0);
 verifyEqual(testCase, normalizedCanonical.chromaProtectionMask, ...
-    normalizedCanonical.toneProtectionMask, 'AbsTol', 0);
+    canonicalOnly.chromaProtectionMask, 'AbsTol', 0);
+verifyFalse(testCase, isfield(normalizedCanonical, 'toneProtectionMask'), ...
+    'V4 reader 是只读的，不得伪造缺失的 tone alias。');
 
 params = struct('smoothingStrength', 50, 'whiteningStrength', 25);
 legacyOutput = beautifyImage(image, params, faceBox, legacy);
@@ -473,9 +543,14 @@ function testChromaConflictAndMissingFieldsAreVisible(testCase)
 [image, faceBox, parsing] = fixtureContext(40, 60);
 context = prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60]));
+% 色度冲突/缺失 alias 的补齐与冲突检测属 v3 旧形态 normalize 路径；
+% V4 reader 不改写 compat alias（缺失 alias 的 V4 Context 由缓存指纹
+% 测试与 masks.buildBeautyMasks 的冲突检查兜底），故夹具显式降戳为
+% '3.1' 走旧路径。
 context.chromaProtectionMask(1, 1) = ...
     1 - context.chromaProtectionMask(1, 1);
 context = rmfield(context, 'runtimeCache');
+context.schemaVersion = '3.1';
 verifyError(testCase, @() normalizeBeautyContext(image, faceBox, context), ...
     'normalizeBeautyContext:ChromaProtectionConflict');
 verifyError(testCase, @() masks.buildBeautyMasks(image, context, faceBox), ...

@@ -4,6 +4,14 @@ function tests = testMaskSystemV4CompatibilityBaseline
 %   契约版本：schemaVersion=3.1、algorithmVersion=v3.2、artifactVersion=v3.1。
 %   记录时间：2026-09-19（MATLAB R2024a，Windows）。
 %
+%   T08（2026-09-19）起生产 Context 契约由 '3.1' compat 有意切换为
+%   '4.0' canonical 分层（架构 schema expand；semantic/
+%   processability/evidence/protection/diagnostics 分层发布，compat
+%   alias 保留）。这是纯架构迁移：algorithmVersion='v3.2' 与
+%   artifactVersion='v3.1' 不变，下列全部 RGB/零强度/hard/cached/
+%   preview oracle 摘要必须继续 bit-exact 通过；测试仅同步契约戳
+%   断言，不改动任何 oracle 数值。
+%
 %   比较口径：架构兼容阶段全部断言 bit-exact。最终 RGB 使用 SHA-256 摘要
 %   （uint8 列优先字节序）比较；零强度输出、hard identity 区域、
 %   cached/uncached 输出和预览/原尺寸路径均要求精确相等。已在基线
@@ -27,19 +35,53 @@ addpath(fullfile(projectRoot, 'src'));
 end
 
 function testFrozenPipelineContract(testCase)
+% T08 有意切换点：schemaVersion 从 '3.1' 升级为 '4.0'（架构 schema
+% expand，算法行为不变）；algorithmVersion/artifactVersion 冻结不动。
 contract = beautyPipelineContract();
-verifyEqual(testCase, contract.schemaVersion, '3.1');
+verifyEqual(testCase, contract.schemaVersion, '4.0');
 verifyEqual(testCase, contract.algorithmVersion, 'v3.2');
 verifyEqual(testCase, contract.artifactVersion, 'v3.1');
 
 fixture = buildRichFixture();
 cache = fixture.context.runtimeCache;
-verifyEqual(testCase, cache.schemaVersion, '3.1');
+verifyEqual(testCase, cache.schemaVersion, '4.0');
 verifyEqual(testCase, cache.algorithmVersion, 'v3.2');
 verifyEqual(testCase, cache.artifactVersion, 'v3.1');
 verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.1');
 verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.1');
 verifyEqual(testCase, cache.artifactInfo.blemishMap, 'v3.1');
+end
+
+function testProducerContextIsV4LayeredWithCompatAliases(testCase)
+% T08 新增覆盖：生产 Context 冻结为 V4 canonical 分层形态，同时保留
+%   迁移期 compat alias；producer 输出必须通过只读 V4 reader 且幂等。
+fixture = buildRichFixture();
+context = rmfield(fixture.context, 'runtimeCache');
+verifyEqual(testCase, context.schemaVersion, '4.0');
+layerNames = {'semantic', 'processability', 'evidence', 'protection', ...
+    'diagnostics'};
+verifyTrue(testCase, all(isfield(context, layerNames)), ...
+    '生产 Context 必须携带全部 canonical 分层。');
+verifyTrue(testCase, all(isfield(context.semantic, ...
+    {'regions', 'confidence', 'faceSkin', 'bodySkin'})));
+verifyTrue(testCase, all(isfield(context.protection, ...
+    {'smoothingFine', 'smoothingMid', 'repairFine', 'repairMid', ...
+    'baseLuminance', 'tone', 'whitening', 'hard'})));
+verifyTrue(testCase, isfield(context.diagnostics, 'policyEvidence') && ...
+    strcmp(context.diagnostics.policyEvidence.builder, ...
+    'masks.buildBeautyPolicyEvidence'));
+compatAliases = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
+    'textureProtectionMask', 'structureProtectionMask', ...
+    'whiteningProtectionMask', 'chromaProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'nonFaceStrengthMap', 'protectionMasks', 'regions', ...
+    'regionConfidence', 'semanticProbabilities', 'semanticConfidence'};
+verifyTrue(testCase, all(isfield(context, compatAliases)), ...
+    '迁移期 compat alias 必须完整保留，供旧 consumer 与缓存指纹使用。');
+
+reread = normalizeBeautyContext(fixture.image, fixture.faceBox, context);
+verifyEqual(testCase, reread, context, ...
+    'producer Context 经过 V4 reader 必须幂等且 bit-exact。');
 end
 
 function testZeroStrengthReturnsSourceImageBitExact(testCase)

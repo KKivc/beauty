@@ -1,6 +1,10 @@
 function beautyContext = prepareBeautyContext(inputImage, faceBox, ...
         injectedParsing, bodyParsingParams)
-%PREPAREBEAUTYCONTEXT 构建包含脸外皮肤的最终 v3.1 Context。
+%PREPAREBEAUTYCONTEXT 构建包含脸外皮肤的最终 V4 分层 Context。
+%   T08 起生产链默认输出 schemaVersion='4.0' 的 canonical 分层结构
+%   （semantic/processability/evidence/protection/diagnostics），
+%   算法行为保持 v3.2；skinMask、textureProtectionMask 等顶层字段
+%   是迁移期 compat alias，仅为旧 consumer 与缓存指纹保留。
 
 validateImage(inputImage);
 validateFaceBox(faceBox, size(inputImage, 2), size(inputImage, 1));
@@ -41,11 +45,12 @@ beautyContext = normalizeBeautyContext(inputImage, faceBox, beautyContext);
     beautyContext.bodySkinMask);
 [runtimeMasks, maskDiagnostics] = masks.buildBeautyMasks( ...
     inputImage, beautyContext, faceBox);
+contract = beautyPipelineContract();
 beautyContext.runtimeCache = buildBeautyRuntimeCache( ...
     inputImage, faceBox, runtimeMasks, maskDiagnostics, struct( ...
     'status', 'generated', ...
-    'sourceSchemaVersion', '3.1', ...
-    'message', '打开图像时已生成 v3.1 运行时产物。'));
+    'sourceSchemaVersion', contract.schemaVersion, ...
+    'message', '打开图像时已生成 V4 分层 Context 的运行时产物。'));
 end
 
 function validateImage(inputImage)

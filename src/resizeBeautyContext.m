@@ -1,8 +1,10 @@
 function resizedContext = resizeBeautyContext(context, targetImageSize, ...
         targetFaceBox, targetImage)
-%RESIZEBEAUTYCONTEXT 将 v3.0/v3.1 Context 迁移到另一尺寸。
-%   有目标原图时重新构建全部派生 Mask；没有目标原图时仅缩放语义、
-%   皮肤和已生成的派生字段，供预览级迁移使用。
+%RESIZEBEAUTYCONTEXT 将 v3.0/v3.1/V4 Context 迁移到另一尺寸。
+%   T08 起生产链输出 V4 分层 Context，源 Context 允许是 '4.0'：带目标
+%   原图的分支在目标尺寸上从语义重新构建全部派生字段与 canonical 分
+%   层；三参数轻量分支只缩放 compat alias 字段，输出保持 v3.1 形态
+%   （分层刷新契约由后续 Ticket 处理，缺失目标原图时不得伪造分层）。
 
 if ~isstruct(context) || ~isscalar(context)
     error('resizeBeautyContext:InvalidContext', ...
@@ -50,7 +52,7 @@ if hasTargetImage
     migration = struct( ...
         'status', 'resizedAndRegenerated', ...
         'sourceSchemaVersion', schemaVersionText(context.schemaVersion), ...
-        'message', '原尺寸 Context 已重新生成 v3.1 派生产物。');
+        'message', '原尺寸 Context 已按目标图像重新生成运行时派生产物。');
     resizedContext.migrationDiagnostics = migration;
     resizedContext.runtimeCache = buildBeautyRuntimeCache( ...
         targetImage, double(targetFaceBox), runtimeMasks, maskDiagnostics, migration);
@@ -79,6 +81,8 @@ resizedChroma = resizeLightweightMask(sourceChroma, targetSize);
 resizedStrength = resizeLightweightMask(context.strengthMap, targetSize);
 resizedFaceStrength = resizeLightweightMask(context.faceStrengthMap, targetSize);
 resizedNonFaceStrength = resizeLightweightMask(context.nonFaceStrengthMap, targetSize);
+% 轻量分支没有目标原图，无法重建/缩放 canonical 分层，输出保持
+% v3.1 形态（仅 compat alias），由旧 normalize 路径继续消费。
 resizedContext = struct( ...
     'skinMask', resizedSkin, ...
     'faceSkinMask', resizedFaceSkin, ...
@@ -142,9 +146,10 @@ end
 
 function [chromaProtectionMask, hasChromaProtectionMask] = ...
         validateSourceContext(context, requireDerived)
-if ~isfield(context, 'schemaVersion') || ~isV3Version(context.schemaVersion)
+if ~isfield(context, 'schemaVersion') || ~isKnownSourceVersion( ...
+        context.schemaVersion)
     error('resizeBeautyContext:InvalidContext', ...
-        '源 Context 必须是版本 3.0 或 3.1。');
+        '源 Context 必须是版本 3.0、3.1 或 4.0（V4 分层）。');
 end
 if any(isfield(context, {'featureProtectionMask', 'hardProtectionMask'}))
     error('resizeBeautyContext:InvalidContext', ...
@@ -213,6 +218,16 @@ if isstring(value) && isscalar(value)
 end
 valid = ischar(value) && size(value, 1) == 1 && ...
     any(strcmp(value, {'3.0', '3.1'}));
+end
+
+function valid = isKnownSourceVersion(value)
+%ISKNOWNSOURCEVERSION v3.0/v3.1 compat 与 V4 layered 都是合法源形态；
+%   V4 源经 compat alias 读取语义与皮肤字段（producer 始终携带）。
+if isstring(value) && isscalar(value)
+    value = char(value);
+end
+valid = isV3Version(value) || (ischar(value) && size(value, 1) == 1 && ...
+    strcmp(value, '4.0'));
 end
 
 function value = schemaVersionText(version)

@@ -1,9 +1,9 @@
 function migratedContext = migrateBeautyContext(inputImage, faceBox, context, targetSchema)
 %MIGRATEBEAUTYCONTEXT 显式迁移 Beauty Context。
-%   默认目标为 v3.1（既有行为不变）；显式传入 targetSchema='4.0'
-%   （或 'v4'）时迁移到 V4 canonical 分层结构。V4 迁移仅供测试和
-%   显式调用，默认生产输出仍为 v3.1，由 beautyPipelineContract 冻结。
-%   支持的调用形式：
+%   T08 起默认生产输出为 V4 分层 Context（beautyPipelineContract）；
+%   本入口用于把历史 v3.0/v3.1 Context 显式迁移到指定目标：默认目标
+%   仍为 v3.1（既有行为不变），显式传入 targetSchema='4.0'（或 'v4'）
+%   时迁移到 V4 canonical 分层结构。支持的调用形式：
 %     migrateBeautyContext(context)
 %     migrateBeautyContext(context, targetSchema)
 %     migrateBeautyContext(inputImage, faceBox, context)
@@ -14,7 +14,7 @@ function migratedContext = migrateBeautyContext(inputImage, faceBox, context, ta
 %   自动使用该原图重新生成运行时产物。提供原图时始终重建缓存，
 %   不会把历史 3.0 派生产物仅补上 alias 后标记为当前算法产物。
 %   V4 输入迁移到 V4 为幂等操作：只做 reader 校验与规范化，不重建
-%   缓存；V4 缓存 reader 的扩展由后续 Ticket 处理。
+%   缓存（缓存兼容由 artifactVersion 把握，见 beautifyImage）。
 
 if nargin == 1
     migratedContext = migrateContextOnly(inputImage, 'v3.1');
@@ -119,22 +119,48 @@ migratedContext.migrationDiagnostics = migration;
 end
 
 function v4Context = toV4Canonical(context, sourceSchemaVersion, imageSize)
-%TOV4CANONICAL 把完整 v3.1 Context 包装为 V4 canonical 分层结构。
-%   canonical 层此时只发布 semantic 与 diagnostics；processability、
-%   evidence、protection 分别由 T05/T06/T07 构建，保持缺失（partial
-%   V4）。legacy general masks 只作为顶层 compat alias 原样保留，
-%   绝不写入 canonical 层。
+%TOV4CANONICAL 把完整 v3.x Context 包装为 V4 canonical 分层结构。
+%   T08 起 canonical 层发布不止 semantic：源 Context 已携带的
+%   processability（T05 分层）、evidence（T06 分层）与 protection
+%   （T07 分层）原样带入 canonical 层，semantic 分组字段与
+%   diagnostics.policyEvidence 元数据不得再丢；pre-T05 旧 Context
+%   缺这些层时保持 partial V4（reader 允许缺失层），semantic 层退回
+%   由 v3 语义字段构造 regions/confidence。legacy general masks 只
+%   作为顶层 compat alias 原样保留，绝不写入 canonical 层。
 v4Context = context;
 v4Context.schemaVersion = '4.0';
-canonicalRegions = canonicalSemanticRegions(context);
-v4Context.semantic = struct( ...
-    'regions', canonicalRegions, ...
-    'confidence', canonicalSemanticConfidence(context, canonicalRegions));
-v4Context.diagnostics = struct( ...
+if isfield(context, 'semantic') && isstruct(context.semantic) && ...
+        isscalar(context.semantic) && ...
+        (isfield(context.semantic, 'regions') || ...
+        isfield(context.semantic, 'confidence'))
+    % T05 起生产 Context 自带分组语义字段（faceSkin/bodySkin 等），
+    % 迁移时原样保留，不从扁平 regions 重造。
+    v4Context.semantic = context.semantic;
+else
+    canonicalRegions = canonicalSemanticRegions(context);
+    v4Context.semantic = struct( ...
+        'regions', canonicalRegions, ...
+        'confidence', canonicalSemanticConfidence(context, canonicalRegions));
+end
+canonicalLayers = {'semantic'};
+deferredLayers = {};
+carryLayerNames = {'processability', 'evidence', 'protection'};
+for index = 1:numel(carryLayerNames)
+    name = carryLayerNames{index};
+    if isfield(context, name) && isstruct(context.(name)) && ...
+            isscalar(context.(name))
+        v4Context.(name) = context.(name);
+        canonicalLayers{end + 1} = name;
+    else
+        deferredLayers{end + 1} = name;
+    end
+end
+canonicalLayers{end + 1} = 'diagnostics';
+diagnostics = struct( ...
     'schemaVersion', '4.0', ...
     'sourceSchemaVersion', sourceSchemaVersion, ...
-    'canonicalLayers', {{'semantic', 'diagnostics'}}, ...
-    'deferredLayers', {{'processability', 'evidence', 'protection'}}, ...
+    'canonicalLayers', {canonicalLayers}, ...
+    'deferredLayers', {deferredLayers}, ...
     'compatAliases', {{'skinMask', 'faceSkinMask', 'nonFaceSkinMask', ...
     'textureProtectionMask', 'structureProtectionMask', ...
     'whiteningProtectionMask', 'chromaProtectionMask', ...
@@ -142,6 +168,13 @@ v4Context.diagnostics = struct( ...
     'nonFaceStrengthMap', 'protectionMasks', 'regions', ...
     'regionConfidence', 'semanticProbabilities', ...
     'semanticConfidence'}});
+if isfield(context, 'diagnostics') && isstruct(context.diagnostics) && ...
+        isscalar(context.diagnostics) && ...
+        isfield(context.diagnostics, 'policyEvidence')
+    % T06 遗留补齐：policyEvidence 来源/版本元数据随迁移保留。
+    diagnostics.policyEvidence = context.diagnostics.policyEvidence;
+end
+v4Context.diagnostics = diagnostics;
 v4Context = normalizeBeautyContextV4(v4Context, imageSize, ...
     validFaceBoxOrNull(context));
 end

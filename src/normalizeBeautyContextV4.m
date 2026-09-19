@@ -10,8 +10,9 @@ function context = normalizeBeautyContextV4(context, imageSize, faceBox)
 %   本函数是 normalizeBeautyContext 与 migrateBeautyContext 共用的
 %   V4 reader 核心：只做结构校验与规范化（logical → double、补齐
 %   imageSize/faceBox/faceScale 身份字段），不重建派生 Mask，也不
-%   改写顶层 compat alias。v3.0/v3.1 输入仍走 normalizeBeautyContext
-%   的既有路径，生产者当前继续输出 v3.1。
+%   改写顶层 compat alias。T08 起生产链（build/prepare/resize）默认
+%   输出 V4 分层 Context，本 reader 为其规范化主路径；v3.0/v3.1 输入
+%   仍走 normalizeBeautyContext 的既有 v3 路径。
 %
 %   输入参数：
 %     context   — schemaVersion 为 '4.0'（或数值 4）的标量结构体。

@@ -1,14 +1,48 @@
 function [whiteningResult, diagnostics] = applySkinWhitening( ...
-        inputImage, frequency, beautyMasks, whiteningStrength)
+        inputImage, frequency, beautyMasks, whiteningStrength, ...
+        whiteningContract)
 %APPLYSKINWHITENING 生成受保护的低频亮度提亮结果。
 %   美白只产生亮度增量，不读取或修改 Fine/Mid。强度曲线连续单调，
-%   增量使用独立的 whiteningProtectionMask，并由结构软门控、硬保护和
-%   当前低频高光余量共同限制，最终由 composeBeautyResult 一次合成。
+%   增量由保护门控、硬保护和当前低频高光余量共同限制，最终由
+%   composeBeautyResult 一次合成。
+%
+%   T18：可选第 5 参数 whiteningContract 是 Whitening 的 stage
+%   contract，由 beautifyImage 生产端从与生产门控共用的同一份
+%   beautyMasks 产物拼装传入（T12--T17 范式）。提供时 supportBase 的
+%   保护门控只来自 contract，不再自行解释 general structure/whitening
+%   masks；肤色亮度变换与 strength 公式不变。字段语义：
+%     whitening       — T07 发布的 stage protection 快照
+%                       whitening = 1 - structureGateWhitening .*
+%                       (1 - whitening)（脸部浅退让分支已折叠）；该
+%                       折叠含 1-x 补码往返舍入，无法逐位还原门控积
+%                       structureGate .* featureSetback，因此快照不
+%                       参与输出算术，只作为 T07 参考门由诊断
+%                       （whiteningGateSnapshot）与测试消费；
+%     hard            — hard identity（T07 单独发布），按生产原位
+%                       组合进亮度统计选点（hard < .999）与 allowed
+%                       的 (1-hard) 乘子；
+%     structureGate   — 未折叠结构门，含生产原位的脸部/脸外差异分
+%                       支：全场 1 - structure，脸部（faceSkinMask
+%                       >= .5）浅退让为 1 - .10*structure（避免整个
+%                       鼻部语义阻断美白）；
+%     featureGate     — 未折叠五官退让门 1 - whitening（消费侧按生
+%                       产原式做 [0,1] 截断）；
+%     featureZeroGate — double(whitening <= eps)（亮度统计选点的五
+%                       官零保护门限，生产原式原样发布）。
+%   运行期由生产端按与 legacy 完全相同的表达式、同一份 mask 产物计
+%   算未折叠字段，消费侧按生产原式、原顺序重建门控，与 legacy 路径
+%   逐位等价（bit-exact）。缺字段 fail-fast，不在函数内部重新拼装，
+%   也不静默回退；未提供第 5 参的旧调用方走 legacy 兼容路径，行为
+%   不变。processability（skinMask）与强度（strengthMap）不属于
+%   protection，两条路径都继续从 beautyMasks 读取并显式控制效果幅
+%   度；脸部 allowed 下限与鼻部幅度封顶属强度侧区域 policy，两条路
+%   径共用同一读取，strength 与 protection 不合并。
 
 if nargin < 4
     error('beauty:InvalidWhiteningInput', ...
         '美白需要输入图像、频率结构、Beauty Masks 和美白强度。');
 end
+useStageContract = nargin >= 5 && ~isempty(whiteningContract);
 validateImage(inputImage);
 imageSize = size(inputImage, 1:2);
 validateFrequency(frequency, imageSize);
@@ -21,16 +55,38 @@ sourceLuminance = double(frequency.sourceLuminance);
 base = double(frequency.base);
 skinMask = readMask(beautyMasks, 'skinMask', imageSize);
 strengthMap = readMask(beautyMasks, 'strengthMap', imageSize);
-structureProtection = readMask(beautyMasks, ...
-    'structureProtectionMask', imageSize);
 faceSkinMask = readOptionalMask(beautyMasks, 'faceSkinMask', imageSize);
-whiteningProtection = readOptionalMask(beautyMasks, ...
-    'whiteningProtectionMask', imageSize);
-hardProtection = readOptionalMask(beautyMasks, ...
-    'hardProtectionMask', imageSize);
+% T18：保护门控来源二选一。stage 路径只消费 contract（快照不参与输
+% 出算术，脸部/脸外差异分支由生产端在未折叠 structureGate 上原样保
+% 留）；legacy 路径保持对 general structure/whitening/hard masks 的
+% 原解释与数值。两条路径的门控字段按同一表达式、同一份 mask 产物取
+% 得，数值逐位一致。
+if useStageContract
+    whiteningContract = validateWhiteningContract( ...
+        whiteningContract, imageSize);
+    hardProtection = whiteningContract.hard;
+    structureGate = whiteningContract.structureGate;
+    featureSetback = min(max(whiteningContract.featureGate, 0), 1);
+    featureZeroGate = whiteningContract.featureZeroGate;
+else
+    structureProtection = readMask(beautyMasks, ...
+        'structureProtectionMask', imageSize);
+    whiteningProtection = readOptionalMask(beautyMasks, ...
+        'whiteningProtectionMask', imageSize);
+    hardProtection = readOptionalMask(beautyMasks, ...
+        'hardProtectionMask', imageSize);
+    structureGate = 1 - structureProtection;
+    faceSkin = faceSkinMask >= .5;
+    % 脸部结构只做浅退让；过强的软门控会让眉周近区比远区
+    % 少获得一档美白，形成可量化的亮度断层。
+    structureGate(faceSkin) = 1 - .10 * structureProtection(faceSkin);
+    featureSetback = 1 - whiteningProtection;
+    featureSetback = min(max(featureSetback, 0), 1);
+    featureZeroGate = whiteningProtection <= eps;
+end
 
 skinPixels = skinMask >= .50 & strengthMap > .05 & ...
-    hardProtection < .999 & whiteningProtection <= eps & ...
+    hardProtection < .999 & featureZeroGate & ...
     base < .90;
 if any(skinPixels(:))
     luminanceValues = sourceLuminance(skinPixels);
@@ -48,18 +104,11 @@ whiteningCurve = ratio ^ .85;
 highlightProtection = min(max((.985 - base) / .18, 0), 1);
 % 高光保护采用低频亮度判断，避免被 Fine/Mid 的细节误导。
 highlightProtection = highlightProtection .^ .80;
-% 结构保护保留为亮度软约束；仅脸部使用较浅退让，避免整个鼻部
-% 语义阻断美白，脸外仍沿用原有弱处理约束。
-structureGate = 1 - structureProtection;
-faceSkin = faceSkinMask >= .5;
-% 脸部结构只做浅退让；过强的软门控会让眉周近区比远区
-% 少获得一档美白，形成可量化的亮度断层。
-structureGate(faceSkin) = 1 - .10 * structureProtection(faceSkin);
 allowed = min(skinMask, strengthMap) .* (1 - hardProtection);
 
-% 五官过渡由特征身份和人脸尺度单独生成，不能再用色度保护代替。
-featureSetback = 1 - whiteningProtection;
-featureSetback = min(max(featureSetback, 0), 1);
+% 五官过渡由特征身份和人脸尺度单独生成，不能再用色度保护代替；
+% T18 起五官退让门与结构门一样由保护来源二选一承载（stage 路径取
+% contract，legacy 路径取 general masks），见上方分支。
 faceScale = readFaceScale(frequency, beautyMasks, imageSize);
 chromaGate = ones(imageSize);
 
@@ -96,7 +145,6 @@ whiteningResult = struct( ...
     'structureGate', structureGate, ...
     'faceSkinMask', faceSkinMask, ...
     'chromaGate', chromaGate, ...
-    'whiteningProtectionMask', whiteningProtection, ...
     'whiteningGate', featureSetback, ...
     'faceScale', faceScale, ...
     'toneGate', chromaGate, ...
@@ -118,6 +166,11 @@ whiteningResult = struct( ...
     'outputLuminance', outputLuminance, ...
     'imageSize', [imageSize, 3], ...
     'whiteningStrength', double(whiteningStrength));
+if ~useStageContract
+    % legacy 兼容路径继续报告 whiteningProtectionMask 原图；stage 路
+    % 径的保护输入由 contract 承载，不再报告 general alias（T18）。
+    whiteningResult.whiteningProtectionMask = whiteningProtection;
+end
 whiteningResult.outputImage = renderWhiteningImage(inputImage, ...
     outputLuminance);
 
@@ -129,7 +182,6 @@ diagnostics = struct( ...
     'structureGate', structureGate, ...
     'faceSkinMask', faceSkinMask, ...
     'chromaGate', chromaGate, ...
-    'whiteningProtectionMask', whiteningProtection, ...
     'whiteningGate', featureSetback, ...
     'faceScale', faceScale, ...
     'toneGate', chromaGate, ...
@@ -144,10 +196,18 @@ diagnostics = struct( ...
     'fineRetention', 1, ...
     'mediumRetention', 1, ...
     'skinPixels', skinPixels, ...
-    'structureProtectionMask', structureProtection, ...
     'hardProtectionMask', hardProtection, ...
     'imageSize', [imageSize, 3], ...
     'whiteningStrength', double(whiteningStrength));
+if useStageContract
+    % T18 诊断收口：stage 路径不再报告 structure/whitening 兼容
+    % alias（保护输入由 contract 承载），新增 T07 whitening 快照的
+    % 参考门；hard identity 继续按 T07 约定单独报告。
+    diagnostics.whiteningGateSnapshot = 1 - whiteningContract.whitening;
+else
+    diagnostics.whiteningProtectionMask = whiteningProtection;
+    diagnostics.structureProtectionMask = structureProtection;
+end
 end
 
 function validateImage(inputImage)
@@ -190,6 +250,27 @@ end
 if isfield(beautyMasks, 'whiteningProtectionMask')
     readMask(beautyMasks, 'whiteningProtectionMask', imageSize);
 end
+end
+
+function contract = validateWhiteningContract(contract, imageSize)
+%VALIDATEWHITENINGCONTRACT 校验 Whitening stage contract（T18）。
+%   必需字段：whitening（T07 快照）、hard（hard identity）、
+%   structureGate（含脸部/脸外差异分支的未折叠结构门）、featureGate
+%   （未折叠五官退让门）与 featureZeroGate（统计选点的五官零保护门
+%   限）。缺字段或取值无效一律 fail-fast，不在函数内部重新拼装，也
+%   不静默回退到 general masks 解释。
+if ~isstruct(contract) || ~isscalar(contract) || ...
+        ~all(isfield(contract, {'whitening', 'hard', 'structureGate', ...
+        'featureGate', 'featureZeroGate'}))
+    error('beauty:InvalidWhiteningInput', ...
+        'Whitening stage contract 必须是包含 whitening、hard、structureGate、featureGate 和 featureZeroGate 的标量结构。');
+end
+contract.whitening = readMask(contract, 'whitening', imageSize);
+contract.hard = readMask(contract, 'hard', imageSize);
+contract.structureGate = readMask(contract, 'structureGate', imageSize);
+contract.featureGate = readMask(contract, 'featureGate', imageSize);
+contract.featureZeroGate = readMask(contract, 'featureZeroGate', ...
+    imageSize);
 end
 
 function value = readMask(context, name, imageSize)

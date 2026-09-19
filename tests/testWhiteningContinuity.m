@@ -130,6 +130,56 @@ end
 verifyGreaterThanOrEqual(testCase, diff(medians), -2 / 255);
 end
 
+function testWhiteningConsumesStageContractInPipeline(testCase)
+%TESTWHITENINGCONSUMESSTAGECONTRACTINPIPELINE T18：生产管线向美白注入
+%   whitening stage contract（beautifyImage.makeWhiteningStageContract）：
+%   美白诊断不再报告 structure/whitening 兼容 alias，改报 T07 whitening
+%   快照参考门 whiteningGateSnapshot；脸部浅退让分支由生产端保留，鼻
+%   部美白不因 consumer migration 被整体排除；strengthMap/skinMask 继
+%   续独立控制效果幅度；输出保持输入尺寸与 uint8 契约。
+imageSize = [120, 160];
+image = uint8(ones([imageSize, 3]) * 140);
+faceBox = [round(imageSize(2) * .17), round(imageSize(1) * .08), ...
+    round(imageSize(2) * .66), round(imageSize(1) * .67)];
+parsing = emptyParsing(imageSize);
+parsing.regions.skin(:) = 1;
+parsing.regionConfidence.skin(:) = 1;
+parsing.regions.nose(50:80, 70:95) = 1;
+parsing.regionConfidence.nose(50:80, 70:95) = 1;
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    struct('probabilities', zeros([imageSize, 20], 'single')));
+
+params = struct('smoothingStrength', 0, 'whiteningStrength', 50);
+[output, diagnostics] = beautifyImage(image, params, faceBox, context);
+verifySize(testCase, output, [imageSize, 3]);
+verifyClass(testCase, output, 'uint8');
+verifyTrue(testCase, nnz(diagnostics.whitening.supportMap) > 0, ...
+    '样例必须产生非零美白 support，否则 wiring 断言无意义。');
+verifyEqual(testCase, isfield(diagnostics.whitening, ...
+    {'structureProtectionMask', 'whiteningProtectionMask'}), ...
+    [false, false], ...
+    '管线美白诊断不得再报告兼容 alias 保护字段。');
+verifyTrue(testCase, isfield(diagnostics.whitening, ...
+    'whiteningGateSnapshot'));
+verifyEqual(testCase, diagnostics.whitening.hardProtectionMask, ...
+    diagnostics.beautyMasks.hardProtectionMask, 'AbsTol', 0);
+
+% T07 快照衔接：whiteningGateSnapshot 与 protection.whitening 一致。
+[beautyMasks, ~] = masks.buildBeautyMasks(image, ...
+    normalizeBeautyContext(image, faceBox, context), faceBox);
+protection = masks.buildStageProtectionMasks(beautyMasks);
+verifyEqual(testCase, diagnostics.whitening.whiteningGateSnapshot, ...
+    1 - protection.whitening, 'AbsTol', 0);
+
+% 鼻部不得因 consumer migration 被整体排除：鼻部语义内美白增量非零。
+noseRegion = beautyMasks.noseMask > .5;
+verifyTrue(testCase, nnz(noseRegion) > 0, ...
+    'fixture 必须包含非空 noseMask，否则鼻部断言无意义。');
+verifyGreaterThan(testCase, ...
+    sum(diagnostics.whitening.delta(noseRegion)), 0, ...
+    '鼻部美白不得因 consumer migration 被整体排除。');
+end
+
 function parsing = emptyParsing(imageSize)
 names = faceParsingClassNames();
 regions = struct();

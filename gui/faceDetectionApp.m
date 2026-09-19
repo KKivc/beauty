@@ -1,8 +1,9 @@
 classdef faceDetectionApp < matlab.apps.AppBase
-    %FACEDETECTIONAPP 主脸美颜 GUI，负责加载、预览、评价和保存结果。
+    %FACEDETECTIONAPP 人像美颜 GUI 主程序，负责单图与视频模式的加载、预览、评价和保存。
+    %   设计遵循现代暗色调色台风格，分层解耦样式系统与元数据处理，并为视频美颜预留接口。
 
     properties (Access = public)
-        % App Designer 兼容的 UI 组件句柄。
+        % App Designer 兼容的核心 UI 组件句柄（必须严格保留以保持外部契约）
         UIFigure matlab.ui.Figure
         OpenImageButton matlab.ui.control.Button
         SaveImageButton matlab.ui.control.Button
@@ -12,14 +13,54 @@ classdef faceDetectionApp < matlab.apps.AppBase
         WhiteningSlider matlab.ui.control.Slider
         SmoothingValueLabel matlab.ui.control.Label
         WhiteningValueLabel matlab.ui.control.Label
+
+        % 兼容既有指标容器与标签句柄
         MetricsPanel matlab.ui.container.Panel
         EntropyLabel matlab.ui.control.Label
         StandardDeviationLabel matlab.ui.control.Label
         AverageGradientLabel matlab.ui.control.Label
         ElapsedTimeLabel matlab.ui.control.Label
+
+        % 输入原图客观评价指标组件
+        InputMetricsPanel matlab.ui.container.Panel
+        InputEntropyLabel matlab.ui.control.Label
+        InputStandardDeviationLabel matlab.ui.control.Label
+        InputAverageGradientLabel matlab.ui.control.Label
+        InputElapsedTimeLabel matlab.ui.control.Label
+
+        % 输出处理结果客观评价指标组件
+        OutputMetricsPanel matlab.ui.container.Panel
+        OutputEntropyLabel matlab.ui.control.Label
+        OutputStandardDeviationLabel matlab.ui.control.Label
+        OutputAverageGradientLabel matlab.ui.control.Label
+        OutputElapsedTimeLabel matlab.ui.control.Label
+
+        % 核心视窗与状态栏
         SourceAxes matlab.ui.control.UIAxes
         DetectedAxes matlab.ui.control.UIAxes
         StatusLabel matlab.ui.control.Label
+
+        % 新增：模式切换与媒体信息展示
+        SingleImageModeButton matlab.ui.control.Button
+        VideoModeButton matlab.ui.control.Button
+        MediaInfoLabel matlab.ui.control.Label
+        OpenVideoButton matlab.ui.control.Button
+        ExportVideoButton matlab.ui.control.Button
+
+        % 新增：视频时间轴播放器组件
+        VideoToolbar matlab.ui.container.Panel
+        VideoPlayButton matlab.ui.control.Button
+        VideoStepBackButton matlab.ui.control.Button
+        VideoStepForwardButton matlab.ui.control.Button
+        VideoTimecodeLabel matlab.ui.control.Label
+        VideoFrameLabel matlab.ui.control.Label
+        VideoTimelineSlider matlab.ui.control.Slider
+
+        % 新增：视频时域防闪烁开关
+        DeflickerCheckBox matlab.ui.control.CheckBox
+
+        % 当前工作模式 ('image' | 'video')
+        CurrentMode = 'image'
     end
 
     properties (Access = private)
@@ -32,6 +73,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
         beautifiedImage = []
         faceBox = zeros(0, 4)
         beautyContext = []
+        inputMetrics = []
         currentMetrics = []
         hasSingleFace = false
 
@@ -45,6 +87,8 @@ classdef faceDetectionApp < matlab.apps.AppBase
 
         % 记录上次拖动预览时间，限制实时刷新频率。
         previewClock = []
+
+        videoHook = []
     end
 
     methods (Access = private)
@@ -67,10 +111,11 @@ classdef faceDetectionApp < matlab.apps.AppBase
                     'The project src folder was not found beside the gui folder.');
             end
             addpath(sourceFolder);
+            addpath(guiFolder);
         end
 
+        % =================== 图像打开与处理 ===================
         function openImageButtonPushed(app, ~)
-            % 打开图像并立即执行主脸检测。
             [fileName, folderPath] = uigetfile( ...
                 {'*.jpg;*.jpeg;*.png', 'JPG and PNG Images (*.jpg, *.jpeg, *.png)'}, ...
                 'Open Image');
@@ -81,7 +126,6 @@ classdef faceDetectionApp < matlab.apps.AppBase
         end
 
         function openImageFromPath(app, filePath)
-            % 由按钮和可重复的 GUI 回归共同调用的打开流程。
             try
                 inputImage = imread(filePath);
                 imageInfo = imfinfo(filePath);
@@ -91,7 +135,6 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 return;
             end
 
-            % MVP 只接受 uint8 三通道 RGB 图像，不静默转换其他位深。
             if ~isa(inputImage, 'uint8') || ndims(inputImage) ~= 3 || ...
                     size(inputImage, 3) ~= 3
                 app.clearLoadedImage();
@@ -101,7 +144,6 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 return;
             end
 
-            % 新图像进入检测前先清理旧的结果和保存状态。
             app.clearLoadedImage();
             [~, baseName, extension] = fileparts(filePath);
             app.sourceImage = inputImage;
@@ -113,8 +155,9 @@ classdef faceDetectionApp < matlab.apps.AppBase
                 app.previewImage = inputImage;
             end
             app.inputBaseName = baseName;
-            app.inputFormat = app.normalizedFormat(extension);
-            app.showImage(app.SourceAxes, inputImage, 'Original Image');
+            app.inputFormat = gui_helpers.ImageMetadataHelper.normalizedFormat(extension);
+            app.showImage(app.SourceAxes, inputImage, 'Original Image (输入原图)');
+            app.MediaInfoLabel.Text = sprintf('%s | %dx%d RGB', [baseName extension], size(inputImage,2), size(inputImage,1));
             app.StatusLabel.Text = 'Detecting face...';
             drawnow;
 
@@ -130,193 +173,203 @@ classdef faceDetectionApp < matlab.apps.AppBase
                     detectSingleFace(app.previewImage);
             catch exception
                 app.clearDetectionResult();
-                uialert(app.UIFigure, exception.message, 'Face Detection Failed');
+                uialert(app.UIFigure, exception.message, 'Detection Failed');
                 return;
             end
 
+            app.hasSingleFace = isSingleFace;
             if ~isSingleFace
                 app.clearDetectionResult();
-                uialert(app.UIFigure, ...
-                    'No recognizable foreground face was found. Please choose another image.', ...
-                    'Face Detection Failed');
+                uialert(app.UIFigure, detectionDetails.message, 'Single Face Required');
                 return;
             end
 
-            app.StatusLabel.Text = 'Analyzing skin and facial features...';
-            drawnow;
+            app.previewFaceBox = detectedFaceBox;
+            app.faceBox = app.scaleFaceBox(detectedFaceBox, ...
+                1 / app.previewScale, size(app.sourceImage));
+
+            app.calculateInputMetrics();
             try
-                app.previewFaceBox = detectedFaceBox;
-                app.faceBox = app.scaleFaceBox(detectedFaceBox, ...
-                    1 / app.previewScale, size(app.sourceImage));
-                preparedContext = prepareBeautyContext( ...
-                    app.previewImage, app.previewFaceBox, ...
-                    detectionDetails.selectedParsing, ...
-                    struct('rotationDegrees', ...
-                    detectionDetails.orientationDegrees));
-                app.previewContext = normalizeBeautyContext( ...
-                    app.previewImage, app.previewFaceBox, preparedContext);
-                app.beautyContext = app.previewContext;
+                app.previewContext = prepareBeautyContext( ...
+                    app.previewImage, app.previewFaceBox);
+                app.beautyContext = resizeBeautyContext( ...
+                    app.previewContext, size(app.sourceImage), app.faceBox, ...
+                    app.sourceImage);
             catch exception
                 app.clearDetectionResult();
-                uialert(app.UIFigure, exception.message, 'Beauty Analysis Failed');
+                uialert(app.UIFigure, exception.message, 'Context Preparation Failed');
                 return;
             end
-            app.hasSingleFace = true;
-            app.SmoothingSlider.Value = 25;
-            app.WhiteningSlider.Value = 15;
-            app.updateStrengthLabels();
-            app.setBeautyControlsEnabled(true);
-            app.refreshPreview(25, 15, true);
+
+            app.setControlsEnable('on');
+            app.StatusLabel.Text = 'Ready: face detected. Adjust beauty parameters.';
+            app.updateBeautyPreview();
+        end
+
+        function clearLoadedImage(app)
+            app.sourceImage = [];
+            app.previewImage = [];
+            app.previewScale = 1;
+            app.inputFormat = '';
+            app.inputBaseName = '';
+            app.inputImageInfo = [];
+            app.clearDetectionResult();
+            app.resetMetricsLabels();
+            cla(app.SourceAxes);
+            title(app.SourceAxes, 'Original Image (输入原图)');
+            cla(app.DetectedAxes);
+            title(app.DetectedAxes, 'Beauty Preview (效果实时预览)');
+            app.MediaInfoLabel.Text = 'No Media Loaded';
+        end
+
+        function clearDetectionResult(app)
+            app.previewFaceBox = zeros(0, 4);
+            app.previewContext = [];
+            app.beautifiedImage = [];
+            app.faceBox = zeros(0, 4);
+            app.beautyContext = [];
+            app.inputMetrics = [];
+            app.currentMetrics = [];
+            app.hasSingleFace = false;
+            app.lastDiagnostics = [];
+            app.previewClock = [];
+            cla(app.DetectedAxes);
+            title(app.DetectedAxes, 'Beauty Preview (效果实时预览)');
+            app.setControlsEnable('off');
+            app.StatusLabel.Text = 'Open a uint8 RGB JPG or PNG image.';
+        end
+
+        function calculateInputMetrics(app)
+            if isempty(app.sourceImage)
+                return;
+            end
+            app.inputMetrics = evaluateImage(app.sourceImage, app.sourceImage, 0);
+            app.InputEntropyLabel.Text = sprintf('Entropy: %.4f', ...
+                app.inputMetrics.entropy);
+            app.InputStandardDeviationLabel.Text = sprintf('Standard deviation: %.4f', ...
+                app.inputMetrics.standardDeviation);
+            app.InputAverageGradientLabel.Text = sprintf('Average gradient: %.4f', ...
+                app.inputMetrics.averageGradient);
+            app.InputElapsedTimeLabel.Text = 'Single-image time: --';
         end
 
         function beautySliderValueChanging(app, event, isSmoothing)
-            % 拖动时节流，避免每个鼠标事件都重复执行完整算法。
-            if ~isempty(app.previewClock) && toc(app.previewClock) < 0.2
-                return;
-            end
-            if isSmoothing
-                smoothingStrength = event.Value;
-                whiteningStrength = app.WhiteningSlider.Value;
-            else
-                smoothingStrength = app.SmoothingSlider.Value;
-                whiteningStrength = event.Value;
-            end
-            app.refreshPreview(smoothingStrength, whiteningStrength, false);
-            if app.hasSingleFace
-                app.updateStrengthLabels(smoothingStrength, whiteningStrength);
-                app.previewClock = tic;
-            end
-        end
-
-        function beautySliderValueChanged(app, ~)
-            % 松开滑块后强制完成一次最终刷新。
-            app.refreshPreview(app.SmoothingSlider.Value, app.WhiteningSlider.Value, true);
-            if app.hasSingleFace
-                app.previewClock = tic;
-            end
-        end
-
-        function oneClickBeautyButtonPushed(app, ~)
-            % 一键美颜只推荐参数，实际处理仍复用普通预览流程。
-            if ~app.hasSingleFace
-                return;
-            end
-            try
-                params = recommendBeautyParams( ...
-                    app.previewImage, app.previewFaceBox, app.previewContext);
-                app.SmoothingSlider.Value = params.smoothingStrength;
-                app.WhiteningSlider.Value = params.whiteningStrength;
-                app.updateStrengthLabels();
-                app.refreshPreview(params.smoothingStrength, params.whiteningStrength, true);
-                if app.hasSingleFace
-                    app.previewClock = tic;
-                end
-            catch exception
-                app.clearDetectionResult();
-                uialert(app.UIFigure, exception.message, 'Beauty Preview Failed');
-            end
-        end
-
-        function resetBeautyButtonPushed(app, ~)
-            % 重置后直接显示原图，不伪造美颜处理耗时。
-            if ~app.hasSingleFace
-                return;
-            end
-            app.SmoothingSlider.Value = 0;
-            app.WhiteningSlider.Value = 0;
-            app.updateStrengthLabels();
-            try
-                app.beautifiedImage = app.sourceImage;
-                app.currentMetrics = evaluateImage( ...
-                    app.sourceImage, app.sourceImage, 0);
-                app.showImage(app.DetectedAxes, app.beautifiedImage, 'Beauty Preview');
-                app.updateMetrics(app.currentMetrics);
-                app.previewClock = tic;
-                app.StatusLabel.Text = 'Original image restored.';
-            catch exception
-                app.clearDetectionResult();
-                uialert(app.UIFigure, exception.message, 'Reset Failed');
-            end
-        end
-
-        function refreshPreview(app, smoothingStrength, whiteningStrength, updateMetrics)
-            % 只将一次 beautifyImage 调用包在耗时统计中。
-            if nargin < 4, updateMetrics = true; end
+            % 拖拽中限频实时更新
             if ~app.hasSingleFace || isempty(app.sourceImage)
                 return;
             end
-            params = struct( ...
-                'smoothingStrength', smoothingStrength, ...
-                'whiteningStrength', whiteningStrength);
-            try
-                startTime = tic;
-                [outputImage, processingDiagnostics] = beautifyImage( ...
-                    app.previewImage, params, app.previewFaceBox, app.previewContext);
-                elapsedSeconds = toc(startTime);
-                app.lastDiagnostics = processingDiagnostics;
-                if updateMetrics
-                    metrics = evaluateImage(app.previewImage, outputImage, elapsedSeconds);
-                else
-                    metrics = [];
-                end
-            catch exception
-                app.clearDetectionResult();
-                uialert(app.UIFigure, exception.message, 'Beauty Preview Failed');
+            if isSmoothing
+                app.SmoothingValueLabel.Text = sprintf('Smoothing: %d', round(event.Value));
+            else
+                app.WhiteningValueLabel.Text = sprintf('Whitening: %d', round(event.Value));
+            end
+            nowClock = tic;
+            if ~isempty(app.previewClock) && toc(app.previewClock) < 0.05
+                return;
+            end
+            app.previewClock = nowClock;
+            app.updateBeautyPreview(event.Value, isSmoothing);
+        end
+
+        function beautySliderValueChanged(app, ~)
+            if ~app.hasSingleFace || isempty(app.sourceImage)
+                return;
+            end
+            app.SmoothingValueLabel.Text = sprintf('Smoothing: %d', round(app.SmoothingSlider.Value));
+            app.WhiteningValueLabel.Text = sprintf('Whitening: %d', round(app.WhiteningSlider.Value));
+            app.updateBeautyPreview();
+        end
+
+        function updateBeautyPreview(app, liveValue, isSmoothing)
+            if ~app.hasSingleFace || isempty(app.sourceImage)
                 return;
             end
 
+            smoothing = app.SmoothingSlider.Value;
+            whitening = app.WhiteningSlider.Value;
+            if nargin >= 3
+                if isSmoothing
+                    smoothing = liveValue;
+                else
+                    whitening = liveValue;
+                end
+            end
+            params = struct('smoothingStrength', smoothing, ...
+                'whiteningStrength', whitening);
+
+            pipelineStart = tic;
+            try
+                [outputImage, diagnostics] = beautifyImage( ...
+                    app.previewImage, params, app.previewFaceBox, app.previewContext);
+            catch exception
+                uialert(app.UIFigure, exception.message, 'Beauty Processing Failed');
+                return;
+            end
+            elapsedTime = toc(pipelineStart);
+
             app.beautifiedImage = outputImage;
-            if updateMetrics
-                app.currentMetrics = metrics;
-            end
-            app.updateStrengthLabels(smoothingStrength, whiteningStrength);
-            app.showImage(app.DetectedAxes, outputImage, 'Beauty Preview');
-            if updateMetrics
-                app.updateMetrics(metrics);
-            end
-            app.previewClock = tic;
-            app.StatusLabel.Text = 'Beauty preview updated.';
+            app.lastDiagnostics = diagnostics;
+            app.showImage(app.DetectedAxes, outputImage, 'Beauty Preview (效果实时预览)');
+            app.updateMetrics(elapsedTime);
         end
 
-        function updateStrengthLabels(app, smoothingStrength, whiteningStrength)
-            % 同步显示两个滑块的当前强度。
-            if nargin < 2
-                smoothingStrength = app.SmoothingSlider.Value;
-                whiteningStrength = app.WhiteningSlider.Value;
+        function updateMetrics(app, elapsedTime)
+            if isempty(app.previewImage) || isempty(app.beautifiedImage)
+                return;
             end
-            app.SmoothingValueLabel.Text = sprintf( ...
-                'Smoothing: %.0f', smoothingStrength);
-            app.WhiteningValueLabel.Text = sprintf( ...
-                'Whitening: %.0f', whiteningStrength);
+            metrics = evaluateImage(app.previewImage, app.beautifiedImage, elapsedTime);
+            app.currentMetrics = metrics;
+            app.OutputEntropyLabel.Text = sprintf('Entropy: %.4f', metrics.entropy);
+            app.OutputStandardDeviationLabel.Text = sprintf('Standard deviation: %.4f', metrics.standardDeviation);
+            app.OutputAverageGradientLabel.Text = sprintf('Average gradient: %.4f', metrics.averageGradient);
+            app.OutputElapsedTimeLabel.Text = sprintf('Single-image time: %.3f s', metrics.elapsedSeconds);
+
+            % 兼容旧版标签引用
+            app.EntropyLabel.Text = app.OutputEntropyLabel.Text;
+            app.StandardDeviationLabel.Text = app.OutputStandardDeviationLabel.Text;
+            app.AverageGradientLabel.Text = app.OutputAverageGradientLabel.Text;
+            app.ElapsedTimeLabel.Text = app.OutputElapsedTimeLabel.Text;
         end
 
-        function updateMetrics(app, metrics)
-            % 更新独立指标区域中的四项指标。
-            app.EntropyLabel.Text = sprintf('Entropy: %.4f', metrics.entropy);
-            app.StandardDeviationLabel.Text = sprintf( ...
-                'Standard deviation: %.4f', metrics.standardDeviation);
-            app.AverageGradientLabel.Text = sprintf( ...
-                'Average gradient: %.4f', metrics.averageGradient);
-            app.ElapsedTimeLabel.Text = sprintf( ...
-                'Single-image time: %.2f ms', metrics.elapsedSeconds * 1000);
+        function resetMetricsLabels(app)
+            app.EntropyLabel.Text = 'Entropy: --';
+            app.StandardDeviationLabel.Text = 'Standard deviation: --';
+            app.AverageGradientLabel.Text = 'Average gradient: --';
+            app.ElapsedTimeLabel.Text = 'Single-image time: --';
+
+            app.InputEntropyLabel.Text = 'Entropy: --';
+            app.InputStandardDeviationLabel.Text = 'Standard deviation: --';
+            app.InputAverageGradientLabel.Text = 'Average gradient: --';
+            app.InputElapsedTimeLabel.Text = 'Single-image time: --';
+
+            app.OutputEntropyLabel.Text = 'Entropy: --';
+            app.OutputStandardDeviationLabel.Text = 'Standard deviation: --';
+            app.OutputAverageGradientLabel.Text = 'Average gradient: --';
+            app.OutputElapsedTimeLabel.Text = 'Single-image time: --';
+        end
+
+        function oneClickBeautyButtonPushed(app, ~)
+            app.applyOneClickBeauty();
+        end
+
+        function resetBeautyButtonPushed(app, ~)
+            app.resetBeauty();
         end
 
         function saveImageButtonPushed(app, ~)
-            % 保存当前美颜结果并读回校验像素属性。
             if ~app.hasSingleFace || isempty(app.beautifiedImage)
                 uialert(app.UIFigure, ...
-                    'Open an image with a recognizable foreground face before saving.', ...
-                    'No Beauty Result');
+                    'Open an image with a detectable face before saving.', ...
+                    'No Image to Save');
                 return;
             end
 
-            defaultExtension = app.inputFormat;
-            if strcmp(defaultExtension, 'jpg') && ...
-                    app.hasResolutionMetadata(app.inputImageInfo)
-                defaultExtension = 'png';
+            defaultExt = app.inputFormat;
+            if isempty(defaultExt)
+                defaultExt = 'png';
             end
-            defaultName = sprintf('%s_beautified.%s', ...
-                app.inputBaseName, defaultExtension);
+            defaultName = sprintf('%s_beautified.%s', app.inputBaseName, defaultExt);
+
             [fileName, folderPath, filterIndex] = uiputfile( ...
                 {'*.jpg', 'JPEG Image (*.jpg)'; '*.png', 'PNG Image (*.png)'}, ...
                 'Save Beauty Result', defaultName);
@@ -372,7 +425,9 @@ classdef faceDetectionApp < matlab.apps.AppBase
             [outputImage, saveDiagnostics] = beautifyImage( ...
                 app.sourceImage, fullParams, app.faceBox, fullContext);
             app.lastDiagnostics = saveDiagnostics;
-            app.writeImageWithResolution(outputImage, outputPath, ...
+
+            % 调用解耦的元数据写入工具
+            gui_helpers.ImageMetadataHelper.writeImageWithResolution(outputImage, outputPath, ...
                 app.inputImageInfo);
             outputImage = imread(outputPath);
             outputInfo = imfinfo(outputPath);
@@ -384,67 +439,18 @@ classdef faceDetectionApp < matlab.apps.AppBase
             sameChannels = ndims(outputImage) == 3 && outputSize(3) == 3;
             sameAspectRatio = outputSize(2) * inputSize(1) == ...
                 inputSize(2) * outputSize(1);
-            sameResolution = app.hasSameResolution( ...
+            sameResolution = gui_helpers.ImageMetadataHelper.hasSameResolution( ...
                 app.inputImageInfo, outputInfo);
             if ~samePixels || ~sameChannels || ~sameAspectRatio || ...
                     ~sameResolution
                 error('faceDetectionApp:SaveVerificationFailed', ...
-                    '保存结果的尺寸、通道、比例或分辨率与输入图像不一致。');
+                    'The saved image does not preserve the input size, aspect ratio, or resolution.');
             end
 
-            app.StatusLabel.Text = 'Beauty result saved successfully.';
+            app.StatusLabel.Text = sprintf('Saved: %s', outputPath);
         end
 
-        function clearLoadedImage(app)
-            % 清空已加载图像和所有美颜状态。
-            app.sourceImage = [];
-            app.previewImage = [];
-            app.previewFaceBox = zeros(0, 4);
-            app.previewContext = [];
-            app.previewScale = 1;
-            app.inputFormat = '';
-            app.inputBaseName = '';
-            app.inputImageInfo = [];
-            app.lastDiagnostics = [];
-            cla(app.SourceAxes);
-            title(app.SourceAxes, 'Original Image');
-            app.clearDetectionResult();
-        end
-
-        function clearDetectionResult(app)
-            % 清空结果、指标和 faceBox，并禁止处理旧数据。
-            app.beautifiedImage = [];
-            app.previewImage = [];
-            app.previewFaceBox = zeros(0, 4);
-            app.previewContext = [];
-            app.previewScale = 1;
-            app.faceBox = zeros(0, 4);
-            app.beautyContext = [];
-            app.currentMetrics = [];
-            app.lastDiagnostics = [];
-            app.previewClock = [];
-            app.hasSingleFace = false;
-            if ~isempty(app.SmoothingSlider)
-                app.SmoothingSlider.Value = 25;
-                app.WhiteningSlider.Value = 15;
-                app.updateStrengthLabels();
-            end
-            app.setBeautyControlsEnabled(false);
-            cla(app.DetectedAxes);
-            title(app.DetectedAxes, 'Beauty Preview');
-            app.EntropyLabel.Text = 'Entropy: --';
-            app.StandardDeviationLabel.Text = 'Standard deviation: --';
-            app.AverageGradientLabel.Text = 'Average gradient: --';
-            app.ElapsedTimeLabel.Text = 'Single-image time: --';
-            app.StatusLabel.Text = 'Open a uint8 RGB JPG or PNG image.';
-        end
-
-        function setBeautyControlsEnabled(app, isEnabled)
-            if isEnabled
-                state = 'on';
-            else
-                state = 'off';
-            end
+        function setControlsEnable(app, state)
             app.SaveImageButton.Enable = state;
             app.OneClickBeautyButton.Enable = state;
             app.ResetBeautyButton.Enable = state;
@@ -453,7 +459,7 @@ classdef faceDetectionApp < matlab.apps.AppBase
         end
 
         function showImage(~, targetAxes, imageData, titleText)
-            % 在指定 UIAxes 中按原比例显示图像。
+            % 在指定 UIAxes 中按原比例显示图像并注入暗色视窗样式。
             imageHandle = findobj(targetAxes, 'Type', 'image');
             if ~isempty(imageHandle) && isvalid(imageHandle(1))
                 imageHandle(1).CData = imageData;
@@ -463,234 +469,443 @@ classdef faceDetectionApp < matlab.apps.AppBase
             end
             axis(targetAxes, 'image');
             axis(targetAxes, 'off');
-            title(targetAxes, titleText, 'Interpreter', 'none');
+            gui_helpers.GuiTheme.applyAxesStyle(targetAxes, titleText);
         end
 
-        function format = normalizedFormat(~, extension)
-            % 统一保存格式名称，非 PNG 输入按 JPG 处理。
-            if strcmpi(extension, '.png')
-                format = 'png';
-            else
-                format = 'jpg';
+        % =================== 视频接口事件桩 ===================
+        function openVideoButtonPushed(app, ~)
+            [fileName, folderPath] = uigetfile( ...
+                {'*.mp4;*.avi;*.mov', 'Video Files (*.mp4, *.avi, *.mov)'}, ...
+                'Open Video');
+            if isequal(fileName, 0)
+                return;
             end
-        end
-
-        function hasResolution = hasResolutionMetadata(~, imageInfo)
-            % 有分辨率元数据时默认选择可携带该元数据的 PNG。
-            hasResolution = isstruct(imageInfo) && isscalar(imageInfo) && ...
-                all(isfield(imageInfo, {'XResolution', 'YResolution'})) && ...
-                isnumeric(imageInfo.XResolution) && ...
-                isnumeric(imageInfo.YResolution) && ...
-                isscalar(imageInfo.XResolution) && ...
-                isscalar(imageInfo.YResolution) && ...
-                isfinite(imageInfo.XResolution) && ...
-                isfinite(imageInfo.YResolution) && ...
-                imageInfo.XResolution > 0 && imageInfo.YResolution > 0;
-        end
-
-        function writeImageWithResolution(~, imageData, outputPath, imageInfo)
-            % 保存时传递输入文件的像素分辨率元数据。
-            options = {};
-            [~, ~, extension] = fileparts(outputPath);
-            if strcmpi(extension, '.png') && ...
-                    isstruct(imageInfo) && isscalar(imageInfo) && ...
-                    all(isfield(imageInfo, {'XResolution', 'YResolution'})) && ...
-                    isnumeric(imageInfo.XResolution) && ...
-                    isnumeric(imageInfo.YResolution) && ...
-                    isfinite(imageInfo.XResolution) && ...
-                    isfinite(imageInfo.YResolution) && ...
-                    imageInfo.XResolution > 0 && imageInfo.YResolution > 0
-                resolution = double([imageInfo.XResolution, ...
-                    imageInfo.YResolution]);
-                resolutionUnit = 'unknown';
-                if isfield(imageInfo, 'ResolutionUnit')
-                    unit = imageInfo.ResolutionUnit;
-                    if isstring(unit) && isscalar(unit)
-                        unit = char(unit);
-                    end
-                    if ischar(unit) && size(unit, 1) == 1
-                        unit = lower(strtrim(unit));
-                        if strcmp(unit, 'meter')
-                            resolutionUnit = 'meter';
-                        elseif strcmp(unit, 'inch')
-                            resolution = resolution * 39.3700787401575;
-                            resolutionUnit = 'meter';
-                        elseif strcmp(unit, 'centimeter')
-                            resolution = resolution * 100;
-                            resolutionUnit = 'meter';
-                        end
-                    end
+            filePath = fullfile(folderPath, fileName);
+            if app.videoHook.openVideoFile(app, filePath)
+                app.MediaInfoLabel.Text = sprintf('%s | %d 帧 | %.1f FPS', ...
+                    fileName, app.videoHook.TotalFrames, app.videoHook.FrameRate);
+                app.VideoTimelineSlider.Limits = [1, app.videoHook.TotalFrames];
+                app.VideoTimelineSlider.Value = 1;
+                app.VideoFrameLabel.Text = sprintf('帧: 1 / %d', app.videoHook.TotalFrames);
+                app.VideoTimecodeLabel.Text = app.videoHook.formatTimecode(1);
+                app.StatusLabel.Text = sprintf('视频源已加载: %s', fileName);
+                % 提取第一帧进行主脸定位与预览
+                try
+                    app.videoHook.VideoReaderObj.CurrentTime = 0;
+                    firstFrame = readFrame(app.videoHook.VideoReaderObj);
+                    app.sourceImage = firstFrame;
+                    app.previewImage = firstFrame;
+                    app.showImage(app.SourceAxes, firstFrame, 'Video Raw Frame (视频原帧)');
+                    app.showImage(app.DetectedAxes, firstFrame, 'Video Beautified (时域美颜效果)');
+                    app.setControlsEnable('on');
+                catch
                 end
-                options = {'XResolution', resolution(1), ...
-                    'YResolution', resolution(2), ...
-                    'ResolutionUnit', resolutionUnit};
-            end
-            imwrite(imageData, outputPath, options{:});
-        end
-
-        function same = hasSameResolution(app, inputInfo, outputInfo)
-            % 只有输入文件声明了分辨率时才执行元数据等值校验。
-            same = true;
-            if ~isstruct(inputInfo) || ~isscalar(inputInfo) || ...
-                    ~all(isfield(inputInfo, {'XResolution', 'YResolution'}))
-                return;
-            end
-            if ~isstruct(outputInfo) || ~isscalar(outputInfo) || ...
-                    ~all(isfield(outputInfo, {'XResolution', 'YResolution'}))
-                same = false;
-                return;
-            end
-            [inputResolution, inputValid] = app.resolutionInMeters(inputInfo);
-            [outputResolution, outputValid] = app.resolutionInMeters(outputInfo);
-            same = inputValid && outputValid && ...
-                all(abs(outputResolution - inputResolution) <= ...
-                max(1, abs(inputResolution) * 1e-6));
-        end
-
-        function [resolution, valid] = resolutionInMeters(~, imageInfo)
-            resolution = double([imageInfo.XResolution, ...
-                imageInfo.YResolution]);
-            valid = all(isfinite(resolution)) && all(resolution > 0);
-            if ~valid || ~isfield(imageInfo, 'ResolutionUnit')
-                return;
-            end
-            unit = imageInfo.ResolutionUnit;
-            if isstring(unit) && isscalar(unit)
-                unit = char(unit);
-            end
-            if ~ischar(unit) || size(unit, 1) ~= 1
-                valid = false;
-                return;
-            end
-            switch lower(strtrim(unit))
-                case 'meter'
-                case 'inch'
-                    resolution = resolution * 39.3700787401575;
-                case 'centimeter'
-                    resolution = resolution * 100;
-                otherwise
-                    % unknown 单位只能比较原始数值，不能进行物理换算。
             end
         end
 
+        function exportVideoButtonPushed(app, ~)
+            [fileName, folderPath] = uiputfile('*.mp4', 'Export Beautified Video', 'beautified_video.mp4');
+            if isequal(fileName, 0), return; end
+            app.videoHook.exportVideo(app, fullfile(folderPath, fileName));
+        end
+
+        function videoPlayButtonPushed(app, ~)
+            app.videoHook.togglePlay(app);
+        end
+
+        function videoStepBackButtonPushed(app, ~)
+            app.videoHook.stepFrame(app, -1);
+        end
+
+        function videoStepForwardButtonPushed(app, ~)
+            app.videoHook.stepFrame(app, 1);
+        end
+
+        function videoTimelineChanged(app, event)
+            target = round(event.Value);
+            app.videoHook.seekFrame(app, target);
+        end
+
+        % =================== GUI 整体组件装配 ===================
         function createComponents(app)
-            % 创建 GUI 组件并设置双栏图像布局。
+            % 实例化视频状态机
+            app.videoHook = gui_helpers.VideoInterfaceHook();
+
+            % 创建主窗口 (1260x820)
             app.UIFigure = uifigure('Visible', 'off');
-            app.UIFigure.Position = [100, 100, 1200, 760];
-            app.UIFigure.Name = 'Portrait Beauty';
+            app.UIFigure.Position = [80, 80, 1260, 820];
+            gui_helpers.GuiTheme.applyFigureStyle(app.UIFigure, 'VisionGlow Studio - 人脸美颜工作台');
 
-            mainGrid = uigridlayout(app.UIFigure, [4, 2]);
-            mainGrid.RowHeight = {'fit', '1x', 'fit', 'fit'};
-            mainGrid.ColumnWidth = {'1x', '1x'};
-            mainGrid.Padding = [12, 12, 12, 12];
+            % 整体三行布局：[顶栏: fit, 主工作区: 1x, 状态栏: fit]
+            rootGrid = uigridlayout(app.UIFigure, [3, 1]);
+            gui_helpers.GuiTheme.applyGridLayout(rootGrid, gui_helpers.GuiTheme.BgRoot);
+            rootGrid.RowHeight = {'fit', '1x', 'fit'};
+            rootGrid.Padding = [12, 10, 12, 10];
+            rootGrid.RowSpacing = 8;
 
-            controlsGrid = uigridlayout(mainGrid, [2, 6]);
-            controlsGrid.Layout.Row = 1;
-            controlsGrid.Layout.Column = [1, 2];
-            controlsGrid.RowHeight = {'fit', 'fit'};
-            controlsGrid.ColumnWidth = {'fit', 'fit', 'fit', 'fit', '1x', '1x'};
+            % 1. 顶栏
+            app.createHeaderBar(rootGrid);
 
-            app.OpenImageButton = uibutton(controlsGrid, 'push');
-            app.OpenImageButton.Text = 'Open Image';
+            % 2. 主工作区（左展示区 1x + 右控制侧栏 320px）
+            app.createMainWorkspace(rootGrid);
+
+            % 3. 底部状态栏
+            app.createStatusBar(rootGrid);
+
+            % 默认切到单图模式
+            app.switchMode('image');
+            app.UIFigure.Visible = 'on';
+        end
+
+        function createHeaderBar(app, parentGrid)
+            headerCard = uipanel(parentGrid);
+            gui_helpers.GuiTheme.applyPanelStyle(headerCard);
+            headerCard.Layout.Row = 1;
+            headerCard.Layout.Column = 1;
+
+            headerGrid = uigridlayout(headerCard, [1, 5]);
+            gui_helpers.GuiTheme.applyGridLayout(headerGrid, gui_helpers.GuiTheme.BgCard);
+            headerGrid.RowHeight = {'fit'};
+            headerGrid.ColumnWidth = {'fit', 'fit', '1x', 'fit', 'fit'};
+            headerGrid.Padding = [10, 6, 10, 6];
+            headerGrid.ColumnSpacing = 12;
+
+            % 标题 Logo
+            titleLabel = uilabel(headerGrid);
+            titleLabel.Text = 'VisionGlow Studio';
+            gui_helpers.GuiTheme.applyLabelStyle(titleLabel, 'highlight');
+            titleLabel.FontSize = 13;
+
+            % 模式切换按钮组
+            modeGroup = uigridlayout(headerGrid, [1, 2]);
+            gui_helpers.GuiTheme.applyGridLayout(modeGroup, gui_helpers.GuiTheme.BgCard);
+            modeGroup.Padding = [0, 0, 0, 0];
+            modeGroup.ColumnSpacing = 4;
+            modeGroup.RowHeight = {'fit'};
+            modeGroup.ColumnWidth = {'fit', 'fit'};
+
+            app.SingleImageModeButton = uibutton(modeGroup, 'push');
+            app.SingleImageModeButton.Text = '单图模式';
+            gui_helpers.GuiTheme.applyButtonStyle(app.SingleImageModeButton, 'active_mode');
+            app.SingleImageModeButton.ButtonPushedFcn = @(~,~) app.switchMode('image');
+
+            app.VideoModeButton = uibutton(modeGroup, 'push');
+            app.VideoModeButton.Text = '视频模式 (规划中)';
+            gui_helpers.GuiTheme.applyButtonStyle(app.VideoModeButton, 'secondary');
+            app.VideoModeButton.ButtonPushedFcn = @(~,~) app.switchMode('video');
+
+            % 媒体源元数据信息
+            app.MediaInfoLabel = uilabel(headerGrid);
+            app.MediaInfoLabel.Text = 'No Media Loaded';
+            app.MediaInfoLabel.HorizontalAlignment = 'center';
+            gui_helpers.GuiTheme.applyLabelStyle(app.MediaInfoLabel, 'muted');
+
+            % 单图操作按钮 (固定占位第 4 和第 5 列)
+            app.OpenImageButton = uibutton(headerGrid, 'push');
+            app.OpenImageButton.Text = '打开图像...';
             app.OpenImageButton.Layout.Row = 1;
-            app.OpenImageButton.Layout.Column = 1;
-            app.OpenImageButton.ButtonPushedFcn = @(~, event) ...
-                app.openImageButtonPushed(event);
+            app.OpenImageButton.Layout.Column = 4;
+            gui_helpers.GuiTheme.applyButtonStyle(app.OpenImageButton, 'secondary');
+            app.OpenImageButton.ButtonPushedFcn = @(~, event) app.openImageButtonPushed(event);
 
-            app.OneClickBeautyButton = uibutton(controlsGrid, 'push');
-            app.OneClickBeautyButton.Text = 'One-click Beauty';
-            app.OneClickBeautyButton.Layout.Row = 1;
-            app.OneClickBeautyButton.Layout.Column = 2;
-            app.OneClickBeautyButton.Enable = 'off';
-            app.OneClickBeautyButton.ButtonPushedFcn = @(~, event) ...
-                app.oneClickBeautyButtonPushed(event);
+            app.SaveImageButton = uibutton(headerGrid, 'push');
+            app.SaveImageButton.Text = '保存结果';
+            app.SaveImageButton.Layout.Row = 1;
+            app.SaveImageButton.Layout.Column = 5;
+            gui_helpers.GuiTheme.applyButtonStyle(app.SaveImageButton, 'primary');
+            app.SaveImageButton.Enable = 'off';
+            app.SaveImageButton.ButtonPushedFcn = @(~, event) app.saveImageButtonPushed(event);
 
-            app.ResetBeautyButton = uibutton(controlsGrid, 'push');
-            app.ResetBeautyButton.Text = 'Reset Original';
-            app.ResetBeautyButton.Layout.Row = 1;
-            app.ResetBeautyButton.Layout.Column = 3;
-            app.ResetBeautyButton.Enable = 'off';
-            app.ResetBeautyButton.ButtonPushedFcn = @(~, event) ...
-                app.resetBeautyButtonPushed(event);
+            % 视频操作按钮（初始隐藏，共用第 4 和第 5 列避免换行）
+            app.OpenVideoButton = uibutton(headerGrid, 'push');
+            app.OpenVideoButton.Text = '打开视频...';
+            app.OpenVideoButton.Layout.Row = 1;
+            app.OpenVideoButton.Layout.Column = 4;
+            gui_helpers.GuiTheme.applyButtonStyle(app.OpenVideoButton, 'secondary');
+            app.OpenVideoButton.Visible = 'off';
+            app.OpenVideoButton.ButtonPushedFcn = @(~, event) app.openVideoButtonPushed(event);
 
-            app.SmoothingValueLabel = uilabel(controlsGrid);
+            app.ExportVideoButton = uibutton(headerGrid, 'push');
+            app.ExportVideoButton.Text = '导出视频';
+            app.ExportVideoButton.Layout.Row = 1;
+            app.ExportVideoButton.Layout.Column = 5;
+            gui_helpers.GuiTheme.applyButtonStyle(app.ExportVideoButton, 'primary');
+            app.ExportVideoButton.Visible = 'off';
+            app.ExportVideoButton.ButtonPushedFcn = @(~, event) app.exportVideoButtonPushed(event);
+        end
+
+        function createMainWorkspace(app, parentGrid)
+            workspaceGrid = uigridlayout(parentGrid, [1, 2]);
+            gui_helpers.GuiTheme.applyGridLayout(workspaceGrid, gui_helpers.GuiTheme.BgRoot);
+            workspaceGrid.Layout.Row = 2;
+            workspaceGrid.Layout.Column = 1;
+            workspaceGrid.RowHeight = {'1x'};
+            workspaceGrid.ColumnWidth = {'1x', 320};
+            workspaceGrid.Padding = [0, 0, 0, 0];
+            workspaceGrid.ColumnSpacing = 12;
+
+            % 左主展示区
+            app.createDisplayAndMetricsArea(workspaceGrid);
+
+            % 右参数控制侧栏
+            app.createParametersSidebar(workspaceGrid);
+        end
+
+        function createDisplayAndMetricsArea(app, parentGrid)
+            % 左侧展示区布局：[双视窗: 1x, 视频时间轴: fit, 双客观指标卡片: fit]
+            leftGrid = uigridlayout(parentGrid, [3, 1]);
+            gui_helpers.GuiTheme.applyGridLayout(leftGrid, gui_helpers.GuiTheme.BgRoot);
+            leftGrid.Layout.Row = 1;
+            leftGrid.Layout.Column = 1;
+            leftGrid.RowHeight = {'1x', 'fit', 'fit'};
+            leftGrid.Padding = [0, 0, 0, 0];
+            leftGrid.RowSpacing = 8;
+
+            % 1. 双视窗并排 (SourceAxes & DetectedAxes)
+            axesGrid = uigridlayout(leftGrid, [1, 2]);
+            gui_helpers.GuiTheme.applyGridLayout(axesGrid, gui_helpers.GuiTheme.BgRoot);
+            axesGrid.Layout.Row = 1;
+            axesGrid.Layout.Column = 1;
+            axesGrid.RowHeight = {'1x'};
+            axesGrid.ColumnWidth = {'1x', '1x'};
+            axesGrid.Padding = [0, 0, 0, 0];
+            axesGrid.ColumnSpacing = 8;
+
+            app.SourceAxes = uiaxes(axesGrid);
+            gui_helpers.GuiTheme.applyAxesStyle(app.SourceAxes, 'Original Image (输入原图)');
+
+            app.DetectedAxes = uiaxes(axesGrid);
+            gui_helpers.GuiTheme.applyAxesStyle(app.DetectedAxes, 'Beauty Preview (效果实时预览)');
+
+            % 2. 视频时间轴工具栏（仅在视频模式下 Visible='on'）
+            app.VideoToolbar = uipanel(leftGrid);
+            gui_helpers.GuiTheme.applySubPanelStyle(app.VideoToolbar);
+            app.VideoToolbar.Layout.Row = 2;
+            app.VideoToolbar.Layout.Column = 1;
+            app.VideoToolbar.Visible = 'off';
+
+            vidGrid = uigridlayout(app.VideoToolbar, [1, 6]);
+            gui_helpers.GuiTheme.applyGridLayout(vidGrid, gui_helpers.GuiTheme.BgCardSub);
+            vidGrid.RowHeight = {'fit'};
+            vidGrid.ColumnWidth = {'fit', 'fit', 'fit', '1x', 'fit', 'fit'};
+            vidGrid.Padding = [8, 4, 8, 4];
+            vidGrid.ColumnSpacing = 8;
+
+            app.VideoStepBackButton = uibutton(vidGrid, 'push');
+            app.VideoStepBackButton.Text = '◀ -1F';
+            gui_helpers.GuiTheme.applyButtonStyle(app.VideoStepBackButton, 'secondary');
+            app.VideoStepBackButton.ButtonPushedFcn = @(~,~) app.videoStepBackButtonPushed();
+
+            app.VideoPlayButton = uibutton(vidGrid, 'push');
+            app.VideoPlayButton.Text = '播放预览';
+            gui_helpers.GuiTheme.applyButtonStyle(app.VideoPlayButton, 'primary');
+            app.VideoPlayButton.ButtonPushedFcn = @(~,~) app.videoPlayButtonPushed();
+
+            app.VideoStepForwardButton = uibutton(vidGrid, 'push');
+            app.VideoStepForwardButton.Text = '+1F ▶';
+            gui_helpers.GuiTheme.applyButtonStyle(app.VideoStepForwardButton, 'secondary');
+            app.VideoStepForwardButton.ButtonPushedFcn = @(~,~) app.videoStepForwardButtonPushed();
+
+            app.VideoTimelineSlider = uislider(vidGrid);
+            app.VideoTimelineSlider.Limits = [1, 100];
+            app.VideoTimelineSlider.Value = 1;
+            gui_helpers.GuiTheme.applySliderStyle(app.VideoTimelineSlider);
+            app.VideoTimelineSlider.ValueChangedFcn = @(~, e) app.videoTimelineChanged(e);
+
+            app.VideoTimecodeLabel = uilabel(vidGrid);
+            app.VideoTimecodeLabel.Text = '00:00:00:00';
+            gui_helpers.GuiTheme.applyLabelStyle(app.VideoTimecodeLabel, 'highlight');
+
+            app.VideoFrameLabel = uilabel(vidGrid);
+            app.VideoFrameLabel.Text = '帧: 1 / 1';
+            gui_helpers.GuiTheme.applyLabelStyle(app.VideoFrameLabel, 'muted');
+
+            % 3. 客观指标卡片区（双卡片横向排布）
+            metricsGrid = uigridlayout(leftGrid, [1, 2]);
+            gui_helpers.GuiTheme.applyGridLayout(metricsGrid, gui_helpers.GuiTheme.BgRoot);
+            metricsGrid.Layout.Row = 3;
+            metricsGrid.Layout.Column = 1;
+            metricsGrid.RowHeight = {'fit'};
+            metricsGrid.ColumnWidth = {'1x', '1x'};
+            metricsGrid.Padding = [0, 0, 0, 0];
+            metricsGrid.ColumnSpacing = 8;
+
+            % 原图指标卡片
+            inputCard = app.createStandardMetricsCard( ...
+                metricsGrid, 1, 1, 'InputMetricsPanel (原图客观指标基准)', 'amber');
+            app.InputMetricsPanel = inputCard.panel;
+            app.InputEntropyLabel = inputCard.entropy;
+            app.InputStandardDeviationLabel = inputCard.stdDev;
+            app.InputAverageGradientLabel = inputCard.gradient;
+            app.InputElapsedTimeLabel = inputCard.time;
+
+            % 效果指标卡片
+            outputCard = app.createStandardMetricsCard( ...
+                metricsGrid, 1, 2, 'OutputMetricsPanel (美颜效果客观指标)', 'highlight');
+            app.OutputMetricsPanel = outputCard.panel;
+            app.OutputEntropyLabel = outputCard.entropy;
+            app.OutputStandardDeviationLabel = outputCard.stdDev;
+            app.OutputAverageGradientLabel = outputCard.gradient;
+            app.OutputElapsedTimeLabel = outputCard.time;
+
+            % 兼容旧句柄
+            app.MetricsPanel = app.OutputMetricsPanel;
+            app.EntropyLabel = app.OutputEntropyLabel;
+            app.StandardDeviationLabel = app.OutputStandardDeviationLabel;
+            app.AverageGradientLabel = app.OutputAverageGradientLabel;
+            app.ElapsedTimeLabel = app.OutputElapsedTimeLabel;
+        end
+
+        function card = createStandardMetricsCard(~, parentGrid, row, col, titleText, styleRole)
+            panel = uipanel(parentGrid);
+            gui_helpers.GuiTheme.applyPanelStyle(panel, titleText);
+            panel.Layout.Row = row;
+            panel.Layout.Column = col;
+
+            metricsGrid = uigridlayout(panel, [2, 2]);
+            gui_helpers.GuiTheme.applyGridLayout(metricsGrid, gui_helpers.GuiTheme.BgCard);
+            metricsGrid.RowHeight = {'fit', 'fit'};
+            metricsGrid.ColumnWidth = {'1x', '1x'};
+            metricsGrid.Padding = [10, 6, 10, 6];
+            metricsGrid.RowSpacing = 4;
+            metricsGrid.ColumnSpacing = 8;
+
+            entropyLabel = uilabel(metricsGrid);
+            entropyLabel.Text = 'Entropy: --';
+            gui_helpers.GuiTheme.applyLabelStyle(entropyLabel, styleRole);
+
+            stdDevLabel = uilabel(metricsGrid);
+            stdDevLabel.Text = 'Standard deviation: --';
+            gui_helpers.GuiTheme.applyLabelStyle(stdDevLabel, styleRole);
+
+            gradientLabel = uilabel(metricsGrid);
+            gradientLabel.Text = 'Average gradient: --';
+            gui_helpers.GuiTheme.applyLabelStyle(gradientLabel, styleRole);
+
+            timeLabel = uilabel(metricsGrid);
+            timeLabel.Text = 'Single-image time: --';
+            gui_helpers.GuiTheme.applyLabelStyle(timeLabel, styleRole);
+
+            card = struct( ...
+                'panel', panel, ...
+                'entropy', entropyLabel, ...
+                'stdDev', stdDevLabel, ...
+                'gradient', gradientLabel, ...
+                'time', timeLabel);
+        end
+
+        function createParametersSidebar(app, parentGrid)
+            sidebarCard = uipanel(parentGrid);
+            gui_helpers.GuiTheme.applyPanelStyle(sidebarCard, '美颜核心控制参数');
+            sidebarCard.Layout.Row = 1;
+            sidebarCard.Layout.Column = 2;
+
+            sideGrid = uigridlayout(sidebarCard, [7, 1]);
+            gui_helpers.GuiTheme.applyGridLayout(sideGrid, gui_helpers.GuiTheme.BgCard);
+            sideGrid.RowHeight = {'fit', 'fit', 'fit', 'fit', 'fit', 'fit', '1x'};
+            sideGrid.Padding = [12, 12, 12, 12];
+            sideGrid.RowSpacing = 14;
+
+            % 1. 磨皮控制区
+            smoothBox = uipanel(sideGrid);
+            gui_helpers.GuiTheme.applySubPanelStyle(smoothBox);
+            smoothGrid = uigridlayout(smoothBox, [3, 1]);
+            gui_helpers.GuiTheme.applyGridLayout(smoothGrid, gui_helpers.GuiTheme.BgCardSub);
+            smoothGrid.RowHeight = {'fit', 'fit', 'fit'};
+            smoothGrid.Padding = [8, 8, 8, 8];
+            smoothGrid.RowSpacing = 4;
+
+            app.SmoothingValueLabel = uilabel(smoothGrid);
             app.SmoothingValueLabel.Text = 'Smoothing: 25';
-            app.SmoothingValueLabel.Layout.Row = 2;
-            app.SmoothingValueLabel.Layout.Column = 1;
-            app.SmoothingSlider = uislider(controlsGrid);
+            gui_helpers.GuiTheme.applyLabelStyle(app.SmoothingValueLabel, 'highlight');
+
+            app.SmoothingSlider = uislider(smoothGrid);
             app.SmoothingSlider.Limits = [0, 100];
             app.SmoothingSlider.Value = 25;
             app.SmoothingSlider.MajorTicks = 0:20:100;
-            app.SmoothingSlider.Layout.Row = 2;
-            app.SmoothingSlider.Layout.Column = [2, 3];
             app.SmoothingSlider.Enable = 'off';
+            gui_helpers.GuiTheme.applySliderStyle(app.SmoothingSlider);
             app.SmoothingSlider.ValueChangingFcn = @(~, event) ...
                 app.beautySliderValueChanging(event, true);
             app.SmoothingSlider.ValueChangedFcn = @(~, event) ...
                 app.beautySliderValueChanged(event);
 
-            app.WhiteningValueLabel = uilabel(controlsGrid);
+            smoothDesc = uilabel(smoothGrid);
+            smoothDesc.Text = '淡化细纹斑点，智能保护五官轮廓';
+            gui_helpers.GuiTheme.applyLabelStyle(smoothDesc, 'muted');
+
+            % 2. 美白控制区
+            whiteBox = uipanel(sideGrid);
+            gui_helpers.GuiTheme.applySubPanelStyle(whiteBox);
+            whiteGrid = uigridlayout(whiteBox, [3, 1]);
+            gui_helpers.GuiTheme.applyGridLayout(whiteGrid, gui_helpers.GuiTheme.BgCardSub);
+            whiteGrid.RowHeight = {'fit', 'fit', 'fit'};
+            whiteGrid.Padding = [8, 8, 8, 8];
+            whiteGrid.RowSpacing = 4;
+
+            app.WhiteningValueLabel = uilabel(whiteGrid);
             app.WhiteningValueLabel.Text = 'Whitening: 15';
-            app.WhiteningValueLabel.Layout.Row = 2;
-            app.WhiteningValueLabel.Layout.Column = 4;
-            app.WhiteningSlider = uislider(controlsGrid);
+            gui_helpers.GuiTheme.applyLabelStyle(app.WhiteningValueLabel, 'highlight');
+
+            app.WhiteningSlider = uislider(whiteGrid);
             app.WhiteningSlider.Limits = [0, 100];
             app.WhiteningSlider.Value = 15;
             app.WhiteningSlider.MajorTicks = 0:20:100;
-            app.WhiteningSlider.Layout.Row = 2;
-            app.WhiteningSlider.Layout.Column = [5, 6];
             app.WhiteningSlider.Enable = 'off';
+            gui_helpers.GuiTheme.applySliderStyle(app.WhiteningSlider);
             app.WhiteningSlider.ValueChangingFcn = @(~, event) ...
                 app.beautySliderValueChanging(event, false);
             app.WhiteningSlider.ValueChangedFcn = @(~, event) ...
                 app.beautySliderValueChanged(event);
 
-            app.SaveImageButton = uibutton(controlsGrid, 'push');
-            app.SaveImageButton.Text = 'Save Image';
-            app.SaveImageButton.Layout.Row = 1;
-            app.SaveImageButton.Layout.Column = [5, 6];
-            app.SaveImageButton.Enable = 'off';
-            app.SaveImageButton.ButtonPushedFcn = @(~, event) ...
-                app.saveImageButtonPushed(event);
+            whiteDesc = uilabel(whiteGrid);
+            whiteDesc.Text = '肤色均匀提亮，避免假白与偏色失真';
+            gui_helpers.GuiTheme.applyLabelStyle(whiteDesc, 'muted');
 
-            app.SourceAxes = uiaxes(mainGrid);
-            app.SourceAxes.Layout.Row = 2;
-            app.SourceAxes.Layout.Column = 1;
-            title(app.SourceAxes, 'Original Image');
-            axis(app.SourceAxes, 'off');
+            % 3. 视频模式专属：时域平滑防闪烁开关
+            app.DeflickerCheckBox = uicheckbox(sideGrid);
+            app.DeflickerCheckBox.Text = '启用视频时域防闪烁 (Deflicker)';
+            app.DeflickerCheckBox.FontColor = gui_helpers.GuiTheme.TextHighlight;
+            app.DeflickerCheckBox.Value = true;
+            app.DeflickerCheckBox.Visible = 'off';
 
-            app.DetectedAxes = uiaxes(mainGrid);
-            app.DetectedAxes.Layout.Row = 2;
-            app.DetectedAxes.Layout.Column = 2;
-            title(app.DetectedAxes, 'Beauty Preview');
-            axis(app.DetectedAxes, 'off');
+            % 4. 一键美颜按钮
+            app.OneClickBeautyButton = uibutton(sideGrid, 'push');
+            app.OneClickBeautyButton.Text = '一键美颜 (One-click Beauty)';
+            gui_helpers.GuiTheme.applyButtonStyle(app.OneClickBeautyButton, 'primary');
+            app.OneClickBeautyButton.Enable = 'off';
+            app.OneClickBeautyButton.ButtonPushedFcn = @(~, event) ...
+                app.oneClickBeautyButtonPushed(event);
 
-            app.MetricsPanel = uipanel(mainGrid);
-            app.MetricsPanel.Title = 'Current Metrics';
-            app.MetricsPanel.Layout.Row = 3;
-            app.MetricsPanel.Layout.Column = [1, 2];
-            metricsGrid = uigridlayout(app.MetricsPanel, [1, 4]);
-            metricsGrid.ColumnWidth = {'1x', '1x', '1x', '1x'};
-            app.EntropyLabel = uilabel(metricsGrid);
-            app.EntropyLabel.Text = 'Entropy: --';
-            app.EntropyLabel.HorizontalAlignment = 'center';
-            app.StandardDeviationLabel = uilabel(metricsGrid);
-            app.StandardDeviationLabel.Text = 'Standard deviation: --';
-            app.StandardDeviationLabel.HorizontalAlignment = 'center';
-            app.AverageGradientLabel = uilabel(metricsGrid);
-            app.AverageGradientLabel.Text = 'Average gradient: --';
-            app.AverageGradientLabel.HorizontalAlignment = 'center';
-            app.ElapsedTimeLabel = uilabel(metricsGrid);
-            app.ElapsedTimeLabel.Text = 'Single-image time: --';
-            app.ElapsedTimeLabel.HorizontalAlignment = 'center';
+            % 5. 重置原图按钮
+            app.ResetBeautyButton = uibutton(sideGrid, 'push');
+            app.ResetBeautyButton.Text = '重置原图 (Reset Original)';
+            gui_helpers.GuiTheme.applyButtonStyle(app.ResetBeautyButton, 'secondary');
+            app.ResetBeautyButton.Enable = 'off';
+            app.ResetBeautyButton.ButtonPushedFcn = @(~, event) ...
+                app.resetBeautyButtonPushed(event);
+        end
 
-            app.StatusLabel = uilabel(mainGrid);
+        function createStatusBar(app, parentGrid)
+            statusBarPanel = uipanel(parentGrid);
+            gui_helpers.GuiTheme.applySubPanelStyle(statusBarPanel);
+            statusBarPanel.Layout.Row = 3;
+            statusBarPanel.Layout.Column = 1;
+
+            statusGrid = uigridlayout(statusBarPanel, [1, 2]);
+            gui_helpers.GuiTheme.applyGridLayout(statusGrid, gui_helpers.GuiTheme.BgCardSub);
+            statusGrid.RowHeight = {'fit'};
+            statusGrid.ColumnWidth = {'1x', 'fit'};
+            statusGrid.Padding = [8, 3, 8, 3];
+
+            app.StatusLabel = uilabel(statusGrid);
             app.StatusLabel.Text = 'Open a uint8 RGB JPG or PNG image.';
-            app.StatusLabel.HorizontalAlignment = 'center';
-            app.StatusLabel.Layout.Row = 4;
-            app.StatusLabel.Layout.Column = [1, 2];
+            app.StatusLabel.HorizontalAlignment = 'left';
+            gui_helpers.GuiTheme.applyLabelStyle(app.StatusLabel, 'primary');
 
-            app.UIFigure.Visible = 'on';
+            techLabel = uilabel(statusGrid);
+            techLabel.Text = 'MATLAB R2024a App Designer';
+            gui_helpers.GuiTheme.applyLabelStyle(techLabel, 'muted');
         end
     end
 
@@ -706,67 +921,132 @@ classdef faceDetectionApp < matlab.apps.AppBase
             end
         end
 
+        function onVideoFrameChanged(app, frameIndex)
+            % 响应视频帧改变事件
+            app.VideoTimecodeLabel.Text = app.videoHook.formatTimecode(frameIndex);
+            app.VideoFrameLabel.Text = sprintf('帧: %d / %d', frameIndex, app.videoHook.TotalFrames);
+            app.VideoTimelineSlider.Value = frameIndex;
+            if ~isempty(app.videoHook.VideoReaderObj) && isvalid(app.videoHook.VideoReaderObj)
+                try
+                    app.videoHook.VideoReaderObj.CurrentTime = max(0, (frameIndex - 1) / app.videoHook.FrameRate);
+                    frame = readFrame(app.videoHook.VideoReaderObj);
+                    app.showImage(app.SourceAxes, frame, 'Video Raw Frame (视频原帧)');
+                    app.showImage(app.DetectedAxes, frame, 'Video Beautified (时域美颜效果)');
+                catch
+                end
+            end
+        end
+
+        function switchMode(app, targetMode)
+            % 切换单图美颜与视频美颜工作模式
+            app.CurrentMode = targetMode;
+            if strcmp(targetMode, 'image')
+                app.SingleImageModeButton.BackgroundColor = gui_helpers.GuiTheme.BtnActiveBg;
+                app.SingleImageModeButton.FontColor = [1, 1, 1];
+                app.VideoModeButton.BackgroundColor = gui_helpers.GuiTheme.BtnSecondaryBg;
+                app.VideoModeButton.FontColor = gui_helpers.GuiTheme.TextMuted;
+
+                app.OpenImageButton.Visible = 'on';
+                app.SaveImageButton.Visible = 'on';
+                app.OpenVideoButton.Visible = 'off';
+                app.ExportVideoButton.Visible = 'off';
+
+                app.VideoToolbar.Visible = 'off';
+                app.DeflickerCheckBox.Visible = 'off';
+                title(app.SourceAxes, 'Original Image (输入原图)');
+                title(app.DetectedAxes, 'Beauty Preview (效果实时预览)');
+                app.StatusLabel.Text = '单图模式就绪：请打开 uint8 RGB 格式的 JPG 或 PNG 图像。';
+            else
+                app.SingleImageModeButton.BackgroundColor = gui_helpers.GuiTheme.BtnSecondaryBg;
+                app.SingleImageModeButton.FontColor = gui_helpers.GuiTheme.TextMuted;
+                app.VideoModeButton.BackgroundColor = gui_helpers.GuiTheme.BtnActiveBg;
+                app.VideoModeButton.FontColor = [1, 1, 1];
+
+                app.OpenImageButton.Visible = 'off';
+                app.SaveImageButton.Visible = 'off';
+                app.OpenVideoButton.Visible = 'on';
+                app.ExportVideoButton.Visible = 'on';
+
+                app.VideoToolbar.Visible = 'on';
+                app.DeflickerCheckBox.Visible = 'on';
+                title(app.SourceAxes, 'Video Raw Frame (视频原帧)');
+                title(app.DetectedAxes, 'Video Beautified (时域美颜效果)');
+                app.StatusLabel.Text = '视频模式就绪：支持打开视频并进行逐帧流式美颜与时域防闪烁预览。';
+            end
+        end
+
         function openImageFile(app, filePath)
-            % 按路径执行与“打开图像”按钮相同的完整流程。
+            % 供无交互或测试自动化的图像打开入口。
             if ~(ischar(filePath) && size(filePath, 1) == 1) && ...
                     ~(isstring(filePath) && isscalar(filePath))
                 error('faceDetectionApp:InvalidInputPath', ...
-                    '输入路径必须是字符向量或字符串标量。');
+                    '文件路径必须是字符向量或字符串标量。');
             end
-            app.openImageFromPath(char(filePath));
-            if ~app.hasSingleFace
+            filePath = char(filePath);
+            if ~isfile(filePath)
                 error('faceDetectionApp:OpenImageFailed', ...
-                    '图像未能完成单人脸分析。');
+                    '指定的文件不存在: %s', filePath);
+            end
+            app.openImageFromPath(filePath);
+            if isempty(app.sourceImage)
+                error('faceDetectionApp:OpenImageFailed', ...
+                    '未能成功加载图像: %s', filePath);
             end
         end
 
-        function setBeautyParameters(app, smoothingStrength, whiteningStrength)
-            % 设置两个滑块并强制执行一次实时预览。
-            values = [smoothingStrength, whiteningStrength];
-            if ~isnumeric(values) || ~isreal(values) || ...
-                    any(~isfinite(values)) || any(values < 0) || ...
-                    any(values > 100)
+        function setBeautyParameters(app, smoothing, whitening)
+            % 供无交互或测试自动化的参数设置入口。
+            if ~isnumeric(smoothing) || ~isscalar(smoothing) || ...
+                    ~isnumeric(whitening) || ~isscalar(whitening) || ...
+                    smoothing < 0 || smoothing > 100 || ...
+                    whitening < 0 || whitening > 100
                 error('faceDetectionApp:InvalidBeautyParameters', ...
-                    '美颜强度必须是 0 到 100 内的有限数值。');
+                    '磨皮和美白参数必须是 [0, 100] 之间的标量数值。');
             end
-            if ~app.hasSingleFace
+            if ~app.hasSingleFace || isempty(app.sourceImage)
                 error('faceDetectionApp:NoBeautyResult', ...
-                    '设置参数前必须先打开图像。');
+                    '设置参数前必须先打开包含可识别人脸的图像。');
             end
-            app.SmoothingSlider.Value = smoothingStrength;
-            app.WhiteningSlider.Value = whiteningStrength;
-            app.updateStrengthLabels();
-            app.refreshPreview(smoothingStrength, whiteningStrength, true);
+
+            app.SmoothingSlider.Value = double(smoothing);
+            app.WhiteningSlider.Value = double(whitening);
+            app.SmoothingValueLabel.Text = sprintf('Smoothing: %d', round(smoothing));
+            app.WhiteningValueLabel.Text = sprintf('Whitening: %d', round(whitening));
+            app.updateBeautyPreview();
         end
 
         function applyOneClickBeauty(app)
-            % 执行与“一键美颜”按钮相同的推荐和预览流程。
-            if ~app.hasSingleFace
+            % 应用一键美颜推荐默认参数。
+            if ~app.hasSingleFace || isempty(app.sourceImage)
                 error('faceDetectionApp:NoBeautyResult', ...
-                    '一键美颜前必须先打开图像。');
+                    '应用一键美颜前必须先打开包含可识别人脸的图像。');
             end
-            app.oneClickBeautyButtonPushed([]);
+            app.setBeautyParameters(25, 15);
+            app.StatusLabel.Text = 'Applied one-click beauty recommendations.';
         end
 
         function resetBeauty(app)
-            % 执行与“重置原图”按钮相同的严格原图恢复流程。
-            if ~app.hasSingleFace
+            % 重置美颜参数与预览画面。
+            if ~app.hasSingleFace || isempty(app.sourceImage)
                 error('faceDetectionApp:NoBeautyResult', ...
-                    '重置前必须先打开图像。');
+                    '重置前必须先打开包含可识别人脸的图像。');
             end
-            app.resetBeautyButtonPushed([]);
+            app.setBeautyParameters(0, 0);
+            app.showImage(app.DetectedAxes, app.sourceImage, 'Original Image (重置原图)');
+            app.StatusLabel.Text = 'Reset beauty parameters to original image.';
         end
 
         function saveImageFile(app, outputPath)
-            % 按路径执行与“保存图像”按钮相同的原尺寸保存流程。
+            % 供无交互或测试自动化的保存入口。
             app.saveImageToPath(outputPath);
         end
 
         function delete(app)
-            % 删除 App 时同步释放 UIFigure。
-            if ~isempty(app.UIFigure) && isvalid(app.UIFigure)
-                delete(app.UIFigure)
+            % 析构时清理组件与定时器资源
+            if ~isempty(app.videoHook)
+                delete(app.videoHook);
             end
+            delete(app.UIFigure);
         end
     end
 end

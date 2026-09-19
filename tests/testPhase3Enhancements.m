@@ -131,7 +131,6 @@ parsing = addRegion(parsing, 'lowerLip', 65:68, 40:60, .8);
 context = buildBeautyContextFromParsing(image, [1, 1, 100, 80], parsing);
 [beautyMasks, allDiagnostics] = masks.buildBeautyMasks( ...
     image, context, [1, 1, 100, 80]);
-protection = beautyMasks.textureProtectionMask;
 hard = beautyMasks.hardProtectionMask >= .999;
 diagnostics = allDiagnostics.texture;
 
@@ -198,6 +197,189 @@ verifyEqual(testCase, protection(70, 74), 0, 'AbsTol', 1e-12, ...
     '远离眼睛的低对比斑点不得进入眼周保护。');
 verifyGreaterThan(testCase, ...
     mean(diagnostics.periocularProtection(38, 45:54)), .55);
+end
+
+function testLowConfidenceEyeSoftSupportStartsWithoutHardCore(testCase)
+image = uint8(ones(96, 128, 3) * 170);
+% 眼部语义只有中低置信度，但局部仍存在眼睑/睫毛结构。
+image(42:46, 43:56, :) = 105;
+image(39, 46:53, :) = 35;
+parsing = emptyFaceParsing([96, 128]);
+parsing = addRegion(parsing, 'skin', 20:80, 20:108, 1);
+parsing = addRegion(parsing, 'leftEye', 42:46, 43:56, .30);
+
+context = buildBeautyContextFromParsing(image, [1, 1, 128, 96], parsing);
+[beautyMasks, allDiagnostics] = masks.buildBeautyMasks( ...
+    image, context, [1, 1, 128, 96]);
+diagnostics = allDiagnostics.texture;
+hard = beautyMasks.hardProtectionMask >= .999;
+
+verifyGreaterThan(testCase, nnz(diagnostics.eyeNeighborhood), 0, ...
+    '0.30 的单眼证据应启动有限眼周邻域。');
+verifyGreaterThan(testCase, nnz(diagnostics.eyeDetailProtection), 0, ...
+    '低/中置信眼部证据配合真实局部结构时应产生软眼部保护。');
+verifyGreaterThan(testCase, nnz(diagnostics.lashProtection), 0, ...
+    '低/中置信眼部证据应允许现有睫毛检测器产生软保护。');
+verifyEqual(testCase, nnz(diagnostics.lashCore), 0, ...
+    '低/中置信 eye soft support 不得新增 hard lash core。');
+verifyFalse(testCase, any(hard(:)), ...
+    '单独的 0.30 眼部证据不得形成 hard protection。');
+verifyGreaterThan(testCase, mean(diagnostics.eyeDetailProtection(39, 46:53)), 0);
+end
+
+function testEyeSoftSupportRemainsIndependentAndRejectsIsolatedDarkPoint(testCase)
+image = uint8(ones(120, 190, 3) * 170);
+% 左右眼各有独立的局部眼睑/睫毛，鼻梁中部另放一个孤立暗点。
+image(48:52, 35:50, :) = 105;
+image(45, 38:47, :) = 35;
+image(48:52, 140:155, :) = 105;
+image(45, 143:152, :) = 35;
+image(80, 95, :) = 35;
+faceBox = [1, 1, 190, 120];
+
+leftOnly = emptyFaceParsing([120, 190]);
+leftOnly = addRegion(leftOnly, 'skin', 20:100, 20:170, 1);
+leftOnly = addRegion(leftOnly, 'leftEye', 48:52, 35:50, .30);
+[~, leftDiagnostics] = masks.buildBeautyMasks(image, ...
+    buildBeautyContextFromParsing(image, faceBox, leftOnly), faceBox);
+leftTexture = leftDiagnostics.texture;
+
+rightOnly = emptyFaceParsing([120, 190]);
+rightOnly = addRegion(rightOnly, 'skin', 20:100, 20:170, 1);
+rightOnly = addRegion(rightOnly, 'rightEye', 48:52, 140:155, .30);
+[rightMasks, rightDiagnostics] = masks.buildBeautyMasks(image, ...
+    buildBeautyContextFromParsing(image, faceBox, rightOnly), faceBox);
+rightTexture = rightDiagnostics.texture;
+
+zero = emptyFaceParsing([120, 190]);
+zero = addRegion(zero, 'skin', 20:100, 20:170, 1);
+[~, zeroDiagnostics] = masks.buildBeautyMasks(image, ...
+    buildBeautyContextFromParsing(image, faceBox, zero), faceBox);
+zeroTexture = zeroDiagnostics.texture;
+
+verifyGreaterThan(testCase, nnz(leftTexture.eyeDetailProtection(:, 1:90)), 0);
+verifyEqual(testCase, nnz(leftTexture.eyeDetailProtection(:, 100:end)), 0, ...
+    '左眼 soft support 不得跨鼻梁激活右侧眼周。');
+verifyEqual(testCase, nnz(leftTexture.eyeNeighborhood(:, 100:end)), 0, ...
+    '左眼有限邻域不得扩张到另一只眼。');
+verifyGreaterThan(testCase, nnz(rightTexture.eyeDetailProtection(:, 100:end)), 0);
+verifyEqual(testCase, nnz(rightTexture.eyeDetailProtection(:, 1:90)), 0, ...
+    '右眼 soft support 不得跨鼻梁激活左侧眼周。');
+verifyEqual(testCase, nnz(rightTexture.eyeNeighborhood(:, 1:90)), 0, ...
+    '右眼有限邻域不得扩张到另一只眼。');
+verifyEqual(testCase, zeroTexture.eyeDetailProtection, zeros(120, 190), ...
+    'AbsTol', 1e-12, '无眼证据时眼部软保护必须为空。');
+verifyEqual(testCase, nnz(zeroTexture.lashCore), 0);
+verifyEqual(testCase, nnz(rightTexture.lashCore), 0, ...
+    '中置信右眼不得新增 hard lash core。');
+verifyEqual(testCase, rightMasks.hardProtectionMask(80, 95), 0, ...
+    '远离眼睑的孤立暗点不得进入 hard protection。');
+verifyTrue(testCase, rightTexture.eyeDetailProtection(80, 95) == 0, ...
+    '远离眼睑的孤立暗点不得进入 eye detail protection。');
+end
+
+function testLowConfidenceEyeWithNoLocalStructureRemainsEmpty(testCase)
+image = uint8(ones(96, 128, 3) * 170);
+parsing = emptyFaceParsing([96, 128]);
+parsing = addRegion(parsing, 'skin', 20:80, 20:108, 1);
+parsing = addRegion(parsing, 'leftEye', 42:46, 43:56, .30);
+context = buildBeautyContextFromParsing(image, [1, 1, 128, 96], parsing);
+[~, allDiagnostics] = masks.buildBeautyMasks( ...
+    image, context, [1, 1, 128, 96]);
+diagnostics = allDiagnostics.texture;
+
+verifyGreaterThan(testCase, nnz(diagnostics.eyeNeighborhood), 0, ...
+    '低置信眼部证据即使没有局部结构，也只应启动有限邻域。');
+verifyEqual(testCase, nnz(diagnostics.eyeDetailProtection), 0, ...
+    '没有眼睑/睫毛/双眼皮图像证据时不得直接生成眼部保护。');
+verifyEqual(testCase, nnz(diagnostics.lashProtection), 0);
+verifyEqual(testCase, nnz(diagnostics.doubleEyelidProtection), 0);
+end
+
+function testMixedEyeConfidenceKeepsHardAndSoftPathsSeparate(testCase)
+image = uint8(ones(120, 190, 3) * 170);
+image(48:52, 35:50, :) = 105;
+image(45, 38:47, :) = 35;
+image(48:52, 140:155, :) = 105;
+image(45, 143:152, :) = 35;
+parsing = emptyFaceParsing([120, 190]);
+parsing = addRegion(parsing, 'skin', 20:100, 20:170, 1);
+parsing = addRegion(parsing, 'leftEye', 48:52, 35:50, 1);
+parsing = addRegion(parsing, 'rightEye', 48:52, 140:155, .30);
+faceBox = [1, 1, 190, 120];
+context = buildBeautyContextFromParsing(image, faceBox, parsing);
+[beautyMasks, allDiagnostics] = masks.buildBeautyMasks( ...
+    image, context, faceBox);
+diagnostics = allDiagnostics.texture;
+hard = beautyMasks.hardProtectionMask >= .999;
+
+verifyGreaterThan(testCase, nnz(diagnostics.eyeDetailProtection(:, 1:90)), 0);
+verifyGreaterThan(testCase, nnz(diagnostics.eyeDetailProtection(:, 100:end)), 0);
+verifyGreaterThan(testCase, nnz(diagnostics.lashCore(:, 1:90)), 0, ...
+    '高置信左眼仍应保留原有 hard lash core 路径。');
+verifyEqual(testCase, nnz(diagnostics.lashCore(:, 100:end)), 0, ...
+    '中置信右眼不得新增 hard lash core。');
+verifyFalse(testCase, any(hard(:, 100:end), 'all'), ...
+    '中置信右眼不得把 soft support 升级为 hard protection。');
+verifyEqual(testCase, nnz(diagnostics.eyeNeighborhood(:, 91:99)), 0, ...
+    '左右眼有限邻域不得通过鼻梁中间区域连通。');
+end
+
+function testSingleEyeMixedConfidencePreservesIdentitySoftBand(testCase)
+image = uint8(ones(120, 160, 3) * 170);
+% 同一只眼的上半部是 identity core，下半部只有 soft support；
+% 眼周没有额外暗线，便于单独观察高置信软带是否被覆盖。
+image(48:53, 48:57, :) = 105;
+faceBox = [1, 1, 160, 120];
+
+highOnly = emptyFaceParsing([120, 160]);
+highOnly = addRegion(highOnly, 'skin', 20:100, 20:140, 1);
+highOnly = addRegion(highOnly, 'leftEye', 48:50, 48:57, .60);
+[~, highDiagnostics] = masks.buildBeautyMasks(image, ...
+    buildBeautyContextFromParsing(image, faceBox, highOnly), faceBox);
+highTexture = highDiagnostics.texture;
+
+mixed = highOnly;
+mixed = addRegion(mixed, 'leftEye', 51:53, 48:57, .30);
+[mixedMasks, mixedDiagnostics] = masks.buildBeautyMasks(image, ...
+    buildBeautyContextFromParsing(image, faceBox, mixed), faceBox);
+mixedTexture = mixedDiagnostics.texture;
+
+identitySoftBand = highTexture.periocularProtection > .20 & ...
+    highTexture.lashProtection == 0 & ...
+    highTexture.doubleEyelidProtection == 0;
+verifyGreaterThan(testCase, nnz(identitySoftBand), 0, ...
+    '高置信 identity core 应产生可观测的眼周软带。');
+verifyGreaterThanOrEqual(testCase, ...
+    mixedTexture.periocularProtection(identitySoftBand), ...
+    highTexture.periocularProtection(identitySoftBand) - 1e-12, ...
+    '同一只眼的 soft support 不得覆盖高置信 identity core 软带。');
+
+softOnlyRows = false(size(identitySoftBand));
+softOnlyRows(51:53, 48:57) = true;
+verifyEqual(testCase, nnz(mixedTexture.lashCore(softOnlyRows)), 0, ...
+    '同一只眼的中置信 soft support 不得新增 hard lash core。');
+verifyEqual(testCase, nnz(mixedMasks.hardProtectionMask(softOnlyRows)), 0, ...
+    '同一只眼的中置信 soft support 不得新增 hard protection。');
+end
+
+function testHardEyeProtectionKeepsInputRgb(testCase)
+image = uint8(ones(96, 128, 3) * 170);
+image(42:46, 43:56, :) = 105;
+image(39, 46:53, :) = 35;
+parsing = emptyFaceParsing([96, 128]);
+parsing = addRegion(parsing, 'skin', 20:80, 20:108, 1);
+parsing = addRegion(parsing, 'leftEye', 42:46, 43:56, 1);
+context = buildBeautyContextFromParsing(image, [1, 1, 128, 96], parsing);
+[beautyMasks, ~] = masks.buildBeautyMasks(image, context, [1, 1, 128, 96]);
+output = beautifyImage(image, struct( ...
+    'smoothingStrength', 100, 'whiteningStrength', 15), ...
+    [1, 1, 128, 96], context);
+hard = beautyMasks.hardProtectionMask >= .999;
+verifyGreaterThan(testCase, nnz(hard), 0);
+hard3 = repmat(hard, 1, 1, 3);
+verifyEqual(testCase, max(abs(double(output(hard3)) - double(image(hard3)))), ...
+    0, 'AbsTol', 0, '高置信 hard protection 区域最终 RGB 必须与输入逐像素一致。');
 end
 
 function testDisconnectedMainLimbIsIncludedButOtherPersonIsRejected(testCase)

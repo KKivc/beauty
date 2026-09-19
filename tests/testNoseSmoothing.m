@@ -150,6 +150,60 @@ verifyEqual(testCase, max(longDetails.highEndConfidence(longAnomaly)), ...
     0, 'AbsTol', 1e-12);
 end
 
+function testRepairRequiresValidTextureProtectionMask(testCase)
+[frequency, beautyMasks, noseRegion] = standaloneRepairFixture();
+blemishMap = .10 * ones(size(noseRegion));
+blemishMap(noseRegion) = .95;
+
+missing = rmfield(beautyMasks, 'textureProtectionMask');
+verifyError(testCase, @() beauty.repairSkinBlemishes( ...
+    frequency, missing, blemishMap, 100), ...
+    'beauty:InvalidBlemishRepair');
+
+invalid = beautyMasks;
+invalid.textureProtectionMask(1, 1) = NaN;
+verifyError(testCase, @() beauty.repairSkinBlemishes( ...
+    frequency, invalid, blemishMap, 100), ...
+    'beauty:InvalidBlemishRepair');
+end
+
+function testTextureProtectionGatesFaceAndNonFaceRepair(testCase)
+[frequency, beautyMasks, noseRegion] = standaloneRepairFixture();
+imageSize = size(noseRegion);
+faceBlemish = false(imageSize);
+faceBlemish(48:52, 70:74) = true;
+nonFaceBlemish = false(imageSize);
+nonFaceBlemish(90:94, 110:114) = true;
+blemishMap = .10 * ones(imageSize);
+blemishMap(faceBlemish | nonFaceBlemish) = .95;
+beautyMasks.nonFaceStrengthMap(nonFaceBlemish) = 1;
+
+baselineMasks = beautyMasks;
+baselineMasks.textureProtectionMask = zeros(imageSize);
+protectedMasks = baselineMasks;
+protectedMasks.textureProtectionMask(faceBlemish | nonFaceBlemish) = .50;
+
+[~, baseline] = beauty.repairSkinBlemishes( ...
+    frequency, baselineMasks, blemishMap, 100);
+[~, protected] = beauty.repairSkinBlemishes( ...
+    frequency, protectedMasks, blemishMap, 100);
+
+verifyGreaterThan(testCase, min(baseline.fineWeight(faceBlemish)), 0);
+verifyGreaterThan(testCase, min(baseline.fineWeight(nonFaceBlemish)), 0);
+verifyEqual(testCase, max(abs(protected.fineWeight(faceBlemish) - ...
+    .50 * baseline.fineWeight(faceBlemish))), 0, 'AbsTol', 1e-12);
+verifyEqual(testCase, max(abs(protected.mediumWeight(faceBlemish) - ...
+    .50 * baseline.mediumWeight(faceBlemish))), 0, 'AbsTol', 1e-12);
+verifyEqual(testCase, max(abs(protected.fineWeight(nonFaceBlemish) - ...
+    .50 * baseline.fineWeight(nonFaceBlemish))), 0, 'AbsTol', 1e-12);
+verifyEqual(testCase, max(abs(protected.mediumWeight(nonFaceBlemish) - ...
+    .50 * baseline.mediumWeight(nonFaceBlemish))), 0, 'AbsTol', 1e-12);
+verifyEqual(testCase, max(abs(protected.referenceReliability(faceBlemish) - ...
+    .50 * baseline.referenceReliability(faceBlemish))), 0, 'AbsTol', 1e-12);
+verifyEqual(testCase, max(abs(protected.referenceReliability(nonFaceBlemish) - ...
+    .50 * baseline.referenceReliability(nonFaceBlemish))), 0, 'AbsTol', 1e-12);
+end
+
 function testNoseMidGateIsContinuousAndFineUsesCommonEvidence(testCase)
 [frequency, beautyMasks, noseRegion] = standaloneRepairFixture();
 blemishMap = .10 * ones(size(noseRegion));
@@ -336,6 +390,7 @@ frequency = struct('base', base, 'mid', mid, 'fine', fine, ...
     'faceBox', [31, 11, 100, 100]);
 beautyMasks = struct('skinMask', ones(imageSize), ...
     'strengthMap', ones(imageSize), ...
+    'textureProtectionMask', zeros(imageSize), ...
     'structureProtectionMask', zeros(imageSize), ...
     'hardProtectionMask', zeros(imageSize), ...
     'noseMask', double(noseRegion), ...

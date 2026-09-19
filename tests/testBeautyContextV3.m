@@ -54,7 +54,7 @@ context = prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60]));
 cache = context.runtimeCache;
 verifyEqual(testCase, cache.schemaVersion, '3.1');
-verifyEqual(testCase, cache.algorithmVersion, 'v3.1');
+verifyEqual(testCase, cache.algorithmVersion, 'v3.2');
 verifyEqual(testCase, cache.artifactVersion, 'v3.1');
 verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.1');
 verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.1');
@@ -70,13 +70,13 @@ function testHistoricalRuntimeCacheIsRegenerated(testCase)
 context = prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60]));
 historical = context;
-historical.runtimeCache.schemaVersion = '3.0';
+historical.runtimeCache.algorithmVersion = 'v3.1';
 [output, diagnostics] = beautifyImage(image, struct( ...
     'smoothingStrength', 25, 'whiteningStrength', 15), faceBox, historical);
 verifySize(testCase, output, [40, 60, 3]);
 verifyFalse(testCase, diagnostics.reusedRuntimeCache);
 verifyEqual(testCase, diagnostics.runtimeCache.status, 'regenerated');
-verifyEqual(testCase, diagnostics.runtimeCache.sourceSchemaVersion, '3.0');
+verifyEqual(testCase, diagnostics.runtimeCache.sourceAlgorithmVersion, 'v3.1');
 end
 
 function testExplicitMigrationRegeneratesHistoricalCache(testCase)

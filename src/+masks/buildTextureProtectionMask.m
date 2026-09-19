@@ -169,8 +169,9 @@ function [protection, lashCore, neighborhood, lashProtection, ...
         detectEyeDetailProtection(grayImage, leftEyeEvidence, ...
         rightEyeEvidence, eyeEvidence, browEvidence, faceScale)
 %DETECTEYEDETAILPROTECTION 保护眼睫毛、眼线和双眼皮褶皱。
-% 检测始终限定在每只眼睛语义区的有限邻域内。睫毛要求暗色、细长、
-% 方向连续和接近眼睑；双眼皮只生成局部软保护，不扩张为硬保护。
+% 高置信眼部语义继续作为 identity core；低/中置信语义只建立每眼
+% 独立的有限启动带。soft support 不直接写入最终保护，细节保护仍
+% 必须来自眼睑、睫毛或双眼皮的局部图像证据。
 protection = zeros(size(eyeEvidence));
 lashCore = false(size(eyeEvidence));
 lashProtection = zeros(size(eyeEvidence));
@@ -178,57 +179,95 @@ doubleEyelidCore = false(size(eyeEvidence));
 doubleEyelidProtection = zeros(size(eyeEvidence));
 periocularProtection = zeros(size(eyeEvidence));
 neighborhood = false(size(eyeEvidence));
-eyeMasks = {leftEyeEvidence >= .45, rightEyeEvidence >= .45};
-browCore = browEvidence >= .45;
-if ~any(eyeEvidence(:) >= .45)
+identityThreshold = .45;
+softSupportThreshold = .20;
+identityMasks = {leftEyeEvidence >= identityThreshold, ...
+    rightEyeEvidence >= identityThreshold};
+softSupportMasks = {leftEyeEvidence >= softSupportThreshold & ...
+    leftEyeEvidence < identityThreshold, ...
+    rightEyeEvidence >= softSupportThreshold & ...
+    rightEyeEvidence < identityThreshold};
+browCore = browEvidence >= identityThreshold;
+if ~any(cellfun(@(mask) any(mask(:)), identityMasks)) && ...
+        ~any(cellfun(@(mask) any(mask(:)), softSupportMasks))
     return;
 end
 
 % 眼周带比原先的细线检测范围更宽，但每只眼睛独立膨胀，避免连接到
 % 鼻梁、眼窝或另一只眼睛。外眼角的间断睫毛允许在带内寻找。
-    periocularRadius = min(24, max(9, round(.040 * double(faceScale))));
+periocularRadius = min(24, max(9, round(.040 * double(faceScale))));
 softRadius = min(5, max(2, round(.008 * double(faceScale))));
-for eyeIndex = 1:numel(eyeMasks)
-    eyeCore = eyeMasks{eyeIndex};
-    if ~any(eyeCore(:))
+for eyeIndex = 1:numel(identityMasks)
+    identityCore = identityMasks{eyeIndex};
+    softSupport = softSupportMasks{eyeIndex};
+    launchMask = identityCore | softSupport;
+    if ~any(launchMask(:))
         continue;
     end
-    currentBand = imdilate(eyeCore, strel('disk', periocularRadius, 0));
+    softSupportActive = any(softSupport(:));
+    currentBand = imdilate(launchMask, strel('disk', periocularRadius, 0));
     neighborhood = neighborhood | currentBand;
-    currentRing = currentBand & ~eyeCore;
+    currentRing = currentBand & ~launchMask;
     if any(browCore(:))
         browRadius = min(5, max(2, round(.010 * double(faceScale))));
-        currentRing(imdilate(browCore, strel('disk', browRadius, 0))) = false;
+        browExclusion = imdilate(browCore, strel('disk', browRadius, 0));
+        currentRing(browExclusion) = false;
+    else
+        browExclusion = false(size(currentBand));
     end
 
-    % 软保护只覆盖眼睛外侧有限带，眼球核心仍由 occluderProtection 硬保护。
-    % 紧邻眼睑的双眼皮、眼线尾部和细小睫毛即使未形成完整线组件，
-    % 也需要足够的软保护；仍保持距离衰减，避免冻结整片眼窝皮肤。
-    currentPeriocular = featherSoftMask(eyeCore, periocularRadius, .76);
-    currentPeriocular(eyeCore) = 0;
-    [eyeRows, ~] = find(eyeCore);
-    topRow = min(eyeRows);
-    [rowGrid, ~] = ndgrid(1:size(eyeCore, 1), 1:size(eyeCore, 2));
-    upperAllowance = max(1, round(.004 * double(faceScale)));
-    upperDetailBand = currentRing & rowGrid <= topRow + upperAllowance;
-    eyeDistance = bwdist(eyeCore);
-    upperCurve = .55 + .40 * max(0, 1 - ...
-        (eyeDistance / (periocularRadius + 1)) .^ 2);
-    outerFeather = min(max((periocularRadius + 1 - eyeDistance) / 4, 0), 1);
-    upperProtection = upperCurve .* outerFeather;
-    upperProtection(~upperDetailBand) = 0;
-    currentPeriocular = max(currentPeriocular, upperProtection);
-    periocularProtection = max(periocularProtection, currentPeriocular);
+    % identity core 的原有软眼周带保持不变；低/中置信 support 不得仅凭
+    % 语义概率直接冻结眼窝，只有后面的图像检测结果才可进入该分支。
+    currentPeriocular = zeros(size(eyeEvidence));
+    identityBand = imdilate(identityCore, strel('disk', periocularRadius, 0));
+    identityRing = identityBand & ~identityCore;
+    identityRing(browExclusion) = false;
+    if any(identityCore(:))
+        currentPeriocular = featherSoftMask(identityCore, ...
+            periocularRadius, .76);
+        currentPeriocular(identityCore) = 0;
+        [eyeRows, ~] = find(identityCore);
+        topRow = min(eyeRows);
+        [rowGrid, ~] = ndgrid(1:size(identityCore, 1), ...
+            1:size(identityCore, 2));
+        upperAllowance = max(1, round(.004 * double(faceScale)));
+        upperDetailBand = identityRing & rowGrid <= topRow + upperAllowance;
+        eyeDistance = bwdist(identityCore);
+        upperCurve = .55 + .40 * max(0, 1 - ...
+            (eyeDistance / (periocularRadius + 1)) .^ 2);
+        outerFeather = min(max((periocularRadius + 1 - eyeDistance) / 4, 0), 1);
+        upperProtection = upperCurve .* outerFeather;
+        upperProtection(~upperDetailBand) = 0;
+        currentPeriocular = max(currentPeriocular, upperProtection);
+    end
 
     [currentLash, currentLashProtection] = detectLashLines( ...
-        grayImage, eyeCore, currentRing, faceScale, softRadius);
+        grayImage, launchMask, currentRing, identityCore, identityRing, ...
+        faceScale, softRadius, softSupportActive);
     lashCore = lashCore | currentLash;
     lashProtection = max(lashProtection, currentLashProtection);
 
     [currentFold, currentFoldProtection] = detectDoubleEyelidFold( ...
-        grayImage, eyeCore, browCore, currentBand, faceScale);
+        grayImage, launchMask, browCore, currentBand, faceScale);
     doubleEyelidCore = doubleEyelidCore | currentFold;
     doubleEyelidProtection = max(doubleEyelidProtection, currentFoldProtection);
+
+    % 低/中置信路径的 periocular 保护只复用已确认的暗线或褶皱证据，
+    % 不把 launchMask 的羽化结果直接当作最终保护。高置信路径保留
+    % 原有眼周软带；soft support 路径仅写入检测器确认的结果。
+    if softSupportActive
+        detectedPeriocular = .65 * max(currentLashProtection, ...
+            currentFoldProtection);
+        if any(identityCore(:))
+            % 同一只眼出现高/中置信混合时，不得用 soft support 的
+            % 检测结果覆盖 identity core 已有的眼周软带。
+            currentPeriocular = max(currentPeriocular, ...
+                detectedPeriocular);
+        else
+            currentPeriocular = detectedPeriocular;
+        end
+    end
+    periocularProtection = max(periocularProtection, currentPeriocular);
 end
 
 protection = max(cat(3, periocularProtection, lashProtection, ...
@@ -236,10 +275,13 @@ protection = max(cat(3, periocularProtection, lashProtection, ...
 end
 
 function [lashCore, protection] = detectLashLines( ...
-        grayImage, eyeCore, ring, faceScale, softRadius)
+        grayImage, launchMask, ring, identityCore, identityRing, ...
+        faceScale, softRadius, allowSoftProtection)
 %DETECTLASHLINES 检测允许小间断的外眼角睫毛和眼线。
-lashCore = false(size(eyeCore));
-protection = zeros(size(eyeCore));
+% identityRing 才允许产生 hard lashCore；soft support 只能让图像候选
+% 进入软保护，不能因为低置信语义单独形成硬保护。
+lashCore = false(size(launchMask));
+protection = zeros(size(launchMask));
 if ~any(ring(:))
     return;
 end
@@ -277,16 +319,26 @@ end
 candidate = darkCandidate & (edgeCandidate | lineSupport);
 % 允许外眼角与眼 core 之间存在数像素间隙，但仍限制在眼周带内。
 lashDistance = min(9, max(4, round(.014 * double(faceScale))));
-nearEye = bwdist(eyeCore) <= lashDistance;
-% 只有显著深色的细线进入 hard；低对比双眼皮即使具有线形，也只由
-% periocular/doubleEyelidProtection 软保护，避免制造新的硬边界。
+nearEye = bwdist(launchMask) <= lashDistance;
+candidate = candidate & nearEye;
+% 只有 identity core 对应的显著深色细线进入 hard；低/中置信 support
+% 即使匹配局部线结构，也只能生成软保护。
 hardDarkThreshold = max(.045, percentileValue(darkValues, .80));
 hardGradientThreshold = max(.018, percentileValue(gradientValues, .75));
-lashCore = candidate & nearEye & darkResidual >= hardDarkThreshold & ...
-    (gradientMagnitude >= hardGradientThreshold | lineSupport);
-if any(lashCore(:))
-    protection = featherSoftMask(lashCore, softRadius, .99);
-    protection(lashCore) = .99;
+if any(identityCore(:))
+    hardNearEye = bwdist(identityCore) <= lashDistance;
+    lashCore = candidate & identityRing & hardNearEye & ...
+        darkResidual >= hardDarkThreshold & ...
+        (gradientMagnitude >= hardGradientThreshold | lineSupport);
+end
+if allowSoftProtection
+    protectionSeed = candidate;
+else
+    protectionSeed = lashCore;
+end
+if any(protectionSeed(:))
+    protection = featherSoftMask(protectionSeed, softRadius, .99);
+    protection(protectionSeed) = .99;
 end
 end
 

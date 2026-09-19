@@ -1,11 +1,30 @@
 function [beautifiedImage, diagnostics] = composeBeautyResult( ...
         inputImage, frequency, smoothedFrequency, beautyMasks, ...
-        whiteningStrength, processing)
+        whiteningStrength, processing, composeContract)
 %COMPOSEBEAUTYRESULT 使用一个连续 Alpha Map 合成 v3 结果。
 %   保护区域不通过脸部/脸外结果拼接，而是在同一张全图 Alpha 上
 %   完成一次主合成。可选的 processing 参数承载瑕疵、统一肤色和
 %   美白模块的诊断/结果；省略时仍由本函数调用独立美白模块。
+%
+%   T19：可选第 7 参数 composeContract 是 Final Compose 的 stage
+%   contract，由 beautifyImage 生产端从 T07 protection 分层拼装传入
+%   （T12--T18 范式）。提供时 hard identity restore 的唯一来源是
+%   contract.hard（T07 单独发布的严格二值 identity mask），最终合成
+%   不再解释 legacy general hardProtectionMask；兼容期 reader/
+%   migration 仍可从旧 mask 生成 V4 hard，但那发生在 producer 侧。
+%   字段语义：
+%     hard — hard identity（T07 单独发布，buildStageProtectionMasks
+%            从 beautyMasks.hardProtectionMask 原样拷贝，bit-exact 二
+%            值）。hard restore 仍在合成最终权威位置执行（RGB 渲染与
+%            inactive 恢复之后）：hard >= .999 的像素恢复源图 RGB，
+%            hard 区域最终 RGB 与源图逐位相等。hard 无折叠快照与未折
+%            叠门控问题，contract 无需其他字段；非 hard 区域的合成公
+%            式与诊断完全不变。
+%   缺字段 fail-fast，不在函数内部重新拼装，也不静默回退；未提供第
+%   7 参的旧调用方走 legacy 兼容路径，行为不变（继续读取
+%   beautyMasks.hardProtectionMask）。
 
+useStageContract = nargin >= 7 && ~isempty(composeContract);
 if nargin < 4 || ~isValidRgbImage(inputImage) || ...
         ~isstruct(frequency) || ~isstruct(smoothedFrequency) || ...
         ~isstruct(beautyMasks)
@@ -32,13 +51,28 @@ if ~isfield(frequency, 'sourceLuminance') || ...
         ~isequal(size(smoothedFrequency.alphaMap), imageSize)
     error('beauty:InvalidComposeInput', '频率结构的尺寸不匹配。');
 end
-requiredMasks = {'strengthMap', 'hardProtectionMask'};
+% T19：stage 路径的 hard 来源是 contract，不再要求 beautyMasks 携带
+% legacy hardProtectionMask；legacy 路径的必需字段与错误行为不变。
+if useStageContract
+    requiredMasks = {'strengthMap'};
+else
+    requiredMasks = {'strengthMap', 'hardProtectionMask'};
+end
 if ~all(isfield(beautyMasks, requiredMasks))
     error('beauty:InvalidMasks', 'v3 Beauty Masks 缺少合成字段。');
 end
 readMask(beautyMasks.strengthMap, imageSize, 'strengthMap');
-hardProtection = readMask(beautyMasks.hardProtectionMask, ...
-    imageSize, 'hardProtectionMask');
+% T19：保护来源二选一。stage 路径只消费 contract 的 hard identity，
+% 不再读取 general hardProtectionMask；legacy 路径保持原解释与数值。
+% 两条路径的 hard 按同一表达式、同一份 mask 产物取得，数值逐位一致。
+if useStageContract
+    composeContract = validateComposeContract(composeContract, ...
+        imageSize);
+    hardProtection = composeContract.hard;
+else
+    hardProtection = readMask(beautyMasks.hardProtectionMask, ...
+        imageSize, 'hardProtectionMask');
+end
 smoothingAlpha = readMask(smoothedFrequency.alphaMap, ...
     imageSize, 'alphaMap');
 sourceLuminance = double(frequency.sourceLuminance);
@@ -225,4 +259,17 @@ end
 readMask(result.toneSupport, imageSize, 'toneSupport');
 readMask(result.outputCb, imageSize, 'outputCb');
 readMask(result.outputCr, imageSize, 'outputCr');
+end
+
+function contract = validateComposeContract(contract, imageSize)
+%VALIDATECOMPOSECONTRACT 校验 Final Compose 的 stage contract（T19）。
+%   必需字段：hard（T07 单独发布的 hard identity，严格二值）。缺字段
+%   或取值无效一律 fail-fast，不在函数内部重新拼装，也不静默回退到
+%   general masks 解释。
+if ~isstruct(contract) || ~isscalar(contract) || ...
+        ~isfield(contract, 'hard')
+    error('beauty:InvalidComposeInput', ...
+        'Compose stage contract 必须是包含 hard 的标量结构。');
+end
+contract.hard = readMask(contract.hard, imageSize, 'hard');
 end

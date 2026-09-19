@@ -40,10 +40,9 @@ if hasTargetImage
         rebuilt.bodySkinMask = resizeMask(context.bodySkinMask, targetSize);
     end
     % 前一步 buildBeautyContextFromParsing 已经基于未合并的脸外皮肤
-    % 生成过派生字段；合并目标尺寸的身体皮肤后必须清掉旧字段，
-    % 否则 runtime cache 会携带与最终 skinMask 不一致的结构和强度图。
-    rebuilt = clearDerivedMasks(rebuilt);
-    rebuilt = attachDerivedMasks(targetImage, rebuilt, targetFaceBox);
+    % 生成过派生字段；合并目标尺寸的身体皮肤后，由权威桥接清掉旧字段
+    % 并按最终 skinMask 重建，避免 runtime cache 携带不一致的结构和强度图。
+    rebuilt = rebuildBeautyDerivedMasks(targetImage, rebuilt, targetFaceBox);
     resizedContext = normalizeBeautyContext(targetImage, ...
         double(targetFaceBox), rebuilt);
     [runtimeMasks, maskDiagnostics] = masks.buildBeautyMasks( ...
@@ -138,35 +137,6 @@ elseif isfield(context, 'semanticConfidence') || ...
         'semanticConfidence');
     resizedContext.regionConfidence = struct('nose', single(resizeMask( ...
         confidence(:, :, noseIndex), targetSize)));
-end
-end
-
-function context = attachDerivedMasks(inputImage, context, faceBox)
-[beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
-context.textureProtectionMask = beautyMasks.textureProtectionMask;
-context.structureProtectionMask = beautyMasks.structureProtectionMask;
-context.whiteningProtectionMask = beautyMasks.whiteningProtectionMask;
-context.chromaProtectionMask = beautyMasks.chromaProtectionMask;
-context.toneProtectionMask = context.chromaProtectionMask;
-context.strengthMap = beautyMasks.strengthMap;
-context.faceStrengthMap = beautyMasks.faceStrengthMap;
-context.nonFaceStrengthMap = beautyMasks.nonFaceStrengthMap;
-context.protectionMasks = struct( ...
-    'texture', beautyMasks.textureProtectionMask, ...
-    'structure', beautyMasks.structureProtectionMask, ...
-    'whitening', beautyMasks.whiteningProtectionMask, ...
-    'chroma', beautyMasks.chromaProtectionMask, ...
-    'tone', context.chromaProtectionMask);
-end
-
-function context = clearDerivedMasks(context)
-names = {'textureProtectionMask', 'structureProtectionMask', ...
-    'whiteningProtectionMask', 'chromaProtectionMask', ...
-    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
-    'nonFaceStrengthMap', 'protectionMasks'};
-names = names(isfield(context, names));
-if ~isempty(names)
-    context = rmfield(context, names);
 end
 end
 

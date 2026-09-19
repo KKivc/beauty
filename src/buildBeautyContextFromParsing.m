@@ -34,7 +34,7 @@ context.faceSkinMask = probabilityMask(faceProbability, faceScale);
 context.nonFaceSkinMask = max(context.skinMask - ...
     min(context.skinMask, context.faceSkinMask), 0);
 context.bodySkinMask = context.nonFaceSkinMask;
-context = attachDerivedMasks(inputImage, context, faceBox);
+context = rebuildBeautyDerivedMasks(inputImage, context, faceBox);
 end
 
 function context = makeBaseContext(inputImage, faceBox, regions, ...
@@ -56,24 +56,6 @@ context = struct( ...
     'faceBox', double(faceBox), ...
     'faceScale', faceScale);
 context.bodySkinMask = double(neckMask);
-end
-
-function context = attachDerivedMasks(inputImage, context, faceBox)
-[beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
-context.textureProtectionMask = beautyMasks.textureProtectionMask;
-context.structureProtectionMask = beautyMasks.structureProtectionMask;
-context.whiteningProtectionMask = beautyMasks.whiteningProtectionMask;
-context.chromaProtectionMask = beautyMasks.chromaProtectionMask;
-context.toneProtectionMask = context.chromaProtectionMask;
-context.strengthMap = beautyMasks.strengthMap;
-context.faceStrengthMap = beautyMasks.faceStrengthMap;
-context.nonFaceStrengthMap = beautyMasks.nonFaceStrengthMap;
-context.protectionMasks = struct( ...
-    'texture', beautyMasks.textureProtectionMask, ...
-    'structure', beautyMasks.structureProtectionMask, ...
-    'whitening', beautyMasks.whiteningProtectionMask, ...
-    'chroma', beautyMasks.chromaProtectionMask, ...
-    'tone', context.chromaProtectionMask);
 end
 
 function [regions, confidence] = normalizeSemantics(parsing, imageSize)

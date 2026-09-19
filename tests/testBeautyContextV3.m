@@ -197,6 +197,43 @@ verifySize(testCase, savedOutput, [80, 120, 3]);
 verifyClass(testCase, savedOutput, 'uint8');
 end
 
+function testBridgeUnifiesDerivedFieldsAcrossEntries(testCase)
+%TESTBRIDGEUNIFIESDERIVEDFIELDSACROSSENTRIES 三个入口的派生字段必须由
+%   rebuildBeautyDerivedMasks 统一回填：同一输入下 build 与 prepare
+%   （零 SCHP 不改变皮肤基础字段）的派生字段 bit-exact 一致；原尺寸
+%   重建路径的结果与对同一基础字段的直接桥接重建 bit-exact 一致。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+baseNames = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask'};
+derivedNames = {'textureProtectionMask', 'structureProtectionMask', ...
+    'whiteningProtectionMask', 'chromaProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'nonFaceStrengthMap', 'protectionMasks'};
+
+fromParsing = buildBeautyContextFromParsing(image, faceBox, parsing);
+prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60])), 'runtimeCache');
+for index = 1:numel(baseNames)
+    verifyEqual(testCase, fromParsing.(baseNames{index}), ...
+        prepared.(baseNames{index}), 'AbsTol', 0);
+end
+for index = 1:numel(derivedNames)
+    verifyEqual(testCase, fromParsing.(derivedNames{index}), ...
+        prepared.(derivedNames{index}), 'AbsTol', 0);
+end
+
+targetSize = [80, 120];
+targetFaceBox = [20, 16, 60, 48];
+targetImage = imresize(image, targetSize, 'bilinear');
+resized = resizeBeautyContext(prepared, [targetSize, 3], ...
+    targetFaceBox, targetImage);
+rebuilt = rebuildBeautyDerivedMasks(targetImage, ...
+    rmfield(resized, 'runtimeCache'), targetFaceBox);
+for index = 1:numel(derivedNames)
+    verifyEqual(testCase, rebuilt.(derivedNames{index}), ...
+        resized.(derivedNames{index}), 'AbsTol', 0);
+end
+end
+
 function testLegacyAndCanonicalChromaFieldsAreEquivalent(testCase)
 [image, faceBox, parsing] = fixtureContext(40, 60);
 canonical = prepareBeautyContext(image, faceBox, parsing, ...

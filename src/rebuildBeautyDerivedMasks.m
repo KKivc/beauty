@@ -15,6 +15,13 @@ function context = rebuildBeautyDerivedMasks(inputImage, context, faceBox)
 %   不回写任何 protection 字段，也不包含 blemish/frequency 运行期
 %   产物。evidence 的来源/版本元数据挂在 context.diagnostics.
 %   policyEvidence（evidence 层本身按 V4 规范只允许 HxW mask 字段）。
+%
+%   T07 起，V4 protection 层（八个 stage-specific 字段）同样只在本
+%   桥接生成/回填：以 masks.buildBeautyMasks 的 mask 产物为唯一来源
+%   调用 masks.buildStageProtectionMasks，按生产 stage 门控的静态
+%   组合推导 smoothingFine/smoothingMid/repairFine/repairMid/
+%   baseLuminance/tone/whitening/hard；hard identity 与
+%   strengthMap/effectStrengthMap 保持独立，不并入 stage 字段。
 
 context = clearDerivedFields(context);
 [beautyMasks, maskDiagnostics] = masks.buildBeautyMasks(inputImage, ...
@@ -33,6 +40,7 @@ context.protectionMasks = struct( ...
     'whitening', beautyMasks.whiteningProtectionMask, ...
     'chroma', beautyMasks.chromaProtectionMask, ...
     'tone', context.chromaProtectionMask);
+context.protection = masks.buildStageProtectionMasks(beautyMasks);
 [policyEvidence, evidenceMetadata] = masks.buildBeautyPolicyEvidence( ...
     inputImage, context, faceBox, maskDiagnostics);
 context.evidence = policyEvidence;
@@ -44,7 +52,7 @@ function context = clearDerivedFields(context)
 names = {'textureProtectionMask', 'structureProtectionMask', ...
     'whiteningProtectionMask', 'chromaProtectionMask', ...
     'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
-    'nonFaceStrengthMap', 'protectionMasks', 'evidence'};
+    'nonFaceStrengthMap', 'protectionMasks', 'protection', 'evidence'};
 names = names(isfield(context, names));
 if ~isempty(names)
     context = rmfield(context, names);

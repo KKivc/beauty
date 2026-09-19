@@ -137,6 +137,136 @@ verifyEqual(testCase, diagnostics.alphaMap, ...
     'AbsTol', 1e-12);
 end
 
+function testStageProtectionGatesReproduceProductionGating(testCase)
+%TESTSTAGEPROTECTIONGATESREPRODUCEPRODUCTIONGATING T07：八个 stage
+%   protection 字段满足唯一语义与 [0,1]；hard 可严格离散化（二值）且
+%   nostrilCore/lashCore 的 hard identity 原样保留；用 stage protection
+%   重算各生产 stage 的兼容门控，与生产诊断逐像素等价（容差仅为
+%   1-x 补码往返与乘法结合顺序的浮点噪声，不放宽行为）。
+[image, faceBox, parsing] = fixtureImage(120, 160);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([120, 160]));
+[beautyMasks, maskDiagnostics] = masks.buildBeautyMasks( ...
+    image, context, faceBox);
+protection = masks.buildStageProtectionMasks(beautyMasks);
+
+stageNames = {'smoothingFine'; 'smoothingMid'; 'repairFine'; ...
+    'repairMid'; 'baseLuminance'; 'tone'; 'whitening'; 'hard'};
+verifyEqual(testCase, fieldnames(protection), stageNames);
+for index = 1:numel(stageNames)
+    value = protection.(stageNames{index});
+    verifyTrue(testCase, isnumeric(value) && ~islogical(value) && ...
+        isreal(value));
+    verifySize(testCase, value, [120, 160]);
+    verifyTrue(testCase, all(isfinite(value(:))));
+    verifyGreaterThanOrEqual(testCase, min(value(:)), 0);
+    verifyLessThanOrEqual(testCase, max(value(:)), 1);
+end
+
+% hard：二值 identity，与生产 hardProtectionMask bit-exact；
+% nostrilCore/lashCore/lipCore 全部保留在 hard 内。
+verifyEqual(testCase, protection.hard, ...
+    beautyMasks.hardProtectionMask, 'AbsTol', 0);
+verifyEqual(testCase, protection.hard, ...
+    double(maskDiagnostics.texture.hardProtectionMask), 'AbsTol', 0);
+verifyTrue(testCase, all(protection.hard(:) == 0 | ...
+    protection.hard(:) == 1));
+identityCore = maskDiagnostics.texture.lipCore | ...
+    maskDiagnostics.texture.nostrilCore | ...
+    maskDiagnostics.texture.lashCore;
+verifyTrue(testCase, nnz(identityCore) > 0);
+verifyTrue(testCase, all(protection.hard(identityCore) == 1), ...
+    'nostrilCore/lashCore 的 hard identity 必须原样保留。');
+
+% Fine/Mid smoothing：alphaMap 与 midAlphaMap 用 stage fields 重算。
+[frequency, ~] = beauty.decomposeSkinFrequency(image, faceBox);
+strengths = [0, 25, 50, 75, 100];
+for index = 1:numel(strengths)
+    strength = strengths(index);
+    [smoothed, details] = beauty.smoothSkinTexture(frequency, ...
+        beautyMasks, strength);
+    profile = beautySmoothingProfile(strength);
+    effectStrength = profile.alphaCurve .* beautyMasks.strengthMap;
+    nonFacePixels = beautyMasks.nonFaceStrengthMap > .01;
+    effectStrength(nonFacePixels) = profile.outsideFaceStrength .* ...
+        beautyMasks.nonFaceStrengthMap(nonFacePixels);
+    fineGate = 1 - max(protection.smoothingFine, protection.hard);
+    verifyEqual(testCase, details.alphaMap, effectStrength .* fineGate, ...
+        'AbsTol', 1e-12);
+
+    midGate = 1 - protection.smoothingMid;
+    midRecomputed = details.alphaMap .* midGate;
+    nosePixels = beautyMasks.noseMask > 0;
+    if profile.alphaCurve == 1
+        % 满档（alphaCurve=1）：mid 门控整体与生产逐像素等价。
+        verifyEqual(testCase, details.midAlphaMap, midRecomputed, ...
+            'AbsTol', 1e-12);
+    else
+        % 静态结构部分全场等价；nose 项生产值为快照与 1 的凸组合
+        % （快照即最强保护），逐像素核对凸组合差值。
+        verifyEqual(testCase, details.midAlphaMap(~nosePixels), ...
+            midRecomputed(~nosePixels), 'AbsTol', 1e-12);
+        midGap = details.midAlphaMap(nosePixels) - ...
+            midRecomputed(nosePixels);
+        expectedGap = details.alphaMap(nosePixels) .* ...
+            details.fineStructureGate(nosePixels) .* ...
+            (.50 * (1 - profile.alphaCurve));
+        verifyGreaterThanOrEqual(testCase, min(midGap), 0);
+        verifyEqual(testCase, midGap, expectedGap, 'AbsTol', 1e-9);
+    end
+end
+
+% Repair：零瑕疵参考点的生产 structureGate（blemish=0）与
+% textureGate/noseMidGate 的组合必须 bit-exact 重建两个 stage 字段。
+blemishMap = zeros(size(image, 1), size(image, 2));
+[~, repairDetails] = beauty.repairSkinBlemishes(smoothed, beautyMasks, ...
+    blemishMap, 50);
+verifyEqual(testCase, protection.repairFine, ...
+    1 - repairDetails.structureGate .* ...
+    (1 - beautyMasks.textureProtectionMask), 'AbsTol', 0);
+verifyEqual(testCase, protection.repairMid, ...
+    1 - repairDetails.structureGate .* repairDetails.noseMidGate .* ...
+    (1 - beautyMasks.textureProtectionMask), 'AbsTol', 0);
+
+% Base luminance：supportMap 完整重算（该 stage 无 runtime 耦合）。
+[~, baseDetails] = beauty.evenSkinLuminance(frequency, beautyMasks, 50);
+baseSupport = baseDetails.baseWeightCurve .* ...
+    baseDetails.regionalSkinWeight .* (1 - protection.hard) .* ...
+    (1 - protection.baseLuminance) .* baseDetails.referenceCoverage;
+verifyEqual(testCase, baseDetails.supportMap, baseSupport, 'AbsTol', 1e-12);
+
+% Tone：主 weight 分支重算（s=25 时 uniform 分支未激活）。
+[~, toneDetails] = beauty.normalizeSkinTone(image, frequency, ...
+    beautyMasks, blemishMap, 25);
+profile25 = beautySmoothingProfile(25);
+toneCurveMap = profile25.toneStrength + ((25 / 100) ^ .85 - ...
+    profile25.toneStrength) .* smoothStep( ...
+    toneDetails.chromaEvidence, .25, .65);
+toneCurveMap = max(toneCurveMap, ...
+    (25 / 100) ^ .85 .* toneDetails.localChromaEvidence);
+toneAllowed = min(beautyMasks.skinMask, beautyMasks.strengthMap) .* ...
+    (1 - protection.hard);
+evidenceTerm = .08 + .35 * toneDetails.chromaEvidence + ...
+    .35 * toneDetails.localChromaEvidence + ...
+    .20 * toneDetails.blemishEvidence;
+toneWeight = min(max(toneCurveMap .* toneAllowed .* ...
+    (1 - protection.tone) .* evidenceTerm, 0), .55);
+verifyEqual(testCase, toneDetails.weightMap, toneWeight, 'AbsTol', 1e-12);
+
+% Whitening：supportMap 完整重算（该 stage 无 runtime 耦合）。
+[~, whiteningDetails] = beauty.applySkinWhitening(image, frequency, ...
+    beautyMasks, 50);
+whiteningAllowed = min(beautyMasks.skinMask, beautyMasks.strengthMap) .* ...
+    (1 - protection.hard);
+faceSkin = beautyMasks.faceSkinMask >= .5;
+whiteningAllowed(faceSkin) = max(whiteningAllowed(faceSkin), .85);
+whiteningSupport = min(max((50 / 100) ^ .85 .* whiteningAllowed .* ...
+    whiteningDetails.highlightProtection .* ...
+    (1 - protection.whitening), 0), 1);
+verifyEqual(testCase, whiteningDetails.supportMap, whiteningSupport, ...
+    'AbsTol', 1e-12);
+end
+
 function [image, faceBox, parsing] = fixtureImage(height, width)
 image = uint8(ones(height, width, 3) * 145);
 [xGrid, yGrid] = meshgrid(1:width, 1:height);
@@ -191,4 +321,10 @@ end
 
 function options = emptyBodyParsing(imageSize)
 options = struct('probabilities', zeros([imageSize, 20], 'single'));
+end
+
+function value = smoothStep(inputValue, low, high)
+%SMOOTHSTEP 复现生产 smoothstep 曲线（t^2*(3-2t)），供 tone 重算使用。
+t = min(max((double(inputValue) - low) / max(high - low, eps), 0), 1);
+value = t .^ 2 .* (3 - 2 * t);
 end

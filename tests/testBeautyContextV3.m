@@ -316,13 +316,14 @@ function testBridgeUnifiesDerivedFieldsAcrossEntries(testCase)
 %   rebuildBeautyDerivedMasks 统一回填：同一输入下 build 与 prepare
 %   （零 SCHP 不改变皮肤基础字段）的派生字段 bit-exact 一致；原尺寸
 %   重建路径的结果与对同一基础字段的直接桥接重建 bit-exact 一致。
-%   T06 起 policy evidence 层也由本桥接统一生成，纳入同一比较。
+%   T06 起 policy evidence 层也由本桥接统一生成，纳入同一比较；T07 起
+%   V4 protection 层（八个 stage 字段）同样由本桥接统一生成。
 [image, faceBox, parsing] = fixtureContext(40, 60);
 baseNames = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask'};
 derivedNames = {'textureProtectionMask', 'structureProtectionMask', ...
     'whiteningProtectionMask', 'chromaProtectionMask', ...
     'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
-    'nonFaceStrengthMap', 'protectionMasks', 'evidence'};
+    'nonFaceStrengthMap', 'protectionMasks', 'protection', 'evidence'};
 
 fromParsing = buildBeautyContextFromParsing(image, faceBox, parsing);
 prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
@@ -385,6 +386,48 @@ verifyTrue(testCase, isstruct(evidence) && isscalar(evidence));
 verifyEqual(testCase, fieldnames(evidence), evidenceFields);
 for index = 1:numel(evidenceFields)
     value = evidence.(evidenceFields{index});
+    verifyTrue(testCase, isnumeric(value) && ~islogical(value));
+    verifySize(testCase, value, imageSize);
+    verifyTrue(testCase, all(isfinite(value(:))));
+    verifyGreaterThanOrEqual(testCase, min(value(:)), 0);
+    verifyLessThanOrEqual(testCase, max(value(:)), 1);
+end
+end
+
+function testStageProtectionLayerIsValidAndBounded(testCase)
+%TESTSTAGEPROTECTIONLAYERISVALIDANDBOUNDED 生产链发布的 V4 protection
+%   层必须逐字段满足规范（八个 stage 字段、HxW double、real、finite、
+%   [0,1]），hard 严格二值；预览→原尺寸迁移路径在目标尺寸重建
+%   protection，且与直接桥接重建 bit-exact 一致。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60])), 'runtimeCache');
+stageNames = {'smoothingFine'; 'smoothingMid'; 'repairFine'; ...
+    'repairMid'; 'baseLuminance'; 'tone'; 'whitening'; 'hard'};
+assertStageProtectionValid(testCase, prepared.protection, stageNames, ...
+    size(image, [1, 2]));
+verifyTrue(testCase, all(prepared.protection.hard(:) == 0 | ...
+    prepared.protection.hard(:) == 1), ...
+    'protection.hard 必须可严格离散化为二值 identity。');
+
+targetSize = [80, 120];
+targetFaceBox = [20, 16, 60, 48];
+targetImage = imresize(image, targetSize, 'bilinear');
+resized = resizeBeautyContext(prepared, [targetSize, 3], ...
+    targetFaceBox, targetImage);
+assertStageProtectionValid(testCase, resized.protection, stageNames, ...
+    targetSize);
+rebuilt = rebuildBeautyDerivedMasks(targetImage, ...
+    rmfield(resized, 'runtimeCache'), targetFaceBox);
+verifyEqual(testCase, rebuilt.protection, resized.protection, 'AbsTol', 0);
+end
+
+function assertStageProtectionValid(testCase, protection, stageNames, ...
+        imageSize)
+verifyTrue(testCase, isstruct(protection) && isscalar(protection));
+verifyEqual(testCase, fieldnames(protection), stageNames);
+for index = 1:numel(stageNames)
+    value = protection.(stageNames{index});
     verifyTrue(testCase, isnumeric(value) && ~islogical(value));
     verifySize(testCase, value, imageSize);
     verifyTrue(testCase, all(isfinite(value(:))));
@@ -530,9 +573,11 @@ function testNormalizeAcceptsPartialV4Contexts(testCase)
 	semanticOnly = v31;
 	semanticOnly.schemaVersion = '4.0';
 	% T05 起生产 Context 自带 processability 分层，T06 起自带
-	% evidence 分层与 diagnostics 元数据；本用例验证"只有
+	% evidence 分层与 diagnostics 元数据，T07 起自带 protection
+	% 分层；本用例验证"只有
 	% semantic 层"的 partial V4，须先剥离生产链附加的分层。
-	extraLayers = {'processability', 'evidence', 'diagnostics'};
+	extraLayers = {'processability', 'evidence', 'protection', ...
+	    'diagnostics'};
 	extraLayers = extraLayers(isfield(semanticOnly, extraLayers));
 	if ~isempty(extraLayers)
 	    semanticOnly = rmfield(semanticOnly, extraLayers);
@@ -567,10 +612,11 @@ v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
 	aliasOnly = v31;
 	aliasOnly.schemaVersion = '4.0';
 	% T05 起生产 Context 自带 semantic/processability 分层，T06 起自带
-	% evidence 分层与 diagnostics 元数据；alias-only 夹具须剥离全部
+	% evidence 分层与 diagnostics 元数据，T07 起自带 protection 分层；
+	% alias-only 夹具须剥离全部
 	% canonical 层，才能构造真正"只有 compat alias"的 V4 Context。
 	canonicalLayers = {'semantic', 'processability', 'evidence', ...
-	    'diagnostics'};
+	    'protection', 'diagnostics'};
 	aliasOnly = rmfield(aliasOnly, ...
 	    canonicalLayers(isfield(aliasOnly, canonicalLayers)));
 	verifyError(testCase, @() normalizeBeautyContext(image, faceBox, aliasOnly), ...
@@ -711,6 +757,9 @@ verifyEqual(testCase, normalized.semantic.bodySkin, ...
 verifyEqual(testCase, normalized.evidence, prepared.evidence, 'AbsTol', 0);
 verifyEqual(testCase, normalized.diagnostics.policyEvidence, ...
     prepared.diagnostics.policyEvidence);
+% T07：protection 层八个 stage 字段同样原样通过 reader。
+verifyEqual(testCase, normalized.protection, prepared.protection, ...
+    'AbsTol', 0);
 end
 
 function [image, faceBox, parsing] = fixtureContext(height, width)

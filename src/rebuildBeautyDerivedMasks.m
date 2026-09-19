@@ -7,10 +7,18 @@ function context = rebuildBeautyDerivedMasks(inputImage, context, faceBox)
 %   structure/whitening/chroma 保护与强度图）及 tone/protectionMasks
 %   兼容字段。缓存/非缓存与 preview/full-size 路径因此共享同一份
 %   派生字段来源；后续 V4 分层字段的兼容生成也只在本桥接补齐，
-%   各入口不得再自行拼装派生字段。
+%   各入口不得再自行拼装。
+%
+%   T06 起，policy-time evidence 层同样只在本桥接生成/回填：以
+%   masks.buildBeautyMasks 的静态诊断（texture/structure）为来源调用
+%   masks.buildBeautyPolicyEvidence，evidence 只读图像、语义与诊断，
+%   不回写任何 protection 字段，也不包含 blemish/frequency 运行期
+%   产物。evidence 的来源/版本元数据挂在 context.diagnostics.
+%   policyEvidence（evidence 层本身按 V4 规范只允许 HxW mask 字段）。
 
 context = clearDerivedFields(context);
-[beautyMasks, ~] = masks.buildBeautyMasks(inputImage, context, faceBox);
+[beautyMasks, maskDiagnostics] = masks.buildBeautyMasks(inputImage, ...
+    context, faceBox);
 context.textureProtectionMask = beautyMasks.textureProtectionMask;
 context.structureProtectionMask = beautyMasks.structureProtectionMask;
 context.whiteningProtectionMask = beautyMasks.whiteningProtectionMask;
@@ -25,6 +33,10 @@ context.protectionMasks = struct( ...
     'whitening', beautyMasks.whiteningProtectionMask, ...
     'chroma', beautyMasks.chromaProtectionMask, ...
     'tone', context.chromaProtectionMask);
+[policyEvidence, evidenceMetadata] = masks.buildBeautyPolicyEvidence( ...
+    inputImage, context, faceBox, maskDiagnostics);
+context.evidence = policyEvidence;
+context = stampPolicyEvidenceMetadata(context, evidenceMetadata);
 end
 
 function context = clearDerivedFields(context)
@@ -32,9 +44,18 @@ function context = clearDerivedFields(context)
 names = {'textureProtectionMask', 'structureProtectionMask', ...
     'whiteningProtectionMask', 'chromaProtectionMask', ...
     'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
-    'nonFaceStrengthMap', 'protectionMasks'};
+    'nonFaceStrengthMap', 'protectionMasks', 'evidence'};
 names = names(isfield(context, names));
 if ~isempty(names)
     context = rmfield(context, names);
 end
+end
+
+function context = stampPolicyEvidenceMetadata(context, metadata)
+% 把 evidence 的来源/版本元数据写入 canonical diagnostics 层。
+if ~isfield(context, 'diagnostics') || ...
+        ~isstruct(context.diagnostics) || ~isscalar(context.diagnostics)
+    context.diagnostics = struct();
+end
+context.diagnostics.policyEvidence = metadata;
 end

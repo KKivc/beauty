@@ -316,12 +316,13 @@ function testBridgeUnifiesDerivedFieldsAcrossEntries(testCase)
 %   rebuildBeautyDerivedMasks 统一回填：同一输入下 build 与 prepare
 %   （零 SCHP 不改变皮肤基础字段）的派生字段 bit-exact 一致；原尺寸
 %   重建路径的结果与对同一基础字段的直接桥接重建 bit-exact 一致。
+%   T06 起 policy evidence 层也由本桥接统一生成，纳入同一比较。
 [image, faceBox, parsing] = fixtureContext(40, 60);
 baseNames = {'skinMask', 'faceSkinMask', 'nonFaceSkinMask'};
 derivedNames = {'textureProtectionMask', 'structureProtectionMask', ...
     'whiteningProtectionMask', 'chromaProtectionMask', ...
     'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
-    'nonFaceStrengthMap', 'protectionMasks'};
+    'nonFaceStrengthMap', 'protectionMasks', 'evidence'};
 
 fromParsing = buildBeautyContextFromParsing(image, faceBox, parsing);
 prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
@@ -334,6 +335,8 @@ for index = 1:numel(derivedNames)
     verifyEqual(testCase, fromParsing.(derivedNames{index}), ...
         prepared.(derivedNames{index}), 'AbsTol', 0);
 end
+verifyEqual(testCase, fromParsing.diagnostics.policyEvidence, ...
+    prepared.diagnostics.policyEvidence);
 
 targetSize = [80, 120];
 targetFaceBox = [20, 16, 60, 48];
@@ -345,6 +348,48 @@ rebuilt = rebuildBeautyDerivedMasks(targetImage, ...
 for index = 1:numel(derivedNames)
     verifyEqual(testCase, rebuilt.(derivedNames{index}), ...
         resized.(derivedNames{index}), 'AbsTol', 0);
+end
+verifyEqual(testCase, rebuilt.diagnostics.policyEvidence, ...
+    resized.diagnostics.policyEvidence);
+end
+
+function testPolicyEvidenceLayerIsValidAndBounded(testCase)
+%TESTPOLICYEVIDENCELAYERISVALIDANDBOUNDED 生产链发布的 policy evidence
+%   必须逐字段满足 V4 evidence 规范（HxW double、real、finite、[0,1]），
+%   元数据挂在 diagnostics.policyEvidence；预览→原尺寸迁移路径在目标
+%   尺寸重建 evidence，且与直接桥接重建 bit-exact 一致。
+[image, faceBox, parsing] = fixtureContext(40, 60);
+prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([40, 60])), 'runtimeCache');
+evidenceFields = {'periocular'; 'nostril'; 'noseStructure'; 'lip'; ...
+    'edgeDetail'; 'structureGradient'; 'darkDetail'};
+assertPolicyEvidenceValid(testCase, prepared.evidence, ...
+    evidenceFields, size(image, [1, 2]));
+metadata = prepared.diagnostics.policyEvidence;
+verifyEqual(testCase, metadata.builder, 'masks.buildBeautyPolicyEvidence');
+
+targetSize = [80, 120];
+targetFaceBox = [20, 16, 60, 48];
+targetImage = imresize(image, targetSize, 'bilinear');
+resized = resizeBeautyContext(prepared, [targetSize, 3], ...
+    targetFaceBox, targetImage);
+assertPolicyEvidenceValid(testCase, resized.evidence, ...
+    evidenceFields, targetSize);
+rebuilt = rebuildBeautyDerivedMasks(targetImage, ...
+    rmfield(resized, 'runtimeCache'), targetFaceBox);
+verifyEqual(testCase, rebuilt.evidence, resized.evidence, 'AbsTol', 0);
+end
+
+function assertPolicyEvidenceValid(testCase, evidence, evidenceFields, imageSize)
+verifyTrue(testCase, isstruct(evidence) && isscalar(evidence));
+verifyEqual(testCase, fieldnames(evidence), evidenceFields);
+for index = 1:numel(evidenceFields)
+    value = evidence.(evidenceFields{index});
+    verifyTrue(testCase, isnumeric(value) && ~islogical(value));
+    verifySize(testCase, value, imageSize);
+    verifyTrue(testCase, all(isfinite(value(:))));
+    verifyGreaterThanOrEqual(testCase, min(value(:)), 0);
+    verifyLessThanOrEqual(testCase, max(value(:)), 1);
 end
 end
 
@@ -484,10 +529,13 @@ function testNormalizeAcceptsPartialV4Contexts(testCase)
 	    emptyBodyParsing([40, 60])), 'runtimeCache');
 	semanticOnly = v31;
 	semanticOnly.schemaVersion = '4.0';
-	% T05 起生产 Context 自带 processability 分层；本用例验证"只有
+	% T05 起生产 Context 自带 processability 分层，T06 起自带
+	% evidence 分层与 diagnostics 元数据；本用例验证"只有
 	% semantic 层"的 partial V4，须先剥离生产链附加的分层。
-	if isfield(semanticOnly, 'processability')
-	    semanticOnly = rmfield(semanticOnly, 'processability');
+	extraLayers = {'processability', 'evidence', 'diagnostics'};
+	extraLayers = extraLayers(isfield(semanticOnly, extraLayers));
+	if ~isempty(extraLayers)
+	    semanticOnly = rmfield(semanticOnly, extraLayers);
 	end
 	semanticOnly.semantic = struct('regions', v31.regions);
 normalized = normalizeBeautyContext(image, faceBox, semanticOnly);
@@ -518,10 +566,11 @@ v31 = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
 
 	aliasOnly = v31;
 	aliasOnly.schemaVersion = '4.0';
-	% T05 起生产 Context 自带 semantic/processability 分层；alias-only
-	% 夹具须剥离全部 canonical 层，才能构造真正"只有 compat alias"的
-	% V4 Context。
-	canonicalLayers = {'semantic', 'processability'};
+	% T05 起生产 Context 自带 semantic/processability 分层，T06 起自带
+	% evidence 分层与 diagnostics 元数据；alias-only 夹具须剥离全部
+	% canonical 层，才能构造真正"只有 compat alias"的 V4 Context。
+	canonicalLayers = {'semantic', 'processability', 'evidence', ...
+	    'diagnostics'};
 	aliasOnly = rmfield(aliasOnly, ...
 	    canonicalLayers(isfield(aliasOnly, canonicalLayers)));
 	verifyError(testCase, @() normalizeBeautyContext(image, faceBox, aliasOnly), ...
@@ -658,6 +707,10 @@ verifyEqual(testCase, normalized.semantic.faceSkin, ...
     prepared.semantic.faceSkin, 'AbsTol', 0);
 verifyEqual(testCase, normalized.semantic.bodySkin, ...
     prepared.semantic.bodySkin, 'AbsTol', 0);
+% T06：evidence 层与 policyEvidence 元数据同样原样通过 reader。
+verifyEqual(testCase, normalized.evidence, prepared.evidence, 'AbsTol', 0);
+verifyEqual(testCase, normalized.diagnostics.policyEvidence, ...
+    prepared.diagnostics.policyEvidence);
 end
 
 function [image, faceBox, parsing] = fixtureContext(height, width)

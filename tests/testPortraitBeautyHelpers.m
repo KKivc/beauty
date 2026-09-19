@@ -584,6 +584,126 @@ verifyError(testCase, @() evaluateImage(sourceImage, sourceImage(:, :, 1), 0), .
     'evaluateImage:InvalidImage');
 end
 
+function testPolicyEvidencePublishesValidContinuousFields(testCase)
+%TESTPOLICYEVIDENCEPUBLISHESVALIDCONTINUOUSFIELDS policy evidence 层必须
+%   逐字段满足 V4 evidence 规范：HxW double、实数、有限、[0,1]，
+%   且来源/版本元数据挂在 diagnostics 层而非 evidence 层内部。
+[sourceImage, faceBox, parsing] = evidencePortraitFixture();
+context = prepareBeautyContext(sourceImage, faceBox, parsing, ...
+    emptyBodyParsing(size(sourceImage, [1 2])));
+verifyTrue(testCase, isfield(context, 'evidence'));
+evidence = context.evidence;
+verifyTrue(testCase, isstruct(evidence) && isscalar(evidence));
+expectedFields = {'periocular'; 'nostril'; 'noseStructure'; 'lip'; ...
+    'edgeDetail'; 'structureGradient'; 'darkDetail'};
+verifyEqual(testCase, fieldnames(evidence), expectedFields);
+imageSize = size(sourceImage, [1, 2]);
+for index = 1:numel(expectedFields)
+    value = evidence.(expectedFields{index});
+    verifyTrue(testCase, isnumeric(value) && ~islogical(value), ...
+        'evidence 字段必须是连续强度的数值矩阵。');
+    verifySize(testCase, value, imageSize);
+    verifyTrue(testCase, all(isfinite(value(:))));
+    verifyGreaterThanOrEqual(testCase, min(value(:)), 0);
+    verifyLessThanOrEqual(testCase, max(value(:)), 1);
+end
+% 注入的语义区域必须产生非零 evidence，确认字段不是恒空占位。
+verifyGreaterThan(testCase, max(evidence.periocular(:)), 0);
+verifyGreaterThan(testCase, max(evidence.noseStructure(:)), 0);
+verifyGreaterThan(testCase, max(evidence.lip(:)), 0);
+verifyGreaterThan(testCase, max(evidence.edgeDetail(:)), 0);
+verifyGreaterThan(testCase, max(evidence.structureGradient(:)), 0);
+verifyGreaterThan(testCase, max(evidence.darkDetail(:)), 0);
+
+verifyTrue(testCase, isfield(context, 'diagnostics') && ...
+    isfield(context.diagnostics, 'policyEvidence'));
+metadata = context.diagnostics.policyEvidence;
+verifyTrue(testCase, all(isfield(metadata, ...
+    {'builder', 'evidenceVersion', 'algorithmVersion', 'sources'})));
+verifyEqual(testCase, metadata.algorithmVersion, ...
+    beautyPipelineContract().algorithmVersion);
+verifyTrue(testCase, all(isfield(metadata.sources, expectedFields)));
+end
+
+function testPolicyEvidenceIsDeterministicWithoutRuntimeArtifacts(testCase)
+%TESTPOLICYEVIDENCEISDETERMINISTICWITHOUTRUNTIMEARTIFACTS 无循环依赖：
+%   evidence 只由图像、语义和静态诊断决定，构建它不要求先运行
+%   blemish/frequency；桥接重建与直接构建都复现同一 evidence。
+[sourceImage, faceBox, parsing] = evidencePortraitFixture();
+prepared = prepareBeautyContext(sourceImage, faceBox, parsing, ...
+    emptyBodyParsing(size(sourceImage, [1 2])));
+
+stripped = rmfield(prepared, 'runtimeCache');
+stripped = rmfield(stripped, 'evidence');
+stripped = rmfield(stripped, 'diagnostics');
+rebuilt = rebuildBeautyDerivedMasks(sourceImage, stripped, faceBox);
+verifyEqual(testCase, rebuilt.evidence, prepared.evidence, 'AbsTol', 0);
+verifyEqual(testCase, rebuilt.diagnostics.policyEvidence, ...
+    prepared.diagnostics.policyEvidence);
+
+[~, maskDiagnostics] = masks.buildBeautyMasks(sourceImage, ...
+    stripped, faceBox);
+[directEvidence, directMetadata] = masks.buildBeautyPolicyEvidence( ...
+    sourceImage, stripped, faceBox, maskDiagnostics);
+verifyEqual(testCase, directEvidence, prepared.evidence, 'AbsTol', 0);
+verifyEqual(testCase, directMetadata, ...
+    prepared.diagnostics.policyEvidence);
+repeatEvidence = masks.buildBeautyPolicyEvidence(sourceImage, ...
+    stripped, faceBox, maskDiagnostics);
+verifyEqual(testCase, repeatEvidence, directEvidence, 'AbsTol', 0);
+
+% 诊断缺失时必须显式报错，不允许静默退化为不完整 evidence。
+verifyError(testCase, @() masks.buildBeautyPolicyEvidence(sourceImage, ...
+    stripped, faceBox, struct()), 'masks:InvalidDiagnostics');
+
+% 运行期处理（内部生成 blemish/frequency 产物）不改变 context 上的
+% policy evidence，也不改变其可重建性。
+params = struct('smoothingStrength', 50, 'whiteningStrength', 25);
+beautifyImage(sourceImage, params, faceBox, prepared);
+verifyEqual(testCase, prepared.evidence, rebuilt.evidence, 'AbsTol', 0);
+end
+
+function testPolicyEvidenceDoesNotModifyProtectionOrOutput(testCase)
+%TESTPOLICYEVIDENCEDOESNOTMODIFYPROTECTIONOROUTPUT evidence 不得直接
+%   决定、覆盖或修改生产 protection 与最终 RGB：即使把全部 evidence
+%   字段篡改为全 1，重新生成的 protection 与端到端输出仍 bit-exact。
+[sourceImage, faceBox, parsing] = evidencePortraitFixture();
+prepared = prepareBeautyContext(sourceImage, faceBox, parsing, ...
+    emptyBodyParsing(size(sourceImage, [1 2])));
+params = struct('smoothingStrength', 100, 'whiteningStrength', 15);
+cleanOutput = beautifyImage(sourceImage, params, faceBox, ...
+    rmfield(prepared, 'runtimeCache'));
+
+regeneratedNames = {'textureProtectionMask', 'structureProtectionMask', ...
+    'whiteningProtectionMask', 'chromaProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'nonFaceStrengthMap', 'protectionMasks', 'runtimeCache'};
+tampered = prepared;
+evidenceNames = fieldnames(tampered.evidence);
+for index = 1:numel(evidenceNames)
+    tampered.evidence.(evidenceNames{index}) = ...
+        ones(size(sourceImage, [1, 2]));
+end
+cleanBare = rmfield(prepared, ...
+    regeneratedNames(isfield(prepared, regeneratedNames)));
+tamperedBare = rmfield(tampered, ...
+    regeneratedNames(isfield(tampered, regeneratedNames)));
+cleanMasks = masks.buildBeautyMasks(sourceImage, cleanBare, faceBox);
+tamperedMasks = masks.buildBeautyMasks(sourceImage, tamperedBare, faceBox);
+maskNames = {'textureProtectionMask', 'structureProtectionMask', ...
+    'whiteningProtectionMask', 'chromaProtectionMask', ...
+    'toneProtectionMask', 'strengthMap', 'faceStrengthMap', ...
+    'nonFaceStrengthMap', 'hardProtectionMask', 'protectionMask'};
+for index = 1:numel(maskNames)
+    verifyEqual(testCase, tamperedMasks.(maskNames{index}), ...
+        cleanMasks.(maskNames{index}), 'AbsTol', 0);
+end
+
+tamperedOutput = beautifyImage(sourceImage, params, faceBox, ...
+    rmfield(tampered, 'runtimeCache'));
+verifyEqual(testCase, tamperedOutput, cleanOutput);
+end
+
 function [sourceImage, faceBox, skinRegion, backgroundRegion] = ...
         syntheticPortrait(imageHeight, imageWidth, faceWidth)
 %SYNTHETICPORTRAIT 构造带细纹的中等肤色高分辨率测试图。
@@ -775,6 +895,36 @@ for index = 1:numel(names)
     confidences.(names{index}) = zeros(imageSize);
 end
 parsing = struct('regions', regions, 'regionConfidence', confidences);
+end
+
+function [sourceImage, faceBox, parsing] = evidencePortraitFixture
+%EVIDENCEPORTRAITFIXTURE 带眼/鼻/唇语义的合成人像，供 policy evidence
+%   测试使用；区域公式与测试文件内其他人像夹具保持一致风格。
+[sourceImage, faceBox, skinRegion, ~] = syntheticPortrait(240, 320);
+[xGrid, yGrid] = meshgrid(1:size(sourceImage, 2), 1:size(sourceImage, 1));
+centerX = faceBox(1) + faceBox(3) / 2;
+centerY = faceBox(2) + faceBox(4) / 2;
+noseRegion = ((xGrid - centerX) / 14) .^ 2 + ...
+    ((yGrid - (centerY + 10)) / 34) .^ 2 <= 1;
+leftEyeRegion = ((xGrid - (centerX - 38)) / 13) .^ 2 + ...
+    ((yGrid - (centerY - 30)) / 6) .^ 2 <= 1;
+rightEyeRegion = ((xGrid - (centerX + 38)) / 13) .^ 2 + ...
+    ((yGrid - (centerY - 30)) / 6) .^ 2 <= 1;
+lipRegion = ((xGrid - centerX) / 20) .^ 2 + ...
+    ((yGrid - (centerY + 52)) / 6) .^ 2 <= 1;
+parsing = syntheticParsingForContext(size(sourceImage, [1 2]));
+parsing.regions.skin = double(skinRegion);
+parsing.regionConfidence.skin = double(skinRegion);
+parsing.regions.nose = double(noseRegion & skinRegion);
+parsing.regionConfidence.nose = double(noseRegion & skinRegion);
+parsing.regions.leftEye = double(leftEyeRegion & skinRegion);
+parsing.regionConfidence.leftEye = double(leftEyeRegion & skinRegion);
+parsing.regions.rightEye = double(rightEyeRegion & skinRegion);
+parsing.regionConfidence.rightEye = double(rightEyeRegion & skinRegion);
+parsing.regions.upperLip = double(lipRegion & skinRegion);
+parsing.regionConfidence.upperLip = double(lipRegion & skinRegion);
+parsing.regions.lowerLip = double(lipRegion & skinRegion);
+parsing.regionConfidence.lowerLip = double(lipRegion & skinRegion);
 end
 
 function context = contextForTestImage(image, faceBox, skinMask, hardMask, neckMask)

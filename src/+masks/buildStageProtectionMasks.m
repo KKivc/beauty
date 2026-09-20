@@ -4,6 +4,12 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %   门控按各生产 stage 的真实组合方式映射为八个 stage 字段，只做行为
 %   等价的 algebra 组合，不重新设计任何权重。
 %
+%   T30（region policy gate activation）：在本层额外发布五条纯 policy
+%   带 regionBandFine/regionBandMid/regionBandBase/regionBandTone/
+%   regionBandWhitening（见文末"T30 纯 policy 带"段），把 T20/T21/T22
+%   的分级保护从"仅作用于折叠快照"改为真正注入消费侧算术门控；带与
+%   legacy 折叠式解耦，缺省/零带时逐位还原 legacy。
+%
 %   T20（eye/lip identity policy）：本函数新增可选第二输入
 %   policyEvidence（masks.buildBeautyPolicyEvidence 的第一输出，经
 %   rebuildBeautyDerivedMasks 桥接传入；生产调用点 beautifyImage 从
@@ -56,11 +62,11 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %         光晕；略低于 Fine 侧 .95，避免美白场在带边形成自身台阶。
 %         过渡带不设 cap：眼周/唇周皮肤亮度应与全脸连续。
 %
-%   消费侧现状（诚实边界）：smoothingFine/smoothingMid/hard 被
-%   smoothSkinTexture（T12/T13）直接用于输出算术，本 policy 对磨皮立
-%   即生效；repairFine/repairMid/baseLuminance/tone/whitening 仍是
-%   T14--T18 consumer 的零瑕疵参考快照（算术门控由未折叠字段承载），
-%   分级数值先行发布，待对应 consumer 迁移后生效。
+%   消费侧（T30 已激活）：smoothingFine/smoothingMid/hard 被
+%   smoothSkinTexture（T12/T13）直接用于输出算术；repairFine/
+%   repairMid/baseLuminance/tone/whitening 的分级数值经纯 policy 带
+%   regionBand* 注入对应 consumer 的算术门控（见文末"T30 纯 policy
+%   带"段），T20 的 eye/lip 分级保护因此全部生效。
 %
 %   T21（nose region policy）：在 eye/lip 三带之外新增鼻部分级保护。
 %   policyEvidence 新增消费 nostril/noseStructure 两个语义字段（T06
@@ -111,16 +117,14 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %       两带可能重叠（鼻孔边缘梯度强），stage 字段全部取 max，重叠
 %       不双重计入。
 %
-%   消费侧现状（诚实边界，与 T20 相同）：smoothingFine/smoothingMid/
-%   hard 被 smoothSkinTexture（T12/T13）直接用于输出算术，nostril
-%   band 的 Fine/Mid 保护立即生效；repairFine/repairMid/
-%   baseLuminance/tone/whitening 仍是 T14--T18 consumer 的零瑕疵参
-%   考快照（T14--T18 的算术门控由未折叠字段承载，textureGate/
-%   featureGate 直接读取 v3.1 mask 产物而非本层 policyTexture），
-%   鼻部分级数值先行发布，待对应 consumer 迁移后生效。T21 不改变
-%   T07 legacy 折叠里的整鼻 .50 Mid 门（零带/compat 时必须逐位还
-%   原 legacy）；鼻皮肤的可处理性由证据带门槛（.15/.40 下支撑点）
-%   保证，普通鼻皮肤零带、不新增任何冻结。
+%   消费侧（T30 已激活，与 T20 相同）：smoothingFine/smoothingMid/
+%   hard 被 smoothSkinTexture（T12/T13）直接用于输出算术；nostril 带
+%   的 Fine/Mid 保护同时经 regionBandFine/regionBandMid 注入 repair 的
+%   textureGate/noseMidGate，鼻结构带经 regionBandMid/regionBandBase
+%   注入 repair.noseMidGate/evenSkinLuminance.regionBandGate。T21 不改变
+%   T07 legacy 折叠里的整鼻 .50 Mid 门（零带/compat 时必须逐位还原
+%   legacy）；鼻皮肤的可处理性由证据带门槛（.15/.40 下支撑点）保证，
+%   普通鼻皮肤零带、不新增任何冻结。
 %
 %   T22（ear region policy）：在 eye/lip/nose 之外新增耳部结构带。
 %   policyEvidence 新增消费 T22 evidence 字段 earStructure（耳语义
@@ -164,18 +168,25 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %     两带（ear 结构带与 eye/lip/nose 带）可能重叠，stage 字段全部取
 %     max，重叠不双重计入。
 %
-%   消费侧现状（诚实边界，T22 复核）：beautifyImage 的 stage contract
-%   组装里，只有 smoothingFine/smoothingMid/hard 直接进入输出算术
-%   （T12/T13 的 smoothSkinTexture 与 T19 的 compose hard restore）；
-%   repairFine/repairMid/baseLuminance/tone/whitening 快照只由各
-%   consumer 的诊断字段（fineGateZeroBlemish/mediumGateZeroBlemish/
-%   baseGateSnapshot/toneGateSnapshot/whiteningGateSnapshot）与测试消
-%   费，其算术门控由生产端从未折叠的 v3.1 mask 产物
-%   （blemishRelaxedGate/strongStructureCap/textureGate/noseMidGate/
-%   structureGate/featureGate）重建，不读本层快照。因此 T22 的可观测
-%   效果全部由 smoothingFine/smoothingMid 承载（T20/T21 同一边界），
-%   其余字段按同一契约先行发布，待对应 consumer 迁移后生效；耳部
-%   瑕疵修复（blemishMap 驱动）不在本层可控范围内。
+%   消费侧现状（T30 已激活）：beautifyImage 的 stage contract 组装把
+%   本层发布的纯 policy 带 regionBand* 注入各 stage 的真实算术门控
+%   （gate := gate .* (1 - band)，见 beautifyImage 的
+%   makeRepairStageContract/makeBaseLuminanceStageContract/
+%   makeToneStageContract/makeWhiteningStageContract）：
+%     regionBandFine     → repair.textureGate（Fine/Mid/chroma 权重与
+%                          共享 referenceReliability 的纹理门）；
+%     regionBandMid      → repair.noseMidGate（仅 mediumWeight 的鼻部
+%                          Mid 门，不与 textureGate 重复计入）；
+%     regionBandBase     → evenSkinLuminance 的 regionBandGate（只作用于
+%                          逐像素 supportMap，不进全局参考统计）；
+%     regionBandTone     → normalizeSkinTone.featureGate（主分支）；
+%     regionBandWhitening→ applySkinWhitening.featureGate。
+%   smoothingFine/smoothingMid/hard 继续被 smoothSkinTexture（T12/T13）
+%   与 compose hard restore（T19）直接消费。因此 T20/T21/T22 的分级保
+%   护不再只作用于快照，而是真正进入输出算术。
+%   带外（band == 0）时 gate .* 1 与 legacy 逐位相等，compat 路径与零带
+%   路径输出逐位不变；耳部瑕疵修复（blemishMap 驱动）仍不在本层可控
+%   范围内。
 %
 %   统一语义：protection 字段是"该 stage 施加的保护量"，取值 [0,1]，
 %   消费侧用 gate = 1 - protection（或 1 - max(field, hard)）还原生产
@@ -186,6 +197,14 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %       strengthMap 等强度侧标量一律不进入本层；
 %     * runtime 证据（blemishMap 及其耦合的 structure gate 放宽）不进
 %       入本层，字段记录其在零瑕疵参考点的快照（见 repairFine 说明）。
+%
+%   字段语义分两类（T30 起）：
+%     * 八个 stage 字段（smoothingFine…hard）—— "该 stage 施加的保护
+%       量"，取值 [0,1]，消费侧用 gate = 1 - protection（或
+%       1 - max(field, hard)）还原生产门控；T20/T21/T22 的分级数值已
+%       按 max 折入这些快照，继续作为零瑕疵参考/诊断。
+%     * 五条 regionBand* 纯 policy 带 —— 追加保护量，消费侧用
+%       gate := gate .* (1 - band) 注入；它们才是分级保护的激活载体。
 %
 %   legacy 折叠式（T07 推导，Bands 全零时逐位还原）：
 %     smoothingFine
@@ -260,7 +279,8 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %                   消费 earStructure 耳部结构字段，其余字段仍与本层
 %                   解耦。缺省（nargin<2）、空结构或缺少任一消费字段
 %                   （partial V4）时按零带处理，输出与 T07 legacy 折叠
-%                   逐位相等；字段存在但尺寸/取值非法时 fail-fast。
+%                   逐位相等（含五条 regionBand* 全零）；字段存在但
+%                   尺寸/取值非法时 fail-fast。
 
 if nargin < 2
     policyEvidence = [];
@@ -380,6 +400,45 @@ structureGateWhitening(faceSkinSupport) = ...
 whiteningField = max(1 - structureGateWhitening .* (1 - whitening), ...
     max(.85 * detailBand, .85 * nostrilDetailBand));
 
+% T30 纯 policy 带（激活载体，与上面的 legacy 折叠式解耦）。
+%   语义：某通道相对 legacy 追加的保护量，取值 [0,1]；消费侧唯一读取
+%   方式为 gate := gate .* (1 - band)。带值只由 T20/T21/T22 的证据带
+%   合成，不再折叠进 legacy 表达式，也不再从折叠快照反解。缺省/
+%   partial evidence 时全零（各带下支撑点以上才有非零值），
+%   gate .* 1 逐位还原 legacy。
+%   逐通道来源（与各 stage 折叠快照里 max 项一一对应）：
+%     regionBandFine —— texture 通道替换量，作用于 repair.textureGate
+%       （fineWeight/mediumWeight/chromaWeight 与共享
+%       referenceReliability）。eye/lip detail 带、nostril 软带、ear
+%       结构带各取 .95（检测细节档位，与各 stage 快照同档）。
+%       过渡带 cap（1-.55*transitionBand）不进入本带：它是"打开处理
+%       量"的负向 cap，而本带语义为非负追加保护量；该 cap 已由
+%       smoothingFine 快照直接消费生效。
+%     regionBandMid —— Mid 专属追加量（texture 通道之外的鼻部/过渡
+%       项），作用于 repair.noseMidGate（仅 mediumWeight）。刻意不含
+%       detail/nostril/ear 项：这三项的 Mid 保护在折叠快照里由
+%       policyTexture（= 本层 regionBandFine）承载，重复放进 noseMidGate
+%       会让 mediumWeight 同时乘 (1-bandFine) 与 (1-bandMid) 而双重
+%       计入（实测 detail 带内会从 .95 档位跌到 .9975 保护）。
+%       .30*transitionBand 维持眼窝/唇周中频明暗连续；.85*noseStructure
+%       给鼻梁/鼻翼光影结构保留 >=15% 中频处理量。
+%     regionBandBase —— evenSkinLuminance 的 regionBandGate（逐像素
+%       supportMap 门，不进全局参考卷积）。detail/nostril/ear 取 .95
+%       （与 baseLuminance 快照的 policyTexture 通道同档），
+%       noseStructure 取 .80（鼻梁低频明暗，保留 >=20% 亮度均衡量）。
+%     regionBandTone —— normalizeSkinTone 主分支 featureGate。只有唇
+%       detail 带（唇色是 identity 色度）；鼻/耳无 identity 色度语义。
+%     regionBandWhitening —— applySkinWhitening.featureGate。eye/lip
+%       detail 带与 nostril 软带各 .85（防假白光晕），与 whitening 快照
+%       同档；耳部不设退让（耳-颊肤色连续）。
+regionBandFine = max(max(.95 * detailBand, .95 * nostrilDetailBand), ...
+    .95 * earStructureBand);
+regionBandMid = max(.30 * transitionBand, .85 * noseStructureBand);
+regionBandBase = max(max(.95 * detailBand, .95 * nostrilDetailBand), ...
+    max(.95 * earStructureBand, .80 * noseStructureBand));
+regionBandTone = .90 * lipDetailBand;
+regionBandWhitening = max(.85 * detailBand, .85 * nostrilDetailBand);
+
 protection = struct( ...
     'smoothingFine', clamp01(smoothingFine), ...
     'smoothingMid', clamp01(smoothingMid), ...
@@ -388,7 +447,12 @@ protection = struct( ...
     'baseLuminance', clamp01(baseLuminance), ...
     'tone', clamp01(tone), ...
     'whitening', clamp01(whiteningField), ...
-    'hard', hard);
+    'hard', hard, ...
+    'regionBandFine', clamp01(regionBandFine), ...
+    'regionBandMid', clamp01(regionBandMid), ...
+    'regionBandBase', clamp01(regionBandBase), ...
+    'regionBandTone', clamp01(regionBandTone), ...
+    'regionBandWhitening', clamp01(regionBandWhitening));
 end
 
 function [eyeField, lipField] = readEyeLipEvidence(policyEvidence, imageSize)

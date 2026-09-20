@@ -347,7 +347,8 @@ function testNosePolicyWiringPreservesIdentityAndProcessability(testCase)
 %     tone 字段全图逐位等于 legacy（无鼻部项，肤色与脸颊连续）；
 %     nostril 软带内 Fine 处理量受控下降（探针实测比值≈.81，阈值
 %       .90 留几何余量）；repairFine 在带内严格抬升（快照先行发布）；
-%     美白-only 输出与 legacy 逐位一致（whitening consumer 未迁移）；
+%     美白-only 输出带外（regionBandWhitening == 0）与 legacy 逐位一致，
+%       带内差异由 regionBandWhitening 单字段承载（T30 激活）；
 %     cached 与 uncached 输出逐位一致。
 %   夹具说明：Fine 处理量下降只能在鼻内结构保护未饱和（Fine 门打开）
 %   的人像上观测。高结构脊的合成鼻（syntheticNosePortrait）在 nostril
@@ -400,7 +401,15 @@ verifyEqual(testCase, alphaPolicy(noseData.freckle), ...
     alphaLegacy(noseData.freckle), 'AbsTol', 0, ...
     '雀斑处的 Fine 处理量不得因鼻部 policy 改变。');
 
-% tone 字段全图 bit-equal（无鼻部项）；美白-only 输出 bit-exact。
+% tone 字段全图 bit-equal（无鼻部项）；T30 激活后 whitening consumer 的
+%   算术门控为 contract.featureGate = (1 - whitening) .*
+%   (1 - protection.regionBandWhitening)，故美白-only 断言由 bit-exact
+%   改为"带外 bit-exact + 带内单字段归因"：
+%     * 带外（regionBandWhitening == 0）逐位等于 legacy；
+%     * 带内确有可观测的假白退让差异；
+%     * 差异只由 regionBandWhitening 承载——置零该字段的证据来源
+%       （periocular/lip/nostril）后逐位回到 legacy；置零其他带来源
+%       （noseStructure）则美白-only 输出不变，仍不等于 legacy。
 verifyEqual(testCase, protection.tone, legacyProtection.tone, 'AbsTol', 0, ...
     'T21 不得给 tone 增加鼻部项（肤色与脸颊连续）。');
 whiteningParams = struct('smoothingStrength', 0, 'whiteningStrength', 100);
@@ -408,8 +417,26 @@ whiteningPolicyOut = beautifyImage(image, whiteningParams, faceBox, ...
     bareContext);
 whiteningLegacyOut = beautifyImage(image, whiteningParams, faceBox, ...
     legacyContext);
-verifyEqual(testCase, whiteningPolicyOut, whiteningLegacyOut, ...
-    '美白-only 输出必须与 legacy 逐位一致（whitening consumer 未迁移）。');
+outsideWhitening = protection.regionBandWhitening == 0;
+whiteningDiff = mean(abs(double(whiteningPolicyOut) - ...
+    double(whiteningLegacyOut)), 3);
+verifyEqual(testCase, nnz(whiteningDiff(outsideWhitening) > 0), 0, ...
+    '带外（regionBandWhitening == 0）美白-only 输出必须与 legacy 逐位一致。');
+verifyGreaterThan(testCase, nnz(whiteningDiff(~outsideWhitening) > 0), 0, ...
+    'regionBandWhitening 带内必须出现可观测的美白退让差异。');
+noWhiteningBandContext = bareContext;
+noWhiteningBandContext.evidence = zeroEvidenceFields( ...
+    noWhiteningBandContext.evidence, {'periocular', 'lip', 'nostril'}, ...
+    size(image, 1:2));
+verifyEqual(testCase, beautifyImage(image, whiteningParams, faceBox, ...
+    noWhiteningBandContext), whiteningLegacyOut, ...
+    '置零 regionBandWhitening 后美白-only 输出必须逐位回到 legacy。');
+noNoseStructureContext = bareContext;
+noNoseStructureContext.evidence = zeroEvidenceFields( ...
+    noNoseStructureContext.evidence, {'noseStructure'}, size(image, 1:2));
+verifyNotEqual(testCase, beautifyImage(image, whiteningParams, faceBox, ...
+    noNoseStructureContext), whiteningLegacyOut, ...
+    '置零其他带（regionBandBase/Mid 的鼻结构来源）不得抹平美白-only 差异。');
 
 % nostril 软带：Fine 处理量受控下降，保护字段不低于 legacy，
 % repairFine 快照在带内严格抬升。
@@ -595,6 +622,17 @@ masksStruct = struct( ...
     'noseMask', zeros(imageSize), ...
     'faceSkinMask', zeros(imageSize), ...
     'faceScale', 120);
+end
+
+function evidence = zeroEvidenceFields(evidence, names, imageSize)
+%ZEROEVIDENCEFIELDS 把 evidence 中指定语义字段清零（T30 单字段归因用）。
+%   buildBeautyMasks 不读 evidence，故该消融只影响 policy-time 的
+%   regionBand* 带，不改变 processability/semantic 层与任何 stage 快照。
+for index = 1:numel(names)
+    if isfield(evidence, names{index})
+        evidence.(names{index}) = zeros(imageSize);
+    end
+end
 end
 
 function value = smoothStepValue(inputValue, low, high)

@@ -14,8 +14,9 @@ function [repairedFrequency, diagnostics] = repairSkinBlemishes( ...
 %   原顺序重建：
 %     structureGate = min(blemishRelaxedGate, strongStructureCap)
 %     fineWeight    = clamp(Wf .* structureGate, 0, 1) .* textureGate
+%                     .* textureBandGate
 %     mediumWeight  = clamp(Wm .* structureGate, 0, 1) .* noseMidGate
-%                     .* textureGate
+%                     .* textureGate .* textureBandGate
 %   字段语义：
 %     repairFine / repairMid — T07 发布的零瑕疵参考快照
 %                          repairFine = 1 - structureGate0·(1 - texture)、
@@ -31,8 +32,15 @@ function [repairedFrequency, diagnostics] = repairSkinBlemishes( ...
 %                          structureGate0 = 1 - structure 恒成立）；
 %     strongStructureCap — 强结构固定下限 1 - .65·strongStructure；
 %     textureGate        — v3.2 线性纹理门 1 - texture，单独发布；
+%                          T30 起保持"未带"语义，同时用于逐像素权重与
+%                          全局参考采样；
+%     textureBandGate    — T30 纯 policy 带 1 - regionBandFine，单独发布，
+%                          **只乘逐像素权重**（fine/medium/chroma），不进
+%                          referenceReliability；
 %     noseMidGate        — Mid 鼻部门 1 - .50·nose（repair 侧无
-%                          alphaCurve，纯静态），单独发布。
+%                          alphaCurve，纯静态），单独发布，T30 起再乘
+%                          (1 - regionBandMid)（该门只作用于逐像素
+%                          mediumWeight，可直接并入）。
 %   textureGate/noseMidGate 必须独立于结构门发布：生产链在结构门与
 %   纹理/鼻部门之间对权重做 [0,1] 截断（clamp(W·structureGate) 之后
 %   才乘 nose/texture 门），把纹理或 nose 折叠进门控积会在截断饱和区
@@ -46,6 +54,12 @@ function [repairedFrequency, diagnostics] = repairSkinBlemishes( ...
 %   > 0 时相对快照只增不减。缺字段 fail-fast，不在函数内部重新拼装，
 %   也不静默回退；未提供第 5 参的旧调用方走 legacy 兼容路径，行为
 %   不变。
+%   T30 带外零泄漏：regionBandFine 刻意不并入 textureGate，而单独发布
+%   textureBandGate。因为 textureGate 还用作 referenceReliability 的邻域
+%   参考采样门，随后经 imfilter（radius = min(20, max(3, round(.070*
+%   faceScale)))）把带内变化扩散到带外 ±radius 像素：实测（T22 ear
+%   fixture）并入会在耳带外产生 1px 的 2 灰度级泄漏。拆出后带外
+%   （band==0 → gate==1）参考采样与逐像素权重都逐位还原 legacy。
 %   T15 收口后，general textureProtection/structureProtection/
 %   hardProtection 与 noseMask 的读取只服务 legacy 兼容路径（4 参调
 %   用方）与输入校验；stage 路径的 fineWeight/mediumWeight/
@@ -181,14 +195,20 @@ chromaWeight = min(max(chromaWeight, 0), 1);
 % T14/T15：stage 路径的纹理门按生产原位（截断之后）从 contract 读取，
 % Fine/Mid/chromaWeight 与共享 referenceReliability 统一应用；legacy
 % 路径继续从 general texture mask 计算，行为不变。
+% T30：纯 policy 带 textureBandGate（1 - regionBandFine）只乘逐像素权
+% 重；referenceReliability（下方 imfilter 邻域参考）仍用未带
+% textureGate，避免带内变化经卷积扩散到带外。零带/legacy 时
+% textureBandGate == 1，乘法恒等，逐像素权重与 legacy 逐位相等。
 if useStageContract
     textureGate = repairContract.textureGate;
+    textureBandGate = repairContract.textureBandGate;
 else
     textureGate = 1 - textureProtection;
+    textureBandGate = ones(imageSize);
 end
-fineWeight = fineWeight .* textureGate;
-mediumWeight = mediumWeight .* textureGate;
-chromaWeight = chromaWeight .* textureGate;
+fineWeight = fineWeight .* textureGate .* textureBandGate;
+mediumWeight = mediumWeight .* textureGate .* textureBandGate;
+chromaWeight = chromaWeight .* textureGate .* textureBandGate;
 
 radius = min(20, max(3, round(.070 * faceScale)));
 kernelSize = 2 * radius + 1;
@@ -258,6 +278,7 @@ diagnostics = struct( ...
     'noseMidGate', noseMidGate, ...
     'textureProtectionMask', textureProtection, ...
     'textureGate', textureGate, ...
+    'textureBandGate', textureBandGate, ...
     'fineWeight', fineWeight, ...
     'mediumWeight', mediumWeight, ...
     'midWeight', mediumWeight, ...
@@ -301,18 +322,19 @@ end
 end
 
 function contract = validateRepairContract(contract, imageSize)
-%VALIDATEREPAIRCONTRACT 校验 Repair（Fine/Mid）stage contract（T14/T15）。
+%VALIDATEREPAIRCONTRACT 校验 Repair（Fine/Mid）stage contract（T14/T15/T30）。
 %   必需字段：repairFine/repairMid（T07 零瑕疵快照）、hard（hard
 %   identity）、blemishRelaxedGate/strongStructureCap/textureGate/
-%   noseMidGate（生产端按生产原式计算的未折叠门控字段）。缺字段或取
-%   值无效一律 fail-fast，不在函数内部重新拼装，也不静默回退到
-%   general masks 解释。
+%   noseMidGate（生产端按生产原式计算的未折叠门控字段）、
+%   textureBandGate（T30 纯 policy 带门 1 - regionBandFine，只乘逐像素
+%   权重）。缺字段或取值无效一律 fail-fast，不在函数内部重新拼装，也
+%   不静默回退到 general masks 解释。
 if ~isstruct(contract) || ~isscalar(contract) || ...
         ~all(isfield(contract, {'repairFine', 'repairMid', 'hard', ...
         'blemishRelaxedGate', 'strongStructureCap', 'textureGate', ...
-        'noseMidGate'}))
+        'textureBandGate', 'noseMidGate'}))
     error('beauty:InvalidBlemishRepair', ...
-        'Repair stage contract 必须是包含 repairFine、repairMid、hard、blemishRelaxedGate、strongStructureCap、textureGate 和 noseMidGate 的标量结构。');
+        'Repair stage contract 必须是包含 repairFine、repairMid、hard、blemishRelaxedGate、strongStructureCap、textureGate、textureBandGate 和 noseMidGate 的标量结构。');
 end
 contract.repairFine = validateMask(contract.repairFine, imageSize, ...
     'repairFine');
@@ -325,6 +347,8 @@ contract.strongStructureCap = validateMask( ...
     contract.strongStructureCap, imageSize, 'strongStructureCap');
 contract.textureGate = validateMask(contract.textureGate, imageSize, ...
     'textureGate');
+contract.textureBandGate = validateMask(contract.textureBandGate, ...
+    imageSize, 'textureBandGate');
 contract.noseMidGate = validateMask(contract.noseMidGate, imageSize, ...
     'noseMidGate');
 end

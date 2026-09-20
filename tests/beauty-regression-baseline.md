@@ -81,6 +81,7 @@ T20（工单 `20-eye-lip-identity-policy`）是 V4 迁移完成后第一批**真
 - soft detail band（`smoothStep(periocular,.50,.78)` / `smoothStep(lip,.55,.85)`）：抬升 smoothingFine/repairFine/baseLuminance 至 `.95`、smoothingMid/repairMid 至 `.90·band`、whitening 至 `.85·band`、tone 至 `.90·lipBand`；legacy 环带 plateau 仅 .76（眼）/.90（唇）。
 - skin transition band（`smoothStep(periocular,.08,.40)` / `smoothStep(lip,.12,.50)`，与 detail band 互斥）：texture 通道封顶 `1-.55·transitionBand`，把 legacy 满保护环带的处理量重新打开（≥55%），保留眼周/唇周皮肤的可处理性。
 - 消费侧边界：smoothingFine/smoothingMid/hard 由 smoothSkinTexture（T12/T13）直接用于输出算术，policy 对磨皮立即生效；repairFine/repairMid/baseLuminance/tone/whitening 仍是 T14–T18 consumer 的零瑕疵参考快照（算术门控由未折叠字段承载），分级数值先行发布。因此美白-only 场景输出不变（见下表 0/100 行 digest 保持 e889f31 原值）。
+  > **T30 更新（2026-09-20）**：该"零瑕疵参考快照"边界已被 T30 激活——分级保护改由纯 policy 带 `regionBand*` 注入各 stage 真实算术门控，美白-only 场景随之变化。见下文「T30 region policy gate activation 重录记录」。
 
 **合成 oracle digest 新旧对照**（fixture 与参数组合不变；仅 digest 重录）：
 
@@ -166,3 +167,108 @@ T22（工单 `22-ear-region-policy`）新增 `evidence.earStructure`（第 8 个
 - compat / legacy 路径与 `ce17e3…bdc4c` 的关系不变。
 
 因此 `recordedRgbBaseline` / `recordedPreviewDigest` / `recordedOriginalSizeDigest` 自 T21 重录后不再变动；T22 仅在真实图 77 链路上有耳区增量（见 `.scratch/tmp/T22-accept.log`）。
+
+### T30 region policy gate activation 重录记录（2026-09-20）
+
+T30（工单 `30-region-policy-gate-activation`）是一次**跨 stage 的 policy 激活**：T20/T21/T22 施加在
+`repairFine`/`repairMid`/`baseLuminance`/`tone`/`whitening` 折叠快照上的分级保护此前是**惰性值**
+（消费侧只读未折叠门控字段，快照仅作诊断），T30 把分级保护真正注入输出算术。
+
+**注入机制**：`masks.buildStageProtectionMasks` 额外发布五条**纯 policy 带**
+`regionBandFine`/`regionBandMid`/`regionBandBase`/`regionBandTone`/`regionBandWhitening`
+（与既有折叠式解耦，缺省/零带时逐位还原 legacy），`beautifyImage` 的 `make*StageContract`
+按 `gate := gate .* (1 - band)` 注入真实算术门控。
+
+**关键分界（带外零泄漏的前提）**：band **只作用于逐像素 support/权重**，**不进入任何全局参考统计**：
+
+- `evenSkinLuminance`：band 只乘逐像素 `supportMap`（新增 contract 字段 `regionBandGate`）；
+  `referenceReliability`/`referenceWeight`/`weightedReference`/`referenceOffset`/
+  `referenceCoverage`/`normalizationMask` 仍用未带 `featureGate`。若把 band 并入
+  `featureGate`，带内变化会经 `imgaussfilt` 参考卷积扩散到带外（实测带外 2226px/0.94%、
+  ≤2 灰度级）。
+- `repairSkinBlemishes`：band 只乘逐像素 `fineWeight`/`mediumWeight`/`chromaWeight`
+  （新增 contract 字段 `textureBandGate`）；`referenceReliability` → `imfilter`
+  （radius = `min(20, max(3, round(.070*faceScale)))`）的邻域参考采样仍用未带
+  `textureGate`。若并入会在耳带外产生 1px 的 2 灰度级泄漏。
+- `noseMidGate`（只作用于逐像素 `mediumWeight`）与 `tone`/`whitening` 的 `featureGate`
+  （本就无全局统计）可直接并入 band。
+
+**合成 oracle digest 新旧对照**（fixture 与参数组合不变；仅 digest 重录）：
+
+| fixture | smoothing | whitening | T21 旧值 | T30 新值 | 变化 |
+| --- | ---: | ---: | --- | --- | --- |
+| rich | 100 | 0 | `330ddc30c63bf9a9d896d1a65e6ef62421a3006230ed2fc8026e65e50ee04204` | `803ec4cb63aa9dfe630e556e3d0b9932505460f68076b8c4e6e9e3bafc2148b7` | 是 |
+| rich | 0 | 100 | `58ab2f354176fb258dcef67e01ff65d5c4c2b98f0085902cfe16c604281bfe80` | `0f318ac434b6fee89b3e5f00d4394977ddf069ef00f34a5e0e7eb9970fa69d17` | 是（`regionBandWhitening` 首次进入美白算术） |
+| rich | 100 | 15 | `64f0a75e37bbcc8d893376dc702e83b180823fc717051a9d3098539ba5be9782` | `155c84665ce4e200e3d2df2bdf4b78bb405bcf9ac5362715bf9a59c99e0824ac` | 是 |
+| rich | 50 | 25 | `b4cfffbf09872912e27fdc8d1c3f202b1a22d5bf80bef80da8963aa414e00cd7` | `ae034c0b890adfe1c1d713e714fbcfacf8252fbd03f800f1656c09c3302ed103` | 是 |
+| compact | 100 | 15 | `35279975228d5c25334e8b3a3a8fb243a532e9fb85a94a11acbff8c407a21b75` | `11f2607b5aa1ef772c244455aaa24d1d3090ed390b6411c81fb877a589f6c669` | 是 |
+| 预览路径（0.5 缩放，rich） | 100 | 15 | `32ecb919c09c7899e83aa9c48bfe3bd1c212ff3c15f8cf7448fd7652f008485b` | `314d13636b0b8de926158a4642b4bd640da72accfd589208d0181b6605d3a3cc` | 是 |
+| 原尺寸路径（preview→resize 重建，rich） | 100 | 15 | `6b8e96a5088f422c7ff20a9499377cce521d0bb68729ebcbf266aea1a3054176` | `1e0ddb90166b9a34661276dbf64a8dbed70d3e507cfe54bce815117626fe8059` | 是 |
+
+上表"T30 新值"即 `tests/testMaskSystemV4CompatibilityBaseline.m` 当前生效的
+`recordedRgbBaseline` / `recordedPreviewDigest` / `recordedOriginalSizeDigest`。
+T30 与 T20/T21/T22 不同：两个 fixture 的 eye/lip/nostril/noseStructure 证据非零，
+五条带全部非零，**全部 7 项**都进入消费侧算术，因此全部重录（含此前因未触发消费而保持原值的
+rich 0/100、rich 50/25、compact 100/15 与预览路径）。
+
+**structural 不变量复核**（T30 重录批内实测）：
+
+- 零强度（0/0）输出 = 源图：逐位相等（rich/compact）。
+- hard identity 区域 RGB = 源图：逐位相等；hard nnz rich 220、compact 269，与 T20/T21/T22
+  记录一致（零膨胀、严格二值、`protection.hard` 逐位不变）。
+- cached/uncached 输出：逐位相等（rich、预览/原尺寸路径）。
+- 结构性断言（`testFrozenPipelineContract`、零强度=源图、hard 区域=源图、cached/uncached
+  一致、预览/原尺寸等价）全部保持 bit-exact，未加任何容差。
+- **compat / legacy 路径（剥离 evidence 层）**：真实图 77 链路 compat digest == 冻结 oracle
+  `ce17e323dc4208d973ccae4b4a2cc122b2fed75fe7500088197c5278806bdc4c`（逐位相等，实测
+  `compat bit-exact = 1`，见 `.scratch/tmp/T30-compat-check.log`）；零带（显式全零 evidence）
+  下全部 13 个 protection 字段与最终输出逐位还原 legacy。
+- **带外泄漏**：合成 fixture（T20 eye/lip、T21 nose、T22 ear）在五带 union == 0 处输出变化
+  **0px（严格逐位，max=0.000）**；真实图 77 链路 policy-vs-legacy 带外（223324px）变化
+  196px（0.088%），**max = 1.000 灰度级**（`>1` 计数 0）；逐 consumer 诊断在带外
+  **全部逐位相等**（`repair.fineWeight`/`mediumWeight`/`referenceReliability`、
+  `base.baseAfter`/`referenceWeight`、`tone.deltaCb`/`deltaCr`、`whitening.delta`、
+  `smoothing.alphaMap` 的 outside changed 均为 0）。剩余 196px 来自邻域滤波
+  （`imgaussfilt`/`imfilter`/磨皮空域核）的亚量化传播，与 T20/T21/T22 记录的同类泄漏同源。
+
+**真实图局部验收**（私有图 77 链路，smoothing=100/whitening=15；路径与人物信息不入库，
+对比图在 `.scratch/tmp/t30_{ear,nose,eyelip}_{source,legacy,policy}.png`）：
+
+- 耳结构带（与 T22 accept 完全同 ROI：`smoothStep(earStructure,.05,.30) > .5`，nnz=2697，
+  `midSigma=12.87`）Mid 尺度结构高频：source=0.11062、legacy=0.07245、policy=0.10906 →
+  **policy/legacy=1.5052**（+50%，T22 记录的 +0.24% 量级已消除）、
+  **policy/source=0.9859**（T22 仅 0.6566）；Fine 尺度 policy/legacy=1.5058、
+  policy/source=1.1603；legacy/source=0.6550。
+- 鼻结构带（`smoothStep(noseStructure,.15,.50) > .5`，nnz=229）Mid 尺度结构高频：
+  source=0.04760、legacy=0.03227、policy=0.03649 → policy/legacy=1.1308。
+- 眼/唇 detail 带 Mid 尺度结构高频：policy/legacy=1.0046。
+- 肤色连续性：耳-颊 tone 保护差 policy=0.0664 / legacy=0.0664（逐位相同）；耳-颊
+  whitening 差 0.0230/0.0231；耳-颈 tone 差 0.1458/0.1458、whitening 差 -0.0451/-0.0451
+  （耳部不追加 tone/whitening 项，无耳-颊/耳-颈异色块）。
+- 带内门控实测变化（真实图）：`textureBandGate` in-band 4907px maxΔ0.95 meanΔ0.404；
+  `noseMidGate` 2166px maxΔ0.85 meanΔ0.202；`baseSupportGate` 5253px maxΔ0.95 meanΔ0.387；
+  `toneGate` 1522px maxΔ0.697 meanΔ0.215；`whiteningGate` 2192px maxΔ0.85 meanΔ0.671；
+  全部 outside nnz=0 / maxΔ=0。
+- 带内输出变化：Fine 2979px、Mid 981px、Base 3124px、Tone 153px、Whitening 761px。
+
+**测试同步**（T30 激活后旧期望不再成立，按真实契约改写，未放宽任何容差）：
+
+- 四处「美白-only 输出必须与 legacy 逐位一致」改为「带外（`regionBandWhitening == 0`）逐位
+  相等 + 带内可观测变化 + 单字段归因（置零 `regionBandWhitening` 的证据来源后逐位回到
+  legacy；置零其他带来源则输出不变、仍不等于 legacy）」：
+  `testNoseSmoothing`、`testBeautyArtifactRegressions`（T21/T20 用例）、
+  `testPortraitBeautyHelpers`。`testBeautyArtifactRegressions` 的 T22 用例（policy vs 无 T22
+  基线）因 `regionBandWhitening` 不含耳部项仍保持 bit-exact。
+- `testBeautyArtifactRegressions` 的 T21 鼻孔-鼻内低频对比度按真实符号约定改为**幅值**比较
+  （`valleyContrast = mean(谷底) - mean(鼻内)` 为负，"对比度更强"对应"更负/幅值更大"；
+  policy=-0.024465 vs legacy=-0.023011，算法未改动）。
+- `testBeautyArtifactRegressions` T20 用例的带外定义由 T20 时代的核心 footprint
+  （`detailBand > .5 | transitionBand > .5`）改为真实的 band support
+  （`detailBand > 0 | transitionBand > 0`），保持**零容差**逐位断言；实测
+  `outside bandUnion>0` 变化 0px。
+- `stageNames` 精确 `fieldnames` 断言（`testBeautyV3`、`testBeautyContextV3`）同步加入
+  五条 `regionBand*` 字段。
+- 目标测试合计 118 项全部通过（`testEarProtectionPolicy`、`testNoseSmoothing`、
+  `testBeautyArtifactRegressions`、`testPortraitBeautyHelpers`、`testBaseLuminanceEqualization`、
+  `testBeautyV3`、`testBeautyContextV3`、`testMaskSystemV4CompatibilityBaseline`；
+  见 `.scratch/tmp/T30-target-tests5.log`）。

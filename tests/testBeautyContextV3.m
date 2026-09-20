@@ -747,14 +747,17 @@ end
 
 function testStageProtectionLayerIsValidAndBounded(testCase)
 %TESTSTAGEPROTECTIONLAYERISVALIDANDBOUNDED 生产链发布的 V4 protection
-%   层必须逐字段满足规范（八个 stage 字段、HxW double、real、finite、
-%   [0,1]），hard 严格二值；预览→原尺寸迁移路径在目标尺寸重建
-%   protection，且与直接桥接重建 bit-exact 一致。
+%   层必须逐字段满足规范（八个 stage 字段 + T30 五条纯 policy 带
+%   regionBand*，HxW double、real、finite、[0,1]），hard 严格二值；
+%   预览→原尺寸迁移路径在目标尺寸重建 protection，且与直接桥接重建
+%   bit-exact 一致。
 [image, faceBox, parsing] = fixtureContext(40, 60);
 prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60])), 'runtimeCache');
 stageNames = {'smoothingFine'; 'smoothingMid'; 'repairFine'; ...
-    'repairMid'; 'baseLuminance'; 'tone'; 'whitening'; 'hard'};
+    'repairMid'; 'baseLuminance'; 'tone'; 'whitening'; 'hard'; ...
+    'regionBandFine'; 'regionBandMid'; 'regionBandBase'; ...
+    'regionBandTone'; 'regionBandWhitening'};
 assertStageProtectionValid(testCase, prepared.protection, stageNames, ...
     size(image, [1, 2]));
 verifyTrue(testCase, all(prepared.protection.hard(:) == 0 | ...

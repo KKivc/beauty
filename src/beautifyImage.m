@@ -128,6 +128,11 @@ runtimeEvidence = makeRuntimeEvidence(frequency, ...
 %   无 evidence 层的 compat Context（v3.1 轻量 resize 路径、手工
 %   legacy Context）不携带 eye/lip 语义证据，保持 T07 legacy 折叠；
 %   evidence 缺少 periocular/lip 字段时由 builder 按零带处理。
+% T30：stageProtection 里新增的五条纯 policy 带 regionBand* 由此向下
+%   透传到各 make*StageContract，按 gate := gate .* (1 - band) 注入
+%   Repair/BaseLuminance/Tone/Whitening 的真实算术门控，使 T20/T21/T22
+%   的分级保护不再只作用于诊断快照。compat Context（无 evidence 层）
+%   与 partial evidence 下 band 全零，乘法为恒等，输出逐位不变。
 if isfield(beautyContext, 'evidence') && isstruct(beautyContext.evidence) && ...
         isscalar(beautyContext.evidence)
     stageProtection = masks.buildStageProtectionMasks(beautyMasks, ...
@@ -267,17 +272,43 @@ function contract = makeRepairStageContract(beautyMasks, ...
 %                          1 - structure·(1 - .90·blemish)
 %                          （structureGate0 = 1 - structure 恒成立）；
 %     strongStructureCap — 1 - .65·strongStructure（强结构固定下限）；
-%     textureGate        — 1 - texture（v3.2 线性纹理门）；
+%     textureGate        — 1 - texture（v3.2 线性纹理门）。T30 起该字段
+%                          保持"未带"语义：全局参考采样
+%                          （repairSkinBlemishes 的 referenceReliability
+%                          → imfilter 邻域参考）仍用它计算，band 不进入
+%                          该乘子；
+%     textureBandGate    — T30 纯 policy 带 1 - protection.regionBandFine，
+%                          **只作用于逐像素权重**（fineWeight/
+%                          mediumWeight/chromaWeight），不参与全局参考
+%                          采样；
 %     noseMidGate        — 1 - .50·nose（Mid 鼻部门；repair 侧无
-%                          alphaCurve，纯静态）。
-%   textureGate/noseMidGate 单独发布的原因：生产链在结构门与纹理/
-%   鼻部门之间对权重做 [0,1] 截断，折叠进门控积会在截断饱和区改变
-%   结果；repairFine/repairMid 的 1-x 补码往返亦有舍入，因此快照不参
-%   与输出算术，只作为零瑕疵参考由消费侧诊断与测试消费。runtime 耦
-%   合字段不进入 policy-time protection 分层（T07 边界），只在本次调
-%   用的 call site 组装，不写入 runtimeEvidence（后者只承载 producer
-%   产物，见 makeRuntimeEvidence）；cached/uncached 路径共用同一份
-%   beautyMasks 产物，组装结果一致。
+%                          alphaCurve，纯静态），T30 起再乘
+%                          (1 - protection.regionBandMid)。该门只作用于
+%                          逐像素 mediumWeight（不经 imfilter），故 band
+%                          可直接并入。
+%   T30 激活：textureBandGate 承载 T20/T21/T22 的 texture 通道追加保护
+%   （regionBandFine），noseMidGate 只承载 Mid 专属追加保护
+%   （regionBandMid = max(.30·transitionBand, .85·noseStructureBand)）。
+%   两条带刻意不重叠于同一语义：mediumWeight 同时乘 noseMidGate 与
+%   textureGate·textureBandGate，若把 detail/nostril/ear 项也放进
+%   regionBandMid 就会与 regionBandFine 重复计入（实测会把 detail 带的
+%   .95 档位抬到 .9975 保护，违反 T20 记录的"保留 >=5% 中频处理量"）。
+%   缺省/零带时 1 - band == 1，乘法为恒等，与 legacy 逐位相等。
+%   textureGate/textureBandGate 拆分的原因（T30 带外零泄漏）：生产链在
+%   逐像素权重之外，还把 textureGate 用作 referenceReliability 的邻域
+%   参考采样门（repairSkinBlemishes L202），随后经 imfilter（radius =
+%   min(20, max(3, round(.070*faceScale)))）把带内变化扩散到带外 ±radius
+%   像素。实测（T22 ear fixture）把 band 并入 textureGate 会让耳带外出现
+%   1px 的 2 灰度级泄漏，违反工单"带外零泄漏（逐位一致）"。拆出
+%   textureBandGate 后，带外（band==0 → gate==1）参考采样与逐像素权重
+%   都逐位还原 legacy。
+%   快照不参与输出算术的原因：生产链在结构门与纹理/鼻部门之间对权重做
+%   [0,1] 截断，折叠进门控积会在截断饱和区改变结果；repairFine/
+%   repairMid 的 1-x 补码往返亦有舍入，因此快照只作为零瑕疵参考由消费侧
+%   诊断与测试消费。runtime 耦合字段不进入 policy-time protection 分层
+%   （T07 边界），只在本次调用的 call site 组装，不写入 runtimeEvidence
+%   （后者只承载 producer 产物，见 makeRuntimeEvidence）；cached/uncached
+%   路径共用同一份 beautyMasks 产物，组装结果一致。
 hard = stageProtection.hard;
 hardFeatureBand = bwdist(hard >= .999) <= 3;
 strongStructure = smoothStep(beautyMasks.structureProtectionMask, ...
@@ -290,31 +321,50 @@ contract = struct( ...
     (1 - .90 * blemishMap), ...
     'strongStructureCap', 1 - .65 * strongStructure, ...
     'textureGate', 1 - beautyMasks.textureProtectionMask, ...
-    'noseMidGate', 1 - .50 * beautyMasks.noseMask);
+    'textureBandGate', 1 - stageProtection.regionBandFine, ...
+    'noseMidGate', (1 - .50 * beautyMasks.noseMask) .* ...
+    (1 - stageProtection.regionBandMid));
 end
 
 function contract = makeBaseLuminanceStageContract(beautyMasks, ...
     stageProtection)
 %MAKEBASELUMINANCESTAGECONTRACT 组装 Base Luminance 的 stage contract
-%   （T16）。
+%   （T16/T30）。
 %   快照与 hard 取自 T07 protection 分层（与生产门控共用同一份
 %   beautyMasks 产物推导）；未折叠门控字段按 evenSkinLuminance 的生产
 %   原式从同一份产物计算，保证消费侧重建与 legacy 路径逐位等价：
-%     structureGate — 1 - structure（referenceReliability 与
-%                     supportMap 共用的结构门）；
-%     featureGate   — 1 - max(texture, chroma)（feature 保护门；
-%                     texture 与 chroma 的组合留在生产端）。
+%     structureGate  — 1 - structure（referenceReliability 与
+%                      supportMap 共用的结构门）；
+%     featureGate    — 1 - max(texture, chroma)（feature 保护门；texture
+%                      与 chroma 的组合留在生产端）。T30 起该字段保持
+%                      "未带"语义：referenceReliability 全局参考统计仍
+%                      用它计算，band 不进入该乘子；
+%     regionBandGate — T30 纯 policy 带 1 - protection.regionBandBase
+%                      （鼻/耳结构带与 eye/lip detail 带的低频亮度结构
+%                      保护），**只作用于逐像素 supportMap**，不参与
+%                      referenceReliability。
+%   T30 激活的分界（关键）：band 只改变"该像素自身"的均衡强度，不改变
+%   邻域参考池。全局参考基准（referenceReliability/referenceWeight/
+%   weightedReference/referenceOffset/referenceCoverage/normalizationMask）
+%   一律沿用未带 featureGate。若把 band 并入 featureGate，它会同时进入
+%   evenSkinLuminance 的全局参考卷积（imgaussfilt），把带内变化经
+%   referenceWeight/referenceCoverage 扩散到带外：实测带外 2226px
+%   （0.94%）出现 ≤2 灰度级泄漏，违反"带外逐位回到 legacy"。拆出
+%   regionBandGate 后带外（band==0 → gate==1）逐位还原 legacy，带外
+%   输出泄漏回到 T30 之前的 ≤1 灰度级量级（仅 legacy 既有来源）。
 %   baseLuminance 快照的折叠含 1-x 补码往返舍入，无法逐位还原门控积
 %   (1-structure)·(1-max(texture,chroma))，因此快照不参与输出算术，
-%   只作为 T07 参考由消费侧诊断（baseGateSnapshot）与测试消费。该
-%   stage 不消费 runtime blemish evidence，contract 无 runtime 耦合字
-%   段；cached/uncached 路径共用同一份 beautyMasks 产物，组装结果一致。
+%   只作为 T07 参考由消费侧诊断（baseGateSnapshot）与测试消费；分级
+%   保护经 regionBandGate 注入 supportMap 生效。该 stage 不消费
+%   runtime blemish evidence，contract 无 runtime 耦合字段；
+%   cached/uncached 路径共用同一份 beautyMasks 产物，组装结果一致。
 contract = struct( ...
     'baseLuminance', stageProtection.baseLuminance, ...
     'hard', stageProtection.hard, ...
     'structureGate', 1 - beautyMasks.structureProtectionMask, ...
     'featureGate', 1 - max(beautyMasks.textureProtectionMask, ...
-    beautyMasks.chromaProtectionMask));
+    beautyMasks.chromaProtectionMask), ...
+    'regionBandGate', 1 - stageProtection.regionBandBase);
 end
 
 function contract = makeToneStageContract(beautyMasks, stageProtection, ...
@@ -324,7 +374,9 @@ function contract = makeToneStageContract(beautyMasks, stageProtection, ...
 %   beautyMasks 产物推导）；未折叠门控字段按 normalizeSkinTone 的生产
 %   原式从同一份产物计算，保证消费侧重建与 legacy 路径逐位等价：
 %     structureGate      — 1 - structure（主/uniform 分支共用的结构门）；
-%     featureGate        — 1 - .78*chroma（主 weight 分支的 feature 门）；
+%     featureGate        — 1 - .78*chroma（主 weight 分支的 feature 门），
+%                          T30 起再乘 (1 - protection.regionBandTone)
+%                          （唇 detail 带的 identity 色度保护）；
 %     uniformFeatureGate — 1 - chroma（uniform 分支的 feature 门）。
 %                          T07 快照 tone 只折叠主分支；ratio>.50 的
 %                          uniform 分支使用比主分支更强的 (1-chroma)
@@ -336,10 +388,12 @@ function contract = makeToneStageContract(beautyMasks, stageProtection, ...
 %                          consumer legacy 路径同源，含 chroma/tone
 %                          alias 解析与缺省回退）。
 %   tone 快照的折叠含 1-x 补码往返舍入且只覆盖主分支，不参与输出算
-%   术，只作为 T07 参考由消费侧诊断（toneGateSnapshot）与测试消费。
-%   该 stage 的 blemish 只进入 effect 侧证据项（weightMap 的
-%   blemishEvidence），不参与保护门控，contract 无 runtime 耦合字段；
-%   cached/uncached 路径共用同一份 beautyMasks 产物，组装结果一致。
+%   术，只作为 T07 参考由消费侧诊断（toneGateSnapshot）与测试消费；
+%   分级保护经 regionBandTone 注入主分支 featureGate 生效（uniform
+%   分支按 T20/T21/T22 语义不追加任何带）。该 stage 的 blemish 只进入
+%   effect 侧证据项（weightMap 的 blemishEvidence），不参与保护门控，
+%   contract 无 runtime 耦合字段；cached/uncached 路径共用同一份
+%   beautyMasks 产物，组装结果一致。
 [chromaProtection, hasChromaProtection] = resolveChromaProtectionMask( ...
     beautyMasks, imageSize, 'beauty:InvalidSkinToneInput', ...
     'beauty:ChromaProtectionConflict');
@@ -350,7 +404,8 @@ contract = struct( ...
     'tone', stageProtection.tone, ...
     'hard', stageProtection.hard, ...
     'structureGate', 1 - beautyMasks.structureProtectionMask, ...
-    'featureGate', 1 - .78 * chromaProtection, ...
+    'featureGate', (1 - .78 * chromaProtection) .* ...
+    (1 - stageProtection.regionBandTone), ...
     'uniformFeatureGate', 1 - chromaProtection, ...
     'candidateChromaGate', double(chromaProtection < .70));
 end
@@ -366,13 +421,18 @@ function contract = makeWhiteningStageContract(beautyMasks, ...
 %                       >= .5）浅退让为 1 - .10*structure；
 %     featureGate     — 未折叠五官退让门 1 - whitening（不在此截
 %                       断，消费侧按生产原式截断，保证越界/NaN 输
-%                       入仍 fail-fast）；
+%                       入仍 fail-fast），T30 起再乘
+%                       (1 - protection.regionBandWhitening)
+%                       （eye/lip detail 带与 nostril 软带的假白光晕
+%                       退让）；
 %     featureZeroGate — double(whitening <= eps)（亮度统计选点的五
 %                       官零保护门限，生产原式原样发布）。
 %   whitening/faceSkin 来源与 consumer legacy 路径同源，含缺省回退
 %   （whiteningProtectionMask/faceSkinMask 缺字段按零处理）。
 %   whitening 快照的折叠含 1-x 补码往返舍入，不参与输出算术，只作为
-%   T07 参考由消费侧诊断（whiteningGateSnapshot）与测试消费。
+%   T07 参考由消费侧诊断（whiteningGateSnapshot）与测试消费；分级保
+%   护经 regionBandWhitening 注入 featureGate 生效（耳部不追加任何
+%   项，维持耳-颊肤色连续）。
 %   strengthMap/skinMask 不进入本 contract（strength 与 protection 不
 %   合并）；脸部 allowed 下限与鼻部幅度封顶属强度侧区域 policy，仍由
 %   consumer 从 beautyMasks 读取。cached/uncached 路径共用同一份
@@ -395,7 +455,8 @@ contract = struct( ...
     'whitening', stageProtection.whitening, ...
     'hard', stageProtection.hard, ...
     'structureGate', structureGate, ...
-    'featureGate', 1 - whiteningProtection, ...
+    'featureGate', (1 - whiteningProtection) .* ...
+    (1 - stageProtection.regionBandWhitening), ...
     'featureZeroGate', double(whiteningProtection <= eps));
 end
 

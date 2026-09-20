@@ -711,9 +711,9 @@ end
 
 % 只篡改 stage protection 不消费的三个 evidence 字段：输出逐位不变。
 %   T21 起 nostril/noseStructure 已被 policyTexture（Fine 侧 .95）与
-%   smoothingMid/repairMid（.90/.85）、baseLuminance（.80）、whitening
+%   smoothingMid/repairMid（.90/.85）、regionBandBase（.80）、whitening
 %   （.85）消费；T22 起 earStructure 已被 policyTexture 与
-%   smoothingMid/repairMid/baseLuminance 消费——三者均不得再列入本
+%   smoothingMid/repairMid/regionBandBase 消费——三者均不得再列入本
 %   清单（篡改它们必然改变输出，旧清单因此过期）。
 %   剩余字段 edgeDetail/structureGradient/darkDetail 未被任何 consumer
 %   读取：全仓 grep 显示它们只由 masks.buildBeautyPolicyEvidence 生产，
@@ -756,8 +756,9 @@ function testEyeLipPolicyBandsFollowEvidenceContract(testCase)
 %     identity core —— hard 字段与输入 hardProtectionMask 逐位相等，
 %       不新增任何 hard 像素；
 %     soft detail band —— evidence=1 的非 hard 像素抬升到固定档位
-%       smoothingFine/repairFine/baseLuminance=.95、smoothingMid=.90、
-%       whitening=.85、tone=.90（仅唇侧；.95 取检测细节保护区间
+%       smoothingFine/repairFine=.95、smoothingMid=.90、
+%       regionBandBase=.95（baseLuminance 分级保护，T32 起经纯 policy 带
+%       注入）、whitening=.85、tone=.90（仅唇侧；.95 取检测细节保护区间
 %       .92--.99 中点，.90/.85 与检测细节档位对齐，见 builder 头注）；
 %     skin transition band —— 仅封顶 texture 通道：
 %       smoothingFine <= 1-.55*transitionBand（legacy texture=1 的满
@@ -789,8 +790,14 @@ function testEyeLipPolicyBandsFollowEvidenceContract(testCase)
         .95, 'AbsTol', 1e-12);
     verifyEqual(testCase, policyZero.target.repairMid(eyePoint(1), eyePoint(2)), ...
         .95, 'AbsTol', 1e-12);
-    verifyEqual(testCase, policyZero.baseLuminance(eyePoint(1), eyePoint(2)), ...
-        .95, 'AbsTol', 1e-12);
+    % T32：baseLuminance 的 .95 分级保护不再折进 target.baseLuminance
+    % （该字段只承载 legacy general 折叠 1-(1-structure)(1-max(texture,
+    % chroma))，零带时逐位等于旧折叠值），而是经 T30 纯 policy 带
+    % regionBandBase 注入逐像素 supportMap（消费侧 regionBandGate =
+    % 1 - regionBandBase）。故此处断言带值 = .95。
+    verifyEqual(testCase, policyZero.regionBandBase(eyePoint(1), eyePoint(2)), ...
+        .95, 'AbsTol', 1e-12, ...
+        'baseLuminance 分级保护由 regionBandBase 承载。');
     verifyEqual(testCase, policyZero.whitening(eyePoint(1), eyePoint(2)), ...
         .85, 'AbsTol', 1e-12);
     verifyEqual(testCase, policyZero.tone(eyePoint(1), eyePoint(2)), 0, ...

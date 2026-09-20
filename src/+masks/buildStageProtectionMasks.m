@@ -196,7 +196,10 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %   （T12/T13/T31）读 target.smoothingFine/smoothingMid +
 %   support.smoothingFine/smoothingMid + hard；repairSkinBlemishes
 %   （T14/T15/T31）读 producer 组装层按本层 support.* 重建的
-%   target/support 门；compose hard restore（T19）读 hard。
+%   target/support 门；evenSkinLuminance（T16/T30/T32）读 producer
+%   组装层（+beauty/baseLuminanceStageContract）按本层
+%   target.baseLuminance/support.baseLuminance + hard + regionBandBase
+%   发布的门；compose hard restore（T19）读 hard。
 %   因此 T20/T21/T22 的分级保护不再只作用于快照，而是真正进入输出算术。
 %   带外（band == 0）时 gate .* 1 与 legacy 逐位相等，compat 路径与零带
 %   路径输出逐位不变；耳部瑕疵修复（blemishMap 驱动）仍不在本层可控
@@ -216,10 +219,10 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %     * protection.target.<stage> —— 目标保护门（上位契约第 2 节）：
 %       该像素"能不能被修改"，0 = 可自由修改，1 = 完全不可修改。T31
 %       发布 smoothingFine/smoothingMid/repairFine/repairMid 四个规范
-%       字段；T07 的扁平折叠名（smoothingFine/smoothingMid/repairFine/
-%       repairMid）在同一语义上被 target.* 取代并删除，不允许并存两个
-%       真值来源。baseLuminance/tone/whitening 仍为扁平字段，留待
-%       T32/T33 迁移。
+%       字段；T32 追加 baseLuminance。T07 的扁平折叠名（smoothingFine/
+%       smoothingMid/repairFine/repairMid/baseLuminance）在同一语义上被
+%       target.* 取代并删除，不允许并存两个真值来源。tone/whitening
+%       仍为扁平字段，留待 T33 迁移。
 %     * protection.support.<stage> —— 支撑保护门：该像素"能不能作为
 %       邻域计算的参考样本"，0 = 完全可作为参考，1 = 不可作为参考。
 %       零带取值逐位等于 T30 之前各 stage 参考池/统计池的等价基准门：
@@ -234,7 +237,11 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %              等于生产 textureGate = 1 - texture）；
 %         support.repairMid     = structure
 %           —— repair 邻域参考池的结构保护源（供 producer 按生产原式
-%              重建 blemish 放宽结构门与强结构上限）。
+%              重建 blemish 放宽结构门与强结构上限）；
+%         support.baseLuminance = 1 - (1-structure)·(1-hard)·(1-max(texture,chroma))
+%           —— evenSkinLuminance 参考池门：其补码即 T30 之前
+%              referenceReliability 的基准门 structureGate·hardProtectionGate·
+%              featureGate（T32）。
 %     * protection.noseMidProtection —— T31 过渡扁平字段：repair Mid 的
 %       鼻部退让保护 .50·nose（= 1 - noseMidGate）。鼻部语义尚未纳入
 %       target/support 规范名（与 regionBand* 同为过渡扁平字段），
@@ -284,13 +291,18 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %       structure。它们不是新的行为折叠，而是把 legacy consumer 原先
 %       自行组合/读取的参考池门与结构锚点上移到 policy 层一次算好，
 %       零带取值与 T30 之前 consumer 侧的同名基准逐位一致。
-%     baseLuminance
+%     target.baseLuminance（T32 由扁平 baseLuminance 迁入）
 %       beauty.evenSkinLuminance 的 supportMap 门控（structureGate =
 %       1 - structure；featureProtection = max(texture, chroma)；
 %       hardProtectionGate = 1 - hard 单独保留）：
-%       baseLuminance = 1 - (1 - structure) .* (1 - max(texture, chroma))。
-%       supportMap = baseWeightCurve .* regionalSkinWeight .* (1-hard) .*
-%       (1 - baseLuminance) .* referenceCoverage 与生产逐像素等价。
+%       target.baseLuminance = 1 - (1 - structure) .* (1 - max(texture, chroma))。
+%       supportMap = baseWeightCurve .* regionalSkinWeight .*
+%       (1 - target.baseLuminance) .* (1 - hard) .* (1 - regionBandBase) .*
+%       referenceCoverage 与生产逐像素等价。
+%     support.baseLuminance（T32 新增）
+%       evenSkinLuminance 的 referenceReliability 参考池门（structureGate·
+%       hardProtectionGate·featureGate）：其补码逐位还原该基准门，且不含
+%       regionBandBase——带只作用于逐像素 supportMap。
 %     tone
 %       beauty.normalizeSkinTone 主 weight 分支（structureGate =
 %       1 - structure；featureGate = 1 - .78*chroma；allowed 中的
@@ -419,12 +431,28 @@ repairMid = max(max(max(max(1 - structureGateRepair .* (1 - .50 * nose) .* ...
     max(.90 * nostrilDetailBand, .85 * noseStructureBand)), ...
     .90 * earStructureBand);
 
-% evenSkinLuminance L42/L88-93：featureProtection = max(texture, chroma)。
-% T20：texture 通道同上替换（过渡带 cap 打开亮度均衡的处理量）。
-% T21：结构带内补低频参考保护（.80，鼻梁低频明暗是立体感主载体）。
-% T22：耳结构带内补同档保护（.80，耳轮亮脊/耳甲腔暗谷的低频对比）。
-baseLuminance = max(max(1 - (1 - structure) .* (1 - max(policyTexture, chroma)), ...
-    .80 * noseStructureBand), .80 * earStructureBand);
+% T32 规范双门控（上位契约第 3.3 节）：Base Luminance 把"能不能做低频亮度
+% 均衡"（target）与"能不能进入低频参考统计"（support）拆成两个独立字段。
+%   target.baseLuminance  —— 逐像素修改门。
+%     = 1 - (1 - structure) .* (1 - max(texture, chroma))
+%     零带时逐位等于 T07 折叠值：零带下 policyTexture 逐位等于 texture
+%     （max/min 的作用项全为零），nose/ear 结构带为零，故旧折叠
+%     max(max(1 - (1-structure).*(1-max(policyTexture,chroma)), 0), 0)
+%     与上式逐位同值。hard 不并入本字段（第 4 节独立字段），消费侧按生产
+%     原位用 (1 - hard) 乘子单独组合。
+%   support.baseLuminance —— 参考池门。
+%     = 1 - (1 - structure) .* (1 - hard) .* (1 - max(texture, chroma))
+%     其补码 1 - support.baseLuminance 即 T30 之前 referenceReliability 的
+%     基准门（structureGate·hardProtectionGate·featureGate）。hard 只在此
+%     出现，逐像素侧不复用，保证 target 与 support 语义互不污染。
+%   T30 纯 policy 带 regionBandBase 不并入本字段：带只作为逐像素追加保护
+%   由消费侧 gate := gate .* (1 - regionBandBase) 注入 supportMap，不进入
+%   referenceReliability（否则带内变化经 imgaussfilt 参考卷积扩散到带外，
+%   实测带外 2226px/0.94% 出现 ≤2 灰度级泄漏）。
+baseLuminanceTargetProtection = 1 - (1 - structure) .* ...
+    (1 - max(texture, chroma));
+baseLuminanceSupportProtection = 1 - (1 - structure) .* (1 - hard) .* ...
+    (1 - max(texture, chroma));
 
 % normalizeSkinTone L77-78：featureGate = 1 - .78*chroma（主分支）。
 % T20：唇细节带内补唇色 identity 保护。T21：不追加鼻部项——鼻部无
@@ -469,7 +497,7 @@ whiteningField = max(1 - structureGateWhitening .* (1 - whitening), ...
 %       给鼻梁/鼻翼光影结构保留 >=15% 中频处理量。
 %     regionBandBase —— evenSkinLuminance 的 regionBandGate（逐像素
 %       supportMap 门，不进全局参考卷积）。detail/nostril/ear 取 .95
-%       （与 baseLuminance 快照的 policyTexture 通道同档），
+%       （与旧 baseLuminance 折叠的 policyTexture 通道同档），
 %       noseStructure 取 .80（鼻梁低频明暗，保留 >=20% 亮度均衡量）。
 %     regionBandTone —— normalizeSkinTone 主分支 featureGate。只有唇
 %       detail 带（唇色是 identity 色度）；鼻/耳无 identity 色度语义。
@@ -484,7 +512,7 @@ regionBandBase = max(max(.95 * detailBand, .95 * nostrilDetailBand), ...
 regionBandTone = .90 * lipDetailBand;
 regionBandWhitening = max(.85 * detailBand, .85 * nostrilDetailBand);
 
-% T31 规范门发布（上位契约第 2 节）：
+% T31/T32 规范门发布（上位契约第 2 节）：
 %   target.* —— 该像素能不能被修改（逐像素修改门）；
 %   support.* —— 该像素能不能作为邻域计算的参考样本。
 % 两者必须分离：进入邻域/参考统计的门（support.*）与逐像素修改门
@@ -492,21 +520,22 @@ regionBandWhitening = max(.85 * detailBand, .85 * nostrilDetailBand);
 % 门扰动。target.* 的零带值逐位等于 T07 折叠快照；support.* 的零带值
 % 逐位等于 T30 之前 consumer 侧同名基准门（见文首"字段语义分三类"）。
 % 同一语义只保留一个规范字段：T07 的扁平折叠名 smoothingFine/
-% smoothingMid/repairFine/repairMid 已被 target.* 取代并删除。
+% smoothingMid/repairFine/repairMid/baseLuminance 已被 target.* 取代并删除。
 protection = struct( ...
     'hard', hard, ...
     'target', struct( ...
     'smoothingFine', clamp01(smoothingFine), ...
     'smoothingMid', clamp01(smoothingMid), ...
     'repairFine', clamp01(repairFine), ...
-    'repairMid', clamp01(repairMid)), ...
+    'repairMid', clamp01(repairMid), ...
+    'baseLuminance', clamp01(baseLuminanceTargetProtection)), ...
     'support', struct( ...
     'smoothingFine', clamp01(max(max(texture, structure), hard)), ...
     'smoothingMid', clamp01(min(4 * structure, 1)), ...
     'repairFine', clamp01(texture), ...
-    'repairMid', clamp01(structure)), ...
+    'repairMid', clamp01(structure), ...
+    'baseLuminance', clamp01(baseLuminanceSupportProtection)), ...
     'noseMidProtection', clamp01(.50 * nose), ...
-    'baseLuminance', clamp01(baseLuminance), ...
     'tone', clamp01(tone), ...
     'whitening', clamp01(whiteningField), ...
     'regionBandFine', clamp01(regionBandFine), ...

@@ -355,3 +355,88 @@ Repair 两个 stage 从"执行层自行读取 legacy general mask"改为"执行�
 `masks.buildStageProtectionMasks` 兼容入口调用与 `fineProtectionMask` 诊断字段名）、
 `noseMask`、`semantic`、`evidence`、`textureProtection`、`structureProtection`、
 `chromaProtection`、`whiteningProtection`、`toneProtection`、`nose` **全部无匹配**。
+
+### T32 Base Luminance 执行契约记录（2026-09-20）
+
+T32（工单 `32-b-base-luminance-execution-contract`）是**纯执行面重构**：把 Base Luminance
+从"执行层自行读取 legacy general mask 并组装门控"改为"执行层只消费 policy 层发布的规范双门控"。
+算法数值路径无任何改动。上一节 T31 表中列为"过渡扁平字段"的 `protection.baseLuminance`
+在本工单被 `target.baseLuminance` / `support.baseLuminance` 取代并**删除**。
+
+**规范门结构发布**（`masks.buildStageProtectionMasks` 输出 `protection`，T32 增量）：
+
+| 字段 | 语义 |
+| --- | --- |
+| `target.baseLuminance` | 逐像素修改门：该像素允不允许做低频亮度均衡。零带时**逐位**等于旧扁平 `baseLuminance` 折叠值 `1-(1-structure).*(1-max(texture,chroma))` |
+| `support.baseLuminance` | 参考池门：该像素允不允许进入低频参考统计。零带时**逐位**等于 T30 之前 `referenceReliability` 的基准门 `1-(1-structure).*(1-hard).*(1-max(texture,chroma))` |
+| `regionBandBase` | T30 纯 policy 带（T20/T21/T22 追加保护），**只**乘逐像素 `supportMap`，不进参考统计 |
+
+- **旧扁平折叠名已删除**：`protection.baseLuminance` 不再存在（同一语义只留一个规范字段）；
+  `target`/`support` 各恰好 5 个字段（`smoothingFine`/`smoothingMid`/`repairFine`/`repairMid`/
+  `baseLuminance`）。`fieldnames(protection)` 精确断言与 `isfield(...,'baseLuminance')==false`
+  见 `testMaskSystemV4CompatibilityBaseline` / `testBeautyContextV3` / `testBeautyV3`。
+- **分级保护改由纯 policy 带承载**：T20/T21/T22 对 `baseLuminance` 的分级保护（眼/唇/鼻/耳带）
+  不再折进 `target.baseLuminance`，而经 `regionBandBase` 由消费侧 `regionBandGate = 1 - regionBandBase`
+  注入逐像素 `supportMap`（与 T30 既有拆分一致；折进字段会重复计入）。
+- **组装层只转发**：`beautifyImage` 的 `makeBaseLuminanceStageContract` 已删除，Base Luminance
+  contract 由唯一组装点 `+beauty/baseLuminanceStageContract.m` 生成（生产组装层与
+  `evenSkinLuminance` 兼容入口共用），只从 `stageProtection.{hard,target.baseLuminance,
+  support.baseLuminance,regionBandBase}` 组装，不再读 legacy mask。
+- **执行层净化**：`evenSkinLuminance.m` 为纯执行器，代码行只读取 `frequency.base`、
+  `beautyMasks.{skinMask,strengthMap,faceSkinMask,faceBox}` 与 contract 的四个规范门；
+  `*ProtectionMask` / semantic / evidence 读取全部无匹配（见 `.scratch/tmp/T32-grep-proof.txt`）。
+- **target / support 分离**（上位契约第 3.3、5.6 节）：`support` 门只进全局参考统计
+  （`referenceReliability = skinMask .* strengthMap .* (1 - support.baseLuminance)`），
+  `target` 门只进逐像素均衡
+  （`supportMap = baseWeightCurve .* regionalSkinWeight .* (1 - target.baseLuminance) .* (1 - hard)
+  .* regionBandGate .* referenceCoverage`），两者互不污染。双门控独立单测
+  `testBaseLuminanceEqualization/testTargetAndSupportGatesAreIndependent` 实测：仅扰动
+  `target.baseLuminance` → `referenceReliability`/`referenceWeight`/`referenceCoverage`/
+  `referenceOffset`/`targetBase` **逐位不变**而 `supportMap` 变化；仅扰动 `support.baseLuminance`
+  → `targetGate`/`hardProtectionGate`/`regionBandGate` **逐位不变**而 `referenceReliability` 变化。
+
+**合成 oracle digest：全部 7 项保持 T30/T31 值，无需重录**（实测逐位相等，见
+`.scratch/tmp/T32-compat-baseline.log`：rich 100/0 `803ec4cb…`、rich 0/100 `0f318ac4…`、
+rich 100/15 `155c8466…`、rich 50/25 `ae034c0b…`、compact 100/15 `11f2607b…`、
+预览 `314d1363…`、原尺寸 `1e0ddb90…`）。
+
+**真实图 77 链路验收实测**（`.scratch/tmp/T32-accept.log`，T31 源码同夹具对照
+`.scratch/tmp/T32_t31_real.mat`）：
+
+- compat / legacy 路径 digest == 冻结 oracle
+  `ce17e323dc4208d973ccae4b4a2cc122b2fed75fe7500088197c5278806bdc4c`（逐位相等）。
+- 零带（显式全零 evidence）下 `protection` 全部字段（含嵌套 `target`/`support`）与最终输出
+  逐位还原 legacy；`target.baseLuminance` 零带 == 旧扁平折叠值（max|delta| = 0）；
+  `support.baseLuminance` 零带 == pre-T30 参考池基准门（max|delta| = 0）；
+  `bridge`（`buildStageProtectionMasks` vs `Context.protection`）逐位一致。
+- hard identity：nnz policy=82266 legacy=82266（**不增**）、严格二值、hard 区 RGB 逐位回源、
+  `protection.hard` 逐位不变。
+- **双门控独立（真实图实测）**：仅扰动 `target.baseLuminance` → 参考统计四量（`referenceReliability`/
+  `referenceWeight`/`referenceCoverage`/`referenceOffset`）**全部逐位不变**，`supportMap` 变化
+  72560px；仅扰动 `support.baseLuminance` → `targetGate`/`hardProtectionGate`/`regionBandGate`
+  **全部逐位不变**，`referenceReliability` 变化 73087px。
+- **参考统计与 target 门解耦**：policy 路径 vs legacy 路径（同经唯一组装点）的
+  `base.referenceWeight`/`referenceReliability`/`referenceCoverage`/`referenceOffset` **逐位相等**；
+  逐像素 `base.supportMap` 变化 4208px（band/target 合法注入，预期变化）。
+- **T32 vs T31 参考统计残差**：`referenceReliability` 变化 2843px、`referenceWeight` 变化 4996px，
+  max|delta| = **1.110e-16**（= 2⁻⁵³）。这是 `support.baseLuminance` 以"保护量"发布后消费侧
+  `1 - 该值` 与 T31 生产门 `structureGate·hardProtectionGate·featureGate` 之间的 IEEE-754
+  `1-x` 补码往返残差，远低于 1 灰度级（1/255 = 3.92e-3）；真实图 77 最终 `policyOut` 与 T31
+  **逐位相同**（changed=0，max|delta|=0），即该残差未穿透 uint8 量化。
+- 带外泄漏：policy-vs-legacy 带外（223324px）变化 196px（0.088%），**max = 1.000 灰度级**
+  （`>1` 计数 0，**未放宽**）；逐 consumer 诊断（`base.baseAfter`/`supportMap`/`referenceWeight`/
+  `referenceReliability`）在带外**全部逐位相等**（outside changed = 0）。
+- 结构断言：零强度（0/0）= 源图逐位；cached/uncached 逐位；预览路径 / 原尺寸路径输出与 T31
+  **逐位相等**（`preview vs T31 bit-exact=1`、`original-size vs T31 bit-exact=1`），未加任何容差。
+- **低频亮度均衡不劣于 T31**：脸皮 ROI（nnz=48526）内低频亮度相对中位数的平均绝对偏差
+  source = 0.06481、T31 = 0.06297、T32 = **0.06297**（`T32<=T31` 且 `T32<source`）；
+  低频输出 T32 vs T31 max|delta| = **0**；平坦皮肤区（nnz=33160）高频 `|hp|` T32/T31 = **1.0000**
+  （无新增色带/光晕）。ROI 裁剪图：
+  `.scratch/tmp/t32_{ear,nose,eyelip}_{source,legacy,policy,t31}.png`。
+
+**测试同步**（未放宽任何容差）：目标测试 109 项全部通过（`testBaseLuminanceEqualization`、
+`testBeautyArtifactRegressions`、`testBeautyV3`、`testPortraitBeautyHelpers`、
+`testBeautyContextV3`、`testMaskSystemV4CompatibilityBaseline`；见
+`.scratch/tmp/T32-target-tests.log`）；兼容基线 8 项全部通过（见
+`.scratch/tmp/T32-compat-baseline.log`）。执行层净化证据见 `.scratch/tmp/T32-grep-proof.txt`。
+

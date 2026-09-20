@@ -16,11 +16,12 @@ function context = rebuildBeautyDerivedMasks(inputImage, context, faceBox)
 %   产物。evidence 的来源/版本元数据挂在 context.diagnostics.
 %   policyEvidence（evidence 层本身按 V4 规范只允许 HxW mask 字段）。
 %
-%   T07 起，V4 protection 层（八个 stage-specific 字段）同样只在本
-%   桥接生成/回填：以 masks.buildBeautyMasks 的 mask 产物为唯一来源
-%   调用 masks.buildStageProtectionMasks，按生产 stage 门控的静态
-%   组合推导 smoothingFine/smoothingMid/repairFine/repairMid/
-%   baseLuminance/tone/whitening/hard；hard identity 与
+%   T07 起，V4 protection 层同样只在本桥接生成/回填：以
+%   masks.buildBeautyMasks 的 mask 产物为唯一来源调用
+%   masks.buildStageProtectionMasks，按生产 stage 门控的静态组合推导
+%   hard、target.{smoothingFine,smoothingMid,repairFine,repairMid,
+%   baseLuminance}、support.{同五者} 与过渡扁平字段
+%   noseMidProtection/tone/whitening、五条 regionBand*；hard identity 与
 %   strengthMap/effectStrengthMap 保持独立，不并入 stage 字段。
 %
 %   T20 起，本桥接把 policy evidence 传入 stage protection 推导：

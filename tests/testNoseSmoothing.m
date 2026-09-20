@@ -231,15 +231,17 @@ function testNosePolicyBandsFollowEvidenceContract(testCase)
 %     identity core —— hard 字段与输入 hardProtectionMask 逐位相等，
 %       不新增任何 hard 像素（nostrilCore 已在 hard 中）；
 %     nostril detail band —— band=1 像素抬升到固定档位
-%       smoothingFine/repairFine/baseLuminance=.95（与 v3.1
-%       nostrilProtection 峰值对齐）、smoothingMid=.90（与 T20 检测
-%       细节档位一致）、whitening=.85；repairMid 的 .90 是 max 下界，
+%       smoothingFine/repairFine=.95（与 v3.1 nostrilProtection 峰值
+%       对齐）、smoothingMid=.90（与 T20 检测细节档位一致）、
+%       regionBandBase=.95（baseLuminance 分级保护，T32 起经纯 policy
+%       带注入）、whitening=.85；repairMid 的 .90 是 max 下界，
 %       core 内因 (1 - policyTexture) 项实际为 .95（同 T20 约定）；
 %       tone 保持 legacy（鼻部无 identity 色度语义，肤色变化与脸颊
 %       连续）；
 %     nose structure band —— band=1 像素抬升 smoothingMid/repairMid=
-%       .85、baseLuminance=.80；smoothingFine/repairFine/whitening/
-%       tone 保持 legacy（结构带不进 texture 通道、不阻断美白）；
+%       .85、regionBandBase=.80（baseLuminance 分级保护）；
+%       smoothingFine/repairFine/whitening/tone 保持 legacy（结构带不进
+%       texture 通道、不阻断美白）；
 %     evidence 零带或缺少 nostril/noseStructure 字段（partial V4）时
 %       与 T07 legacy 折叠逐位相等；带外像素逐位还原 legacy；
 %     非法 evidence（尺寸/取值）或 nostril 证据非零而缺少 faceScale
@@ -262,20 +264,23 @@ verifyEqual(testCase, ...
 % band 的同一约定一致：repairMid = 1 - gate*(1-texture) 先于 max 下界）。
 verifyEqual(testCase, ...
     policy.target.repairMid(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+% T32：baseLuminance 的鼻带分级保护经纯 policy 带 regionBandBase 承载
+% （消费侧 regionBandGate = 1 - regionBandBase），不再折进
+% target.baseLuminance。
 verifyEqual(testCase, ...
-    policy.baseLuminance(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+    policy.regionBandBase(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
     policy.whitening(corePoint(1), corePoint(2)), .85, 'AbsTol', 1e-12);
 verifyEqual(testCase, policy.tone(corePoint(1), corePoint(2)), ...
     legacy.tone(corePoint(1), corePoint(2)), 'AbsTol', 0, ...
     '鼻部无 identity 色度语义，tone 不得被鼻带抬升。');
 
-% nose structure band：只抬升 Mid 家族与 baseLuminance。
+% nose structure band：只抬升 Mid 家族与 regionBandBase。
 ridgePoint = fixture.ridgePoint;
 verifyEqual(testCase, ...
     policy.target.smoothingMid(ridgePoint(1), ridgePoint(2)), .85, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
-    policy.baseLuminance(ridgePoint(1), ridgePoint(2)), .80, 'AbsTol', 1e-12);
+    policy.regionBandBase(ridgePoint(1), ridgePoint(2)), .80, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
     policy.target.smoothingFine(ridgePoint(1), ridgePoint(2)), ...
     legacy.target.smoothingFine(ridgePoint(1), ridgePoint(2)), 'AbsTol', 0, ...

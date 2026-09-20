@@ -747,9 +747,9 @@ end
 
 function testStageProtectionLayerIsValidAndBounded(testCase)
 %TESTSTAGEPROTECTIONLAYERISVALIDANDBOUNDED 生产链发布的 V4 protection
-%   层必须逐字段满足规范（T31 起为独立 hard + 规范双门控
-%   target.*/support.*（各四个 stage 门）+ 过渡扁平字段
-%   noseMidProtection/baseLuminance/tone/whitening + T30 五条纯 policy 带
+%   层必须逐字段满足规范（T31/T32 起为独立 hard + 规范双门控
+%   target.*/support.*（各五个 stage 门，T32 追加 baseLuminance）+
+%   过渡扁平字段 noseMidProtection/tone/whitening + T30 五条纯 policy 带
 %   regionBand*，HxW double、real、finite、[0,1]），hard 严格二值；
 %   预览→原尺寸迁移路径在目标尺寸重建 protection，且与直接桥接重建
 %   bit-exact 一致。
@@ -757,7 +757,7 @@ function testStageProtectionLayerIsValidAndBounded(testCase)
 prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60])), 'runtimeCache');
 stageNames = {'hard'; 'target'; 'support'; 'noseMidProtection'; ...
-    'baseLuminance'; 'tone'; 'whitening'; ...
+    'tone'; 'whitening'; ...
     'regionBandFine'; 'regionBandMid'; 'regionBandBase'; ...
     'regionBandTone'; 'regionBandWhitening'};
 assertStageProtectionValid(testCase, prepared.protection, stageNames, ...
@@ -785,9 +785,10 @@ verifyEqual(testCase, fieldnames(protection), stageNames);
 for index = 1:numel(stageNames)
     value = protection.(stageNames{index});
     if isstruct(value) && isscalar(value)
-        % T31：target.*/support.* 为规范双门控嵌套，各含四个 stage 门。
+        % T31/T32：target.*/support.* 为规范双门控嵌套，各含五个 stage 门
+        % （T32 追加 baseLuminance）。
         innerNames = {'smoothingFine'; 'smoothingMid'; ...
-            'repairFine'; 'repairMid'};
+            'repairFine'; 'repairMid'; 'baseLuminance'};
         verifyEqual(testCase, fieldnames(value), innerNames);
         for innerIndex = 1:numel(innerNames)
             assertUnitMask(testCase, value.(innerNames{innerIndex}), ...

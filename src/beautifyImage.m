@@ -152,13 +152,12 @@ repairContract = beauty.repairStageContract(stageProtection, ...
 [repairedFrequency, repairDiagnostics] = beauty.repairSkinBlemishes( ...
     smoothedFrequency, beautyMasks, runtimeEvidence.blemishMap, ...
     smoothingStrength, repairContract);
-% T16：Base Luminance 只消费生产端拼装的 stage contract（T07 快照
-%   baseLuminance + hard + 未折叠 structureGate/featureGate 字段），
-%   与 smoothing/repair 的 stage contract 同源（同一份 beautyMasks 产物
-%   推导）；低频参考与亮度校正公式不变，cached/uncached 两条路径共用
-%   同一组装。
-baseLuminanceContract = makeBaseLuminanceStageContract(beautyMasks, ...
-    stageProtection);
+% T32：Base Luminance 的 contract 组装只转发 V4 stage protection 的规范门
+%   （target.baseLuminance/support.baseLuminance + hard + regionBandBase），
+%   不再读取 legacy general masks；组装点在 +beauty/baseLuminanceStageContract，
+%   与 evenSkinLuminance 的兼容入口共用同一份实现。低频参考与亮度校正
+%   公式不变，cached/uncached 两条路径共用同一组装。
+baseLuminanceContract = beauty.baseLuminanceStageContract(stageProtection);
 [baseLuminance, baseLuminanceDiagnostics] = beauty.evenSkinLuminance( ...
     runtimeEvidence.frequency, beautyMasks, smoothingStrength, ...
     baseLuminanceContract);
@@ -258,47 +257,6 @@ evidence = struct( ...
     'frequencyDiagnostics', frequencyDiagnostics, ...
     'blemishMap', blemishMap, ...
     'blemishDiagnostics', blemishDiagnostics);
-end
-
-function contract = makeBaseLuminanceStageContract(beautyMasks, ...
-    stageProtection)
-%MAKEBASELUMINANCESTAGECONTRACT 组装 Base Luminance 的 stage contract
-%   （T16/T30）。
-%   快照与 hard 取自 T07 protection 分层（与生产门控共用同一份
-%   beautyMasks 产物推导）；未折叠门控字段按 evenSkinLuminance 的生产
-%   原式从同一份产物计算，保证消费侧重建与 legacy 路径逐位等价：
-%     structureGate  — 1 - structure（referenceReliability 与
-%                      supportMap 共用的结构门）；
-%     featureGate    — 1 - max(texture, chroma)（feature 保护门；texture
-%                      与 chroma 的组合留在生产端）。T30 起该字段保持
-%                      "未带"语义：referenceReliability 全局参考统计仍
-%                      用它计算，band 不进入该乘子；
-%     regionBandGate — T30 纯 policy 带 1 - protection.regionBandBase
-%                      （鼻/耳结构带与 eye/lip detail 带的低频亮度结构
-%                      保护），**只作用于逐像素 supportMap**，不参与
-%                      referenceReliability。
-%   T30 激活的分界（关键）：band 只改变"该像素自身"的均衡强度，不改变
-%   邻域参考池。全局参考基准（referenceReliability/referenceWeight/
-%   weightedReference/referenceOffset/referenceCoverage/normalizationMask）
-%   一律沿用未带 featureGate。若把 band 并入 featureGate，它会同时进入
-%   evenSkinLuminance 的全局参考卷积（imgaussfilt），把带内变化经
-%   referenceWeight/referenceCoverage 扩散到带外：实测带外 2226px
-%   （0.94%）出现 ≤2 灰度级泄漏，违反"带外逐位回到 legacy"。拆出
-%   regionBandGate 后带外（band==0 → gate==1）逐位还原 legacy，带外
-%   输出泄漏回到 T30 之前的 ≤1 灰度级量级（仅 legacy 既有来源）。
-%   baseLuminance 快照的折叠含 1-x 补码往返舍入，无法逐位还原门控积
-%   (1-structure)·(1-max(texture,chroma))，因此快照不参与输出算术，
-%   只作为 T07 参考由消费侧诊断（baseGateSnapshot）与测试消费；分级
-%   保护经 regionBandGate 注入 supportMap 生效。该 stage 不消费
-%   runtime blemish evidence，contract 无 runtime 耦合字段；
-%   cached/uncached 路径共用同一份 beautyMasks 产物，组装结果一致。
-contract = struct( ...
-    'baseLuminance', stageProtection.baseLuminance, ...
-    'hard', stageProtection.hard, ...
-    'structureGate', 1 - beautyMasks.structureProtectionMask, ...
-    'featureGate', 1 - max(beautyMasks.textureProtectionMask, ...
-    beautyMasks.chromaProtectionMask), ...
-    'regionBandGate', 1 - stageProtection.regionBandBase);
 end
 
 function contract = makeToneStageContract(beautyMasks, stageProtection, ...

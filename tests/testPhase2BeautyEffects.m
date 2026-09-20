@@ -222,7 +222,7 @@ verifyEqual(testCase, diagnostics.skinTone.hardProtectionMask, ...
     normalizeBeautyContext(sourceImage, faceBox, context), faceBox);
 protection = masks.buildStageProtectionMasks(beautyMasks);
 verifyEqual(testCase, diagnostics.skinTone.toneGateSnapshot, ...
-    1 - protection.tone, 'AbsTol', 0);
+    1 - protection.target.tone, 'AbsTol', 0);
 end
 
 function amplitude = checkerAmplitude(imageData)

@@ -161,23 +161,22 @@ baseLuminanceContract = beauty.baseLuminanceStageContract(stageProtection);
 [baseLuminance, baseLuminanceDiagnostics] = beauty.evenSkinLuminance( ...
     runtimeEvidence.frequency, beautyMasks, smoothingStrength, ...
     baseLuminanceContract);
-% T17：Tone 只消费生产端拼装的 stage contract（T07 快照 tone + hard +
-%   未折叠 structureGate/featureGate/uniformFeatureGate/
-%   candidateChromaGate 字段），与 smoothing/repair/baseLuminance 的
-%   stage contract 同源（同一份 beautyMasks 产物推导）；肤色目标估计
-%   与色彩空间公式不变，cached/uncached 两条路径共用同一组装。
-toneContract = makeToneStageContract(beautyMasks, stageProtection, ...
-    size(inputImage, 1:2));
+% T33：Tone 只消费 V4 stage protection 的规范门
+%   （target.tone/support.tone + hard + toneGates），组装点在
+%   +beauty/toneStageContract，与 normalizeSkinTone 的兼容入口共用同一份
+%   实现，不再读取 legacy general masks；肤色目标估计与色彩空间公式不变，
+%   cached/uncached 两条路径共用同一组装。
+toneContract = beauty.toneStageContract(stageProtection);
 [skinTone, skinToneDiagnostics] = beauty.normalizeSkinTone(inputImage, ...
     runtimeEvidence.frequency, beautyMasks, ...
     runtimeEvidence.blemishMap, smoothingStrength, toneContract);
-% T18：Whitening 只消费生产端拼装的 stage contract（T07 快照
-%   whitening + hard + 未折叠 structureGate/featureGate/
-%   featureZeroGate 字段），与 smoothing/repair/baseLuminance/tone 的
-%   stage contract 同源（同一份 beautyMasks 产物推导）；肤色亮度变换
-%   与 strength 公式不变，cached/uncached 两条路径共用同一组装。
-whiteningContract = makeWhiteningStageContract(beautyMasks, ...
-    stageProtection);
+% T33：Whitening 只消费 V4 stage protection 的规范门
+%   （target.whitening/support.whitening + hard + whiteningGates +
+%   whiteningAmplitudeCeiling），组装点在 +beauty/whiteningStageContract，
+%   与 applySkinWhitening 的兼容入口共用同一份实现，不再读取 legacy
+%   general masks 或 noseMask；肤色亮度变换与 strength 公式不变，
+%   cached/uncached 两条路径共用同一组装。
+whiteningContract = beauty.whiteningStageContract(stageProtection);
 [whitening, whiteningDiagnostics] = beauty.applySkinWhitening(inputImage, ...
     runtimeEvidence.frequency, beautyMasks, whiteningStrength, ...
     whiteningContract);
@@ -257,99 +256,6 @@ evidence = struct( ...
     'frequencyDiagnostics', frequencyDiagnostics, ...
     'blemishMap', blemishMap, ...
     'blemishDiagnostics', blemishDiagnostics);
-end
-
-function contract = makeToneStageContract(beautyMasks, stageProtection, ...
-    imageSize)
-%MAKETONESTAGECONTRACT 组装 Tone 的 stage contract（T17）。
-%   快照与 hard 取自 T07 protection 分层（与生产门控共用同一份
-%   beautyMasks 产物推导）；未折叠门控字段按 normalizeSkinTone 的生产
-%   原式从同一份产物计算，保证消费侧重建与 legacy 路径逐位等价：
-%     structureGate      — 1 - structure（主/uniform 分支共用的结构门）；
-%     featureGate        — 1 - .78*chroma（主 weight 分支的 feature 门），
-%                          T30 起再乘 (1 - protection.regionBandTone)
-%                          （唇 detail 带的 identity 色度保护）；
-%     uniformFeatureGate — 1 - chroma（uniform 分支的 feature 门）。
-%                          T07 快照 tone 只折叠主分支；ratio>.50 的
-%                          uniform 分支使用比主分支更强的 (1-chroma)
-%                          门，单快照无法同时精确表达两条分支（T07 已
-%                          知残差），因此与 T14--T16 相同以未折叠字段
-%                          发布；
-%     candidateChromaGate— double(chroma < .70)（tone 候选的色度保护
-%                          门限，生产原式原样发布；chroma 来源与
-%                          consumer legacy 路径同源，含 chroma/tone
-%                          alias 解析与缺省回退）。
-%   tone 快照的折叠含 1-x 补码往返舍入且只覆盖主分支，不参与输出算
-%   术，只作为 T07 参考由消费侧诊断（toneGateSnapshot）与测试消费；
-%   分级保护经 regionBandTone 注入主分支 featureGate 生效（uniform
-%   分支按 T20/T21/T22 语义不追加任何带）。该 stage 的 blemish 只进入
-%   effect 侧证据项（weightMap 的 blemishEvidence），不参与保护门控，
-%   contract 无 runtime 耦合字段；cached/uncached 路径共用同一份
-%   beautyMasks 产物，组装结果一致。
-[chromaProtection, hasChromaProtection] = resolveChromaProtectionMask( ...
-    beautyMasks, imageSize, 'beauty:InvalidSkinToneInput', ...
-    'beauty:ChromaProtectionConflict');
-if ~hasChromaProtection
-    chromaProtection = zeros(imageSize);
-end
-contract = struct( ...
-    'tone', stageProtection.tone, ...
-    'hard', stageProtection.hard, ...
-    'structureGate', 1 - beautyMasks.structureProtectionMask, ...
-    'featureGate', (1 - .78 * chromaProtection) .* ...
-    (1 - stageProtection.regionBandTone), ...
-    'uniformFeatureGate', 1 - chromaProtection, ...
-    'candidateChromaGate', double(chromaProtection < .70));
-end
-
-function contract = makeWhiteningStageContract(beautyMasks, ...
-    stageProtection)
-%MAKEWHITENINGSTAGECONTRACT 组装 Whitening 的 stage contract（T18）。
-%   快照与 hard 取自 T07 protection 分层（与生产门控共用同一份
-%   beautyMasks 产物推导）；未折叠门控字段按 applySkinWhitening 的生
-%   产原式从同一份产物计算，保证消费侧重建与 legacy 路径逐位等价：
-%     structureGate   — 未折叠结构门，含生产原位的脸部/脸外差异分
-%                       支：全场 1 - structure，脸部（faceSkinMask
-%                       >= .5）浅退让为 1 - .10*structure；
-%     featureGate     — 未折叠五官退让门 1 - whitening（不在此截
-%                       断，消费侧按生产原式截断，保证越界/NaN 输
-%                       入仍 fail-fast），T30 起再乘
-%                       (1 - protection.regionBandWhitening)
-%                       （eye/lip detail 带与 nostril 软带的假白光晕
-%                       退让）；
-%     featureZeroGate — double(whitening <= eps)（亮度统计选点的五
-%                       官零保护门限，生产原式原样发布）。
-%   whitening/faceSkin 来源与 consumer legacy 路径同源，含缺省回退
-%   （whiteningProtectionMask/faceSkinMask 缺字段按零处理）。
-%   whitening 快照的折叠含 1-x 补码往返舍入，不参与输出算术，只作为
-%   T07 参考由消费侧诊断（whiteningGateSnapshot）与测试消费；分级保
-%   护经 regionBandWhitening 注入 featureGate 生效（耳部不追加任何
-%   项，维持耳-颊肤色连续）。
-%   strengthMap/skinMask 不进入本 contract（strength 与 protection 不
-%   合并）；脸部 allowed 下限与鼻部幅度封顶属强度侧区域 policy，仍由
-%   consumer 从 beautyMasks 读取。cached/uncached 路径共用同一份
-%   beautyMasks 产物，组装结果一致。
-if isfield(beautyMasks, 'whiteningProtectionMask')
-    whiteningProtection = double(beautyMasks.whiteningProtectionMask);
-else
-    whiteningProtection = zeros(size(beautyMasks.structureProtectionMask));
-end
-if isfield(beautyMasks, 'faceSkinMask')
-    faceSkinSupport = double(beautyMasks.faceSkinMask) >= .5;
-else
-    faceSkinSupport = false(size(beautyMasks.structureProtectionMask));
-end
-structureProtection = double(beautyMasks.structureProtectionMask);
-structureGate = 1 - structureProtection;
-structureGate(faceSkinSupport) = ...
-    1 - .10 * structureProtection(faceSkinSupport);
-contract = struct( ...
-    'whitening', stageProtection.whitening, ...
-    'hard', stageProtection.hard, ...
-    'structureGate', structureGate, ...
-    'featureGate', (1 - whiteningProtection) .* ...
-    (1 - stageProtection.regionBandWhitening), ...
-    'featureZeroGate', double(whiteningProtection <= eps));
 end
 
 function contract = makeComposeStageContract(stageProtection)

@@ -94,10 +94,25 @@ values = value;
 end
 
 function layer = normalizeMaskLayer(layer, imageSize, layerName)
+% T33：protection 层可携带标量元数据字段（非 HxW 保护图）。当前唯一字段是
+% whiteningAmplitudeCeiling —— 美白幅度上限（无鼻部结构时为 Inf，存在鼻部
+% 结构时为 .07），由 policy 层一次判定，语义是标量策略常量而非逐像素保护
+% 量，因此只做"正标量或 Inf"校验，不参与尺寸与 [0,1] 校验。
+scalarMetadataFields = {'whiteningAmplitudeCeiling'};
 fields = fieldnames(layer);
 for index = 1:numel(fields)
     name = fields{index};
     value = layer.(name);
+    if strcmp(layerName, 'protection') && ...
+            any(strcmp(name, scalarMetadataFields))
+        if ~isnumeric(value) || ~isreal(value) || ~isscalar(value) || ...
+                isnan(value) || value <= 0
+            error('normalizeBeautyContextV4:InvalidMask', ...
+                '字段 %s.%s 的类型或取值范围无效。', layerName, name);
+        end
+        layer.(name) = double(value);
+        continue;
+    end
     if isstruct(value) && isscalar(value)
         % T31：protection 层的规范双门控 target.*/support.* 是标量嵌套
         % 结构（各含 smoothingFine/smoothingMid/repairFine/repairMid），

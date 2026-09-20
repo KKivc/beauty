@@ -757,7 +757,7 @@ function testStageProtectionLayerIsValidAndBounded(testCase)
 prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60])), 'runtimeCache');
 stageNames = {'hard'; 'target'; 'support'; 'noseMidProtection'; ...
-    'tone'; 'whitening'; ...
+    'toneGates'; 'whiteningGates'; 'whiteningAmplitudeCeiling'; ...
     'regionBandFine'; 'regionBandMid'; 'regionBandBase'; ...
     'regionBandTone'; 'regionBandWhitening'};
 assertStageProtectionValid(testCase, prepared.protection, stageNames, ...
@@ -783,20 +783,33 @@ function assertStageProtectionValid(testCase, protection, stageNames, ...
 verifyTrue(testCase, isstruct(protection) && isscalar(protection));
 verifyEqual(testCase, fieldnames(protection), stageNames);
 for index = 1:numel(stageNames)
-    value = protection.(stageNames{index});
-    if isstruct(value) && isscalar(value)
-        % T31/T32：target.*/support.* 为规范双门控嵌套，各含五个 stage 门
-        % （T32 追加 baseLuminance）。
-        innerNames = {'smoothingFine'; 'smoothingMid'; ...
-            'repairFine'; 'repairMid'; 'baseLuminance'};
+    name = stageNames{index};
+    value = protection.(name);
+    if strcmp(name, 'target') || strcmp(name, 'support')
+        innerNames = {'smoothingFine'; 'smoothingMid'; 'repairFine'; ...
+            'repairMid'; 'baseLuminance'; 'tone'; 'whitening'};
         verifyEqual(testCase, fieldnames(value), innerNames);
         for innerIndex = 1:numel(innerNames)
-            assertUnitMask(testCase, value.(innerNames{innerIndex}), ...
-                imageSize);
+            assertUnitMask(testCase, value.(innerNames{innerIndex}), imageSize);
         end
-        continue;
+    elseif strcmp(name, 'toneGates')
+        innerNames = {'structureGate'; 'featureGate'; 'uniformFeatureGate'};
+        verifyEqual(testCase, fieldnames(value), innerNames);
+        for innerIndex = 1:numel(innerNames)
+            assertUnitMask(testCase, value.(innerNames{innerIndex}), imageSize);
+        end
+    elseif strcmp(name, 'whiteningGates')
+        innerNames = {'structureGate'; 'featureGate'};
+        verifyEqual(testCase, fieldnames(value), innerNames);
+        for innerIndex = 1:numel(innerNames)
+            assertUnitMask(testCase, value.(innerNames{innerIndex}), imageSize);
+        end
+    elseif strcmp(name, 'whiteningAmplitudeCeiling')
+        verifyTrue(testCase, isnumeric(value) && isscalar(value) && ...
+            isreal(value) && ~isnan(value) && value > 0);
+    else
+        assertUnitMask(testCase, value, imageSize);
     end
-    assertUnitMask(testCase, value, imageSize);
 end
 end
 

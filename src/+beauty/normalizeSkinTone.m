@@ -5,44 +5,40 @@ function [toneResult, diagnostics] = normalizeSkinTone( ...
 %   频率结构只用于校验尺寸；脸部和脸外始终共享同一个候选色度，
 %   区域差异仅来自 masks.buildBeautyStrengthMap 的连续强度图。
 %
-%   T17：可选第 6 参数 toneContract 是 Tone 的 stage contract，由
-%   beautifyImage 生产端从与生产门控共用的同一份 beautyMasks 产物拼
-%   装传入（T12--T16 范式）。提供时两分支（主/uniform）的保护门控与
-%   候选色度保护门限只来自 contract，不再自行组合 general
-%   structure/chroma masks；肤色目标估计（候选色度中值）与色彩空间
-%   公式不变。字段语义：
-%     tone                — T07 发布的 stage protection 快照
-%                           tone = 1 - (1 - structure) .*
-%                           (1 - .78*chroma)；该折叠只覆盖主分支且含
-%                           1-x 补码往返舍入，无法逐位还原门控积，也
-%                           无法表达 ratio>.50 uniform 分支更强的
-%                           (1-chroma) 门（T07 已知残差），因此快照
-%                           不参与输出算术，只作为 T07 参考门由诊断
-%                           （toneGateSnapshot）与测试消费；
-%     hard                — hard identity（T07 单独发布），按生产原
-%                           位组合进候选门限与 allowed 的 (1-hard)
-%                           乘子；
-%     structureGate       — 未折叠结构门 1 - structure（主/uniform
-%                           分支共用）；
-%     featureGate         — 未折叠 feature 门 1 - .78*chroma（主分
-%                           支）；
-%     uniformFeatureGate  — 未折叠 feature 门 1 - chroma（uniform
-%                           分支，比主分支更强）；
-%     candidateChromaGate — double(chroma < .70)（tone 候选的色度保
-%                           护门限，生产原式原样发布）。
-%   运行期由生产端按与 legacy 完全相同的表达式、同一份 mask 产物计
-%   算未折叠字段，消费侧按生产原式、原顺序重建门控，与 legacy 路径
-%   逐位等价（bit-exact）。缺字段 fail-fast，不在函数内部重新拼装，
-%   也不静默回退；未提供第 6 参的旧调用方走 legacy 兼容路径，行为
-%   不变。processability（skinMask）与强度（strengthMap）不属于
-%   protection，两条路径都继续从 beautyMasks 读取并显式控制效果幅
-%   度，strength 与 protection 不合并。
+%   T33（执行契约）：可选第 6 参数 toneContract 是 Tone 的 stage contract，
+%   由唯一组装点 +beauty/toneStageContract 从 V4 stage protection 的规范门
+%   组装（生产组装层 beautifyImage 与兼容入口共用同一份实现）。执行层是
+%   **纯执行器**：只消费 contract 与 strength/processability 层，不读取任何
+%   semantic / evidence / legacy general protection mask（structure/chroma/
+%   hard/tone）。肤色目标估计（候选色度中值）与色彩空间公式不变。
+%   读取集合（上位契约第 1 节）：
+%     beautyMasks.skinMask / strengthMap —— processability 与 strength 层
+%       （非保护判定，显式控制效果幅度，strength 与 protection 不合并）；
+%     beautyMasks.faceSkinMask / nonFaceSkinMask / faceBox —— 非保护类
+%       processability 与几何字段（诊断分域与参考尺度）；
+%     toneContract.hard —— 独立 hard identity（生产原位 (1-hard) 乘子）；
+%     toneContract.structureGate / featureGate —— 主分支逐像素门控因子
+%       （policy 层按生产原式一次算好并发布）；
+%     toneContract.uniformFeatureGate —— uniform 分支逐像素门控因子；
+%     toneContract.candidateChromaGate —— 参考样本门（= 1 - support.tone）。
+%   统一权重函数（上位契约第 2 节）：
+%     targetWeight  = strength × processabilitySkin × (1 - targetProtection)
+%                     → weightMap 的 structureGate·featureGate 与
+%                       uniformToneSupport 的 structureGate·uniformFeatureGate
+%     supportWeight = validSkinReference × (1 - supportProtection)
+%                     → candidateChromaGate（肤色目标估计的样本门）
+%   其中 skinMask/strengthMap 是 processability×strength 的既有逐像素形式，
+%   target.tone/support.tone 是 policy 层发布的规范双门控（1 - 该值 即上述
+%   门控积与样本门；因 T07 折叠含 1-x 补码往返舍入，执行层消费 policy 发布
+%   的未折叠因子以保证与 legacy 逐位等价）。
+%   兼容入口（未提供第 6 参的旧调用方）：不再自行解释 legacy general masks，
+%   而是向 policy 层索取零带 stageProtection 并经同一组装点得到零带
+%   contract。缺字段 fail-fast，不在函数内部重新拼装。
 
 if nargin < 5
     error('beauty:InvalidSkinToneInput', ...
         '肤色统一需要输入图像、频率、Beauty Masks、瑕疵图和磨皮强度。');
 end
-useStageContract = nargin >= 6 && ~isempty(toneContract);
 validateImage(inputImage);
 imageSize = size(inputImage, 1:2);
 if ~isempty(frequency)
@@ -60,33 +56,22 @@ cb = ycbcr(:, :, 2);
 cr = ycbcr(:, :, 3);
 skinMask = readMask(beautyMasks, 'skinMask', imageSize);
 strengthMap = readMask(beautyMasks, 'strengthMap', imageSize);
-% T17：保护门控来源二选一。stage 路径只消费 contract（tone 快照不参
-% 与输出算术，两分支门控与候选门限由生产端未折叠字段按生产原式重
-% 建）；legacy 路径保持原解释与数值。两条路径的门控字段按同一表达
-% 式、同一份 mask 产物取得，数值逐位一致。
-if useStageContract
-    toneContract = validateToneContract(toneContract, imageSize);
-    hardProtection = toneContract.hard;
-    structureGate = toneContract.structureGate;
-    featureGate = toneContract.featureGate;
-    uniformFeatureGate = toneContract.uniformFeatureGate;
-    candidateChromaGate = toneContract.candidateChromaGate;
-else
-    structureProtection = readMask(beautyMasks, ...
-        'structureProtectionMask', imageSize);
-    [chromaProtection, hasChromaProtection] = resolveChromaProtectionMask( ...
-        beautyMasks, imageSize, 'beauty:InvalidSkinToneInput', ...
-        'beauty:ChromaProtectionConflict');
-    if ~hasChromaProtection
-        chromaProtection = zeros(imageSize);
-    end
-    hardProtection = readOptionalMask(beautyMasks, ...
-        'hardProtectionMask', imageSize);
-    structureGate = 1 - structureProtection;
-    featureGate = 1 - .78 * chromaProtection;
-    uniformFeatureGate = 1 - chromaProtection;
-    candidateChromaGate = double(chromaProtection < .70);
+% T33：保护门控只来自 contract。兼容入口（未提供第 6 参的旧调用方）不再
+% 自行解释 general structure/chroma/hard masks，而是向 policy 层索取零带
+% stageProtection（masks.buildStageProtectionMasks(beautyMasks)），经唯一
+% 组装点 +beauty/toneStageContract 得到零带 contract，与生产路径共用同一份
+% Single Protection Authority。执行层只消费 target.tone/support.tone 与
+% policy 发布的未折叠门控，缺字段 fail-fast，不在函数内部重新拼装。
+if nargin < 6 || isempty(toneContract)
+    stageProtection = masks.buildStageProtectionMasks(beautyMasks);
+    toneContract = beauty.toneStageContract(stageProtection);
 end
+toneContract = validateToneContract(toneContract, imageSize);
+hardProtection = toneContract.hard;
+structureGate = toneContract.structureGate;
+featureGate = toneContract.featureGate;
+uniformFeatureGate = toneContract.uniformFeatureGate;
+candidateChromaGate = toneContract.candidateChromaGate;
 
 baseCandidate = skinMask > .05 & strengthMap > .01 & ...
     hardProtection < .999 & candidateChromaGate;
@@ -215,16 +200,10 @@ diagnostics = struct( ...
     'hardProtectionMask', hardProtection, ...
     'imageSize', [imageSize, 3], ...
     'smoothingStrength', double(smoothingStrength));
-if useStageContract
-    % T17 诊断收口：stage 路径不再报告 structure/chroma/tone 兼容
-    % alias（保护输入由 contract 承载），新增 T07 tone 快照的参考门；
-    % hard identity 继续按 T07 约定单独报告。
-    diagnostics.toneGateSnapshot = 1 - toneContract.tone;
-else
-    diagnostics.structureProtectionMask = structureProtection;
-    diagnostics.chromaProtectionMask = chromaProtection;
-    diagnostics.toneProtectionMask = chromaProtection;
-end
+% T33 诊断收口：执行层只消费 stage contract，不再报告 structure/chroma/
+% tone 兼容 alias（保护输入由 contract 承载），新增 T07 tone 快照的参考
+% 门；hard identity 继续按 T07 约定单独报告。
+diagnostics.toneGateSnapshot = 1 - toneContract.tone;
 end
 
 function candidate = selectToneCandidate(luminance, baseCandidate)
@@ -258,11 +237,14 @@ end
 end
 
 function validateMasks(beautyMasks, imageSize)
+%VALIDATEMASKS 校验执行层允许读取的 processability/strength 字段。
+%   T33 起保护判定全部由 policy 层承担，本层只读 skinMask 与 strengthMap；
+%   structure/chroma/hard 等 legacy general mask 不再被读取。
 if ~isstruct(beautyMasks) || ~isscalar(beautyMasks)
     error('beauty:InvalidSkinToneInput', ...
         '肤色统一需要标量 v3 Beauty Masks。');
 end
-required = {'skinMask', 'strengthMap', 'structureProtectionMask'};
+required = {'skinMask', 'strengthMap'};
 for index = 1:numel(required)
     if ~isfield(beautyMasks, required{index})
         error('beauty:InvalidSkinToneInput', ...
@@ -270,8 +252,6 @@ for index = 1:numel(required)
     end
     readMask(beautyMasks, required{index}, imageSize);
 end
-[~, ~] = resolveChromaProtectionMask(beautyMasks, imageSize, ...
-    'beauty:InvalidSkinToneInput', 'beauty:ChromaProtectionConflict');
 end
 
 function contract = validateToneContract(contract, imageSize)

@@ -164,12 +164,12 @@ verifyTrue(testCase, isfield(diagnostics.whitening, ...
 verifyEqual(testCase, diagnostics.whitening.hardProtectionMask, ...
     diagnostics.beautyMasks.hardProtectionMask, 'AbsTol', 0);
 
-% T07 快照衔接：whiteningGateSnapshot 与 protection.whitening 一致。
+% T07 快照衔接：whiteningGateSnapshot 与 protection.target.whitening 一致。
 [beautyMasks, ~] = masks.buildBeautyMasks(image, ...
     normalizeBeautyContext(image, faceBox, context), faceBox);
 protection = masks.buildStageProtectionMasks(beautyMasks);
 verifyEqual(testCase, diagnostics.whitening.whiteningGateSnapshot, ...
-    1 - protection.whitening, 'AbsTol', 0);
+    1 - protection.target.whitening, 'AbsTol', 0);
 
 % 鼻部不得因 consumer migration 被整体排除：鼻部语义内美白增量非零。
 noseRegion = beautyMasks.noseMask > .5;

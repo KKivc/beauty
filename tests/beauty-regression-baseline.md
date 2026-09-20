@@ -440,3 +440,33 @@ rich 100/15 `155c8466…`、rich 50/25 `ae034c0b…`、compact 100/15 `11f2607b�
 `.scratch/tmp/T32-target-tests.log`）；兼容基线 8 项全部通过（见
 `.scratch/tmp/T32-compat-baseline.log`）。执行层净化证据见 `.scratch/tmp/T32-grep-proof.txt`。
 
+## T33 — Tone + Whitening 执行契约
+
+T33 将 Tone 与 Whitening 迁移为规范双门控执行契约，完成控制面与执行面收口：
+
+- `protection.target.tone` / `protection.support.tone` 与
+  `protection.target.whitening` / `protection.support.whitening` 成为唯一 stage 保护字段；
+  旧顶层扁平 `protection.tone` / `protection.whitening` 删除。
+- Tone 门源集中到 `protection.toneGates`，Whitening 门源集中到
+  `protection.whiteningGates` 与 `protection.whiteningAmplitudeCeiling`；
+  `+beauty/toneStageContract.m`、`+beauty/whiteningStageContract.m` 为唯一组装点。
+- `normalizeSkinTone` 与 `applySkinWhitening` 只消费 contract、processability/strength 和输入频率；
+  `applySkinWhitening` 原 `beautyMasks.noseMask` 特殊分支已移除，鼻部幅度上限由 policy 发布。
+
+兼容性与结构性不变量保持不变：真实图 77 compat digest 仍为冻结 oracle
+`ce17e323dc4208d973f21be3c3a6f1b09df19dd80` 对应链路的
+`ce17e323dc4208d973ccae4b4a2cc122b2fed75fe7500088197c5278806bdc4c`，零带 protection 与输出逐位回 legacy，
+hard nnz=82266、严格二值且 hard RGB 回源；带外变化 196 px、最大 1 灰度级，未放宽阈值。
+
+T33 真实图 77：policy-vs-legacy changed=3656 px，带外 196 px（max=1.000）；
+Tone target-only reference candidate Cb/Cr 逐位不变而 weight changed=1984 px；
+Whitening target-only brightnessNeed/globalHeadroom 逐位不变而 delta changed=928 px，
+support-only delta changed=74738 px。鼻部 `whiteningAmplitudeCeiling=.07`，鼻区 whitening
+support policy/legacy=`0.171701/0.171701`，delta=`0.004705/0.004705`；
+鼻区 Tone weight policy/legacy=`0.414063/0.414063`，颊区=`0.345913/0.345991`。
+
+目标测试：`testBeautyArtifactRegressions`、`testBeautyV3`、`testNoseSmoothing`、
+`testPortraitBeautyHelpers`、`testBeautyContextV3`、`testMaskSystemV4CompatibilityBaseline`
+共 **113/113 通过**；执行层纯化举证见 `.scratch/tmp/T33-grep-proof.txt`，真实图日志见
+`.scratch/tmp/T33-accept.log`。
+

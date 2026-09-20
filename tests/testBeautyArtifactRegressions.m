@@ -601,6 +601,175 @@ verifyEqual(testCase, cachedOut, policyOut, ...
     'cached 路径必须与 uncached 逐位一致。');
 end
 
+function testEarPolicyDoesNotWorsenSeamHaloOrStructureLoss(testCase)
+%T22：ear region policy 的 artifact 诊断对比断言。合成耳部人像分别以
+%   T22 policy 路径（V4 Context 携带含 earStructure 的 evidence）与
+%   "无 T22"基线（只去掉 earStructure 的 evidence；T20/T21 贡献在两条
+%   路径逐位同值，T21 accept 的同一隔离手法）运行，用现有 smoothing
+%   诊断与输出统计比较缝合、光晕与结构损失：
+%     identity —— hard 三条路径逐位相等（耳部不整耳 hard 化，零膨胀），
+%       hard 区域 RGB 与源图逐位相等；
+%     缝合 —— stage 字段在 ear 结构带外逐位等于无 T22 基线（tone 全图
+%       bit-equal），输出差异带外不超过 1 个灰度级（生产链全局参考统计
+%       的舍入），普通脸颊 Fine/Mid 处理量逐位不变；
+%     结构损失 —— ear 结构带内 Fine/Mid 处理量下降（探针实测 Fine 处理
+%       量下降、smoothingFine 严格抬升），带内高频细节能量不低于基线；
+%     光晕 —— 美白 consumer 的算术门控不读本层快照，美白-only 输出必须
+%       与基线逐位一致；
+%     cached 与 uncached 输出逐位一致。
+[sourceImage, faceBox, parsing, earData] = earPolicyArtifactFixture();
+context = buildBeautyContextFromParsing(sourceImage, faceBox, parsing);
+earOnlyContext = context;
+earOnlyContext.evidence = rmfield(context.evidence, 'earStructure');
+params = struct('smoothingStrength', 100, 'whiteningStrength', 0);
+[policyOut, policyDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, context);
+[earOnlyOut, earOnlyDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, earOnlyContext);
+
+[beautyMasks, maskDiagnostics] = masks.buildBeautyMasks(sourceImage, ...
+    context, faceBox);
+protection = masks.buildStageProtectionMasks(beautyMasks, context.evidence);
+earOnlyProtection = masks.buildStageProtectionMasks(beautyMasks, ...
+    earOnlyContext.evidence);
+hardMask = protection.hard >= .999;
+verifyTrue(testCase, isequal(protection.hard, earOnlyProtection.hard) && ...
+    nnz(hardMask) > 0, 'T22 不得新增或减少 hard identity 像素。');
+verifyEqual(testCase, policyOut(repmat(hardMask, [1, 1, 3])), ...
+    sourceImage(repmat(hardMask, [1, 1, 3])), ...
+    'hard identity 区域 RGB 必须与源图逐位相等。');
+
+ear = context.semantic.ear;
+band = smoothStep(context.evidence.earStructure, .05, .30);
+softBand = band > .5 & ~hardMask;
+verifyGreaterThan(testCase, nnz(softBand), 0, ...
+    'fixture 必须产生非空 ear 结构带。');
+verifyEqual(testCase, nnz(band(ear < .20) > 0), 0, ...
+    'ear 语义支持域外不得有耳结构带（耳外背景不被误纳入）。');
+verifyEqual(testCase, nnz(softBand & earData.face & ear < .10), 0, ...
+    '脸颊不得进入 ear 结构带。');
+
+% 缝合：带外 stage 字段逐位还原；tone 全图 bit-equal；输出带外
+% 不超过 1 个灰度级（全局参考统计的舍入响应）。
+outside = band == 0;
+fieldNames = fieldnames(protection);
+for fieldIndex = 1:numel(fieldNames)
+    fieldName = fieldNames{fieldIndex};
+    verifyEqual(testCase, protection.(fieldName)(outside), ...
+        earOnlyProtection.(fieldName)(outside), 'AbsTol', 0, ...
+        'evidence 带外的 stage 字段必须逐位等于无 T22 基线。');
+end
+verifyEqual(testCase, protection.tone, earOnlyProtection.tone, ...
+    'AbsTol', 0, 'T22 不得给 tone 增加耳部项。');
+diffMap = mean(abs(double(policyOut) - double(earOnlyOut)), 3);
+verifyLessThanOrEqual(testCase, max(diffMap(outside)), 1 + 1e-9, ...
+    '输出差异带外不得超过 1 个灰度级。');
+alphaPolicy = policyDiagnostics.smoothing.alphaMap;
+alphaEarOnly = earOnlyDiagnostics.smoothing.alphaMap;
+midPolicy = policyDiagnostics.smoothing.midAlphaMap;
+midEarOnly = earOnlyDiagnostics.smoothing.midAlphaMap;
+cheek = ear < .10;
+verifyEqual(testCase, alphaPolicy(cheek), alphaEarOnly(cheek), 'AbsTol', 0, ...
+    '普通脸颊的 Fine 处理量不得因耳部 policy 改变。');
+verifyEqual(testCase, midPolicy(cheek), midEarOnly(cheek), 'AbsTol', 0, ...
+    '普通脸颊的 Mid 处理量不得因耳部 policy 改变。');
+
+% 结构损失：带内 Fine/Mid 处理量下降，Mid 尺度（耳轮脊线/耳甲腔沟槽的
+% 实际尺度，mediumSigma = .045*faceScale）细节能量不低于基线。
+verifyTrue(testCase, any(protection.smoothingFine(softBand) > ...
+    earOnlyProtection.smoothingFine(softBand)), ...
+    'ear 结构带内 smoothingFine 必须严格抬升。');
+verifyLessThan(testCase, mean(alphaPolicy(softBand)), ...
+    mean(alphaEarOnly(softBand)), ...
+    'ear 结构带内 Fine 处理量必须低于无 T22 基线。');
+verifyLessThanOrEqual(testCase, mean(midPolicy(softBand)), ...
+    mean(midEarOnly(softBand)) + 1e-12, ...
+    'ear 结构带内 Mid 处理量不得高于无 T22 基线。');
+midSigma = min(32, max(5, .045 * min(faceBox(3:4))));
+grayPolicy = im2double(rgb2gray(policyOut));
+grayEarOnly = im2double(rgb2gray(earOnlyOut));
+hpPolicy = grayPolicy - imgaussfilt(grayPolicy, midSigma, ...
+    'Padding', 'replicate');
+hpEarOnly = grayEarOnly - imgaussfilt(grayEarOnly, midSigma, ...
+    'Padding', 'replicate');
+verifyGreaterThanOrEqual(testCase, mean(abs(hpPolicy(softBand))), ...
+    mean(abs(hpEarOnly(softBand))) - 1e-12, ...
+    'ear 结构带内 Mid 尺度结构能量不得低于无 T22 基线。');
+
+% 光晕：美白-only 输出与基线逐位一致（本层快照不进入美白算术）。
+whiteningParams = struct('smoothingStrength', 0, 'whiteningStrength', 100);
+whiteningPolicyOut = beautifyImage(sourceImage, whiteningParams, faceBox, ...
+    context);
+whiteningEarOnlyOut = beautifyImage(sourceImage, whiteningParams, faceBox, ...
+    earOnlyContext);
+verifyEqual(testCase, whiteningPolicyOut, whiteningEarOnlyOut, ...
+    '美白-only 输出必须与无 T22 基线逐位一致。');
+
+% cached 与 uncached 输出逐位一致。
+cachedContext = context;
+cachedContext.runtimeCache = buildBeautyRuntimeCache(sourceImage, ...
+    faceBox, beautyMasks, maskDiagnostics, struct( ...
+    'status', 'generated', ...
+    'sourceSchemaVersion', '3.1', ...
+    'message', '回归测试生成运行时产物。'));
+[cachedOut, cachedDiagnostics] = beautifyImage(sourceImage, params, ...
+    faceBox, cachedContext);
+verifyTrue(testCase, cachedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, cachedOut, policyOut, ...
+    'cached 路径必须与 uncached 逐位一致。');
+end
+
+function [sourceImage, faceBox, parsing, earData] = earPolicyArtifactFixture
+%EARPOOLICYARTIFACTFIXTURE 合成耳部人像（与 testEarProtectionPolicy 的
+%   earPolicyPortrait 同款几何）：椭圆脸 + 右耳（耳轮亮脊 + 耳甲腔暗谷
+%   + 轻纹理）+ 鼻语义覆盖的两个鼻孔暗谷（提供非空 hard identity）。
+%   耳内结构对比度刻意保持温和，使耳结构带的增量可被 stage 字段与
+%   alphaMap 直接观测。
+imageHeight = 240;
+imageWidth = 320;
+[xGrid, yGrid] = meshgrid(1:imageWidth, 1:imageHeight);
+centerX = 150;
+faceCenterY = 110;
+faceRegion = ((xGrid - centerX) / 78) .^ 2 + ...
+    ((yGrid - faceCenterY) / 95) .^ 2 <= 1;
+earCenterX = centerX + 74;
+earCenterY = 108;
+earRegion = ((xGrid - earCenterX) / 26) .^ 2 + ...
+    ((yGrid - earCenterY) / 40) .^ 2 <= 1;
+helix = earRegion & ~(((xGrid - earCenterX) / 18) .^ 2 + ...
+    ((yGrid - earCenterY) / 31) .^ 2 <= 1);
+concha = ((xGrid - (earCenterX - 4)) / 12) .^ 2 + ...
+    ((yGrid - (earCenterY + 8)) / 18) .^ 2 <= 1;
+base = .60 * ones(imageHeight, imageWidth);
+base(faceRegion) = .64;
+base(earRegion) = .62;
+base(helix) = base(helix) + .04;
+base(concha) = base(concha) - .05;
+base = base + .035 * sin(2 * pi * xGrid / 13) .* sin(2 * pi * yGrid / 11);
+nostril = (((xGrid - (centerX - 9)) / 6.0) .^ 2 + ...
+    ((yGrid - (faceCenterY + 34)) / 3.0) .^ 2 <= 1) | ...
+    (((xGrid - (centerX + 9)) / 6.0) .^ 2 + ...
+    ((yGrid - (faceCenterY + 34)) / 3.0) .^ 2 <= 1);
+base(nostril) = base(nostril) - .15;
+red = base * 255 + 20;
+green = base * 255 - 12;
+blue = base * 255 - 28;
+sourceImage = uint8(cat(3, min(max(round(red), 0), 255), ...
+    min(max(round(green), 0), 255), min(max(round(blue), 0), 255)));
+parsing = emptyParsing([imageHeight, imageWidth]);
+parsing.regions.skin = double(faceRegion);
+parsing.regionConfidence.skin = double(faceRegion);
+parsing.regions.leftEar = double(earRegion);
+parsing.regionConfidence.leftEar = double(earRegion);
+noseRegion = ((xGrid - centerX) / 20) .^ 2 + ...
+    ((yGrid - (faceCenterY + 20)) / 30) .^ 2 <= 1;
+parsing.regions.nose = double(noseRegion);
+parsing.regionConfidence.nose = double(noseRegion);
+faceBox = [centerX - 78, faceCenterY - 95, 156, 190];
+earData = struct('ear', earRegion, 'helix', helix, 'concha', concha, ...
+    'face', faceRegion);
+end
+
 function [sourceImage, faceBox, parsing, freckle, valleyRegion] = ...
         gentleNosePolicyFixture
 %GENTLENOSEPOLICYFIXTURE 平坦鼻 + 浅鼻孔暗谷 + 鼻内雀斑的合成人像。

@@ -595,7 +595,7 @@ verifyTrue(testCase, isfield(context, 'evidence'));
 evidence = context.evidence;
 verifyTrue(testCase, isstruct(evidence) && isscalar(evidence));
 expectedFields = {'periocular'; 'nostril'; 'noseStructure'; 'lip'; ...
-    'edgeDetail'; 'structureGradient'; 'darkDetail'};
+    'edgeDetail'; 'structureGradient'; 'darkDetail'; 'earStructure'};
 verifyEqual(testCase, fieldnames(evidence), expectedFields);
 imageSize = size(sourceImage, [1, 2]);
 for index = 1:numel(expectedFields)

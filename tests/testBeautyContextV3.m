@@ -687,11 +687,13 @@ function testPolicyEvidenceLayerIsValidAndBounded(testCase)
 %   必须逐字段满足 V4 evidence 规范（HxW double、real、finite、[0,1]），
 %   元数据挂在 diagnostics.policyEvidence；预览→原尺寸迁移路径在目标
 %   尺寸重建 evidence，且与直接桥接重建 bit-exact 一致。
+%   T22（2026-09-20）：evidence 层新增 earStructure（耳部结构），字段
+%   集合断言同步扩展；其余字段与契约不变。
 [image, faceBox, parsing] = fixtureContext(40, 60);
 prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60])), 'runtimeCache');
 evidenceFields = {'periocular'; 'nostril'; 'noseStructure'; 'lip'; ...
-    'edgeDetail'; 'structureGradient'; 'darkDetail'};
+    'edgeDetail'; 'structureGradient'; 'darkDetail'; 'earStructure'};
 assertPolicyEvidenceValid(testCase, prepared.evidence, ...
     evidenceFields, size(image, [1, 2]));
 metadata = prepared.diagnostics.policyEvidence;

@@ -122,6 +122,61 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %   原 legacy）；鼻皮肤的可处理性由证据带门槛（.15/.40 下支撑点）
 %   保证，普通鼻皮肤零带、不新增任何冻结。
 %
+%   T22（ear region policy）：在 eye/lip/nose 之外新增耳部结构带。
+%   policyEvidence 新增消费 T22 evidence 字段 earStructure（耳语义
+%   支持域 × max(continuousEvidence, darkDetail)，见
+%   masks.buildBeautyPolicyEvidence 的 T22 段）：
+%     ear structure band（耳轮/耳甲腔结构带）——
+%       earStructureBand = smoothStep(earStructure, .05, .30)。
+%       依据（真实图 77 实测，ear semantic >= .20 域内 5744px）：
+%       earStructure P10=0.000、P25=.004、P50=.144、P75=.570、P90=.931，
+%       故 .05 下支撑点≈P31（真实平坦耳皮肤零带、保持 processability），
+%       .30 上支撑点≈P60（耳轮脊线/耳甲腔壁/对耳轮褶皱的"高于中位数
+%       结构"进入满档）；band>.5 footprint 约 2.7e3 px，全部位于 ear
+%       semantic 支持域内（ear<.20 处 band 严格为 0，实测耳外非零像素
+%       数 0）——工单第 4 条：不用纯几何扩张，耳外背景不被误纳入。
+%     耳部分配（全部以 max 作用于 T07/T20/T21 折叠式，带为零时逐位
+%     相等）：
+%       texture 通道（policyTexture）追加 max(.95·earStructureBand)：
+%         真实图实测耳内 legacy alphaMap 均值 .322（Fine 门未饱和），
+%         结构带进入 texture 通道后在 band 内改变 1743px 的
+%         smoothingFine；实测（smoothing-only 重建，耳域高频 std）
+%         耳结构带只进 Mid 时高频保留 +1.7%，Mid+Fine 同时进入时
+%         +3.8%，故 Fine 侧必须参与才能有效保留耳轮/沟槽细节。.95 与
+%         T20 检测细节带/T21 鼻孔软带同档，保留 >=5% 的 Fine 处理量
+%         维持耳皮肤自然质感。
+%       smoothingMid/repairMid 追加 max(.90·earStructureBand)：耳轮
+%         脊线与耳甲腔沟槽的尺度（真实图 mediumSigma=12.9px，脊线宽
+%         约 8--15px）主要落在 Mid 频段，故 Mid 家族是结构保护主载体；
+%         .90 与 T20/T21 同档，保留 >=10% 中频处理量。
+%       baseLuminance 追加 max(.80·earStructureBand)：耳轮亮脊与耳甲
+%         腔暗谷的低频明暗对比是耳部立体感主载体（evenSkinLuminance
+%         会均衡低频亮度）；.80 与 T21 鼻结构带同档，保留 >=20% 亮度
+%         均衡量。
+%       tone/whitening 不追加任何耳部项（工单第 2 步：保持更低保护、
+%         维持耳部与脸部/颈部肤色连续）：耳部无 identity 色度语义；
+%         真实图实测 legacy 耳-颊保护差为 tone +.0475、whitening
+%         +.0191（耳部本就更高保护），任何耳带项都会放大该差，形成
+%         耳-颊异色块/割裂。本 policy 因此让耳-颊 tone/whitening 差与
+%         legacy 逐位相同（不新增割裂）。
+%       hard 不追加任何耳部项：耳轮/沟槽一律软保护，不整耳 hard 化
+%         （工单第 3 步），hard 原样拷贝、nnz 不变。
+%     两带（ear 结构带与 eye/lip/nose 带）可能重叠，stage 字段全部取
+%     max，重叠不双重计入。
+%
+%   消费侧现状（诚实边界，T22 复核）：beautifyImage 的 stage contract
+%   组装里，只有 smoothingFine/smoothingMid/hard 直接进入输出算术
+%   （T12/T13 的 smoothSkinTexture 与 T19 的 compose hard restore）；
+%   repairFine/repairMid/baseLuminance/tone/whitening 快照只由各
+%   consumer 的诊断字段（fineGateZeroBlemish/mediumGateZeroBlemish/
+%   baseGateSnapshot/toneGateSnapshot/whiteningGateSnapshot）与测试消
+%   费，其算术门控由生产端从未折叠的 v3.1 mask 产物
+%   （blemishRelaxedGate/strongStructureCap/textureGate/noseMidGate/
+%   structureGate/featureGate）重建，不读本层快照。因此 T22 的可观测
+%   效果全部由 smoothingFine/smoothingMid 承载（T20/T21 同一边界），
+%   其余字段按同一契约先行发布，待对应 consumer 迁移后生效；耳部
+%   瑕疵修复（blemishMap 驱动）不在本层可控范围内。
+%
 %   统一语义：protection 字段是"该 stage 施加的保护量"，取值 [0,1]，
 %   消费侧用 gate = 1 - protection（或 1 - max(field, hard)）还原生产
 %   门控。三个边界约定（与 T12--T19 的 consumer contract 一致）：
@@ -201,11 +256,11 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %                   作为输入，保证与生产门控共用同一份 mask 产物。
 %     policyEvidence — 可选。masks.buildBeautyPolicyEvidence 的第一
 %                   输出；T20 消费 periocular/lip，T21 追加消费
-%                   nostril/noseStructure 两个鼻部语义字段，其余字段
-%                   仍与本层解耦。缺省（nargin<2）、空结构或缺少任一
-%                   消费字段（partial V4）时按零带处理，输出与 T07
-%                   legacy 折叠逐位相等；字段存在但尺寸/取值非法时
-%                   fail-fast。
+%                   nostril/noseStructure 两个鼻部语义字段，T22 追加
+%                   消费 earStructure 耳部结构字段，其余字段仍与本层
+%                   解耦。缺省（nargin<2）、空结构或缺少任一消费字段
+%                   （partial V4）时按零带处理，输出与 T07 legacy 折叠
+%                   逐位相等；字段存在但尺寸/取值非法时 fail-fast。
 
 if nargin < 2
     policyEvidence = [];
@@ -255,12 +310,17 @@ transitionBand = max(eyeTransitionBand, lipTransitionBand) .* ...
 [nostrilDetailBand, noseStructureBand] = readNoseBands( ...
     policyEvidence, beautyMasks, size(texture));
 
-% T20/T21 texture 通道替换：细节带内抬升到检测细节保护水平，过渡带
+% T22：耳部结构带（耳轮/耳甲腔沟槽）。缺省或 partial evidence 时为零带；
+% 带由 ear 语义支持域约束，ear 语义支持域外严格为 0。
+earStructureBand = readEarBands(policyEvidence, size(texture));
+% T20/T21/T22 texture 通道替换：细节带内抬升到检测细节保护水平，过渡带
 % 内封顶保留处理量；带外逐位还原（max(x,0)=x，min(x,1)=x）。T21 的
 % 鼻孔软带加入 Fine 侧平台档位（.95 与 v3.1 nostrilProtection 峰值
-% 对齐）；结构带不进 texture 通道（鼻梁 Fine 处理量保持 legacy）。
-policyTexture = max(max(texture, .95 * detailBand), ...
-    .95 * nostrilDetailBand);
+% 对齐）；T22 的耳结构带同样进入 Fine 侧（.95，实测耳内 legacy
+% alphaMap 均值 .322，Fine 门未饱和，进入 texture 通道才能保留耳轮/
+% 沟槽细节）；鼻结构带不进 texture 通道（鼻梁 Fine 处理量保持 legacy）。
+policyTexture = max(max(max(texture, .95 * detailBand), ...
+    .95 * nostrilDetailBand), .95 * earStructureBand);
 policyTexture = min(policyTexture, 1 - .55 * transitionBand);
 
 % smoothSkinTexture L98：fineStructureGate = max(0, 1 - 4*structure)。
@@ -272,9 +332,11 @@ smoothingFine = 1 - (1 - policyTexture) .* fineStructureGate;
 % 快照（生产 noseMidGate = 1 - .50*nose.*alphaCurve，alphaCurve 归
 % effect-strength 侧）。T20：eye/lip 带内补中频保护。T21：鼻孔软带
 % （.90，identity 邻域）与结构带（.85，光影结构）补中频保护。
-smoothingMid = max(max(max(1 - fineStructureGate .* (1 - .50 * nose), ...
+% T22：耳结构带补 .90（耳轮/耳甲腔沟槽落在 Mid 频段）。
+smoothingMid = max(max(max(max(1 - fineStructureGate .* (1 - .50 * nose), ...
     .90 * detailBand), .30 * transitionBand), ...
-    max(.90 * nostrilDetailBand, .85 * noseStructureBand));
+    max(.90 * nostrilDetailBand, .85 * noseStructureBand)), ...
+    .90 * earStructureBand);
 
 % repairSkinBlemishes L48-51：strongStructure 与 structureGate 上限，
 % 零瑕疵参考点为 min(1 - structure, 1 - .65*strongStructure)。
@@ -286,25 +348,31 @@ structureGateRepair = min(1 - structure, 1 - .65 * strongStructure);
 repairFine = 1 - structureGateRepair .* (1 - policyTexture);
 % repair 侧 noseMidGate = 1 - .50*nose（L78，无 alphaCurve，纯静态）。
 % T20：eye/lip 带内补中频保护（与 smoothingMid 同族）。T21：鼻部带同上。
-repairMid = max(max(max(1 - structureGateRepair .* (1 - .50 * nose) .* ...
+% T22：耳结构带同上（.90）。
+repairMid = max(max(max(max(1 - structureGateRepair .* (1 - .50 * nose) .* ...
     (1 - policyTexture), .90 * detailBand), .30 * transitionBand), ...
-    max(.90 * nostrilDetailBand, .85 * noseStructureBand));
+    max(.90 * nostrilDetailBand, .85 * noseStructureBand)), ...
+    .90 * earStructureBand);
 
 % evenSkinLuminance L42/L88-93：featureProtection = max(texture, chroma)。
 % T20：texture 通道同上替换（过渡带 cap 打开亮度均衡的处理量）。
 % T21：结构带内补低频参考保护（.80，鼻梁低频明暗是立体感主载体）。
-baseLuminance = max(1 - (1 - structure) .* (1 - max(policyTexture, chroma)), ...
-    .80 * noseStructureBand);
+% T22：耳结构带内补同档保护（.80，耳轮亮脊/耳甲腔暗谷的低频对比）。
+baseLuminance = max(max(1 - (1 - structure) .* (1 - max(policyTexture, chroma)), ...
+    .80 * noseStructureBand), .80 * earStructureBand);
 
 % normalizeSkinTone L77-78：featureGate = 1 - .78*chroma（主分支）。
 % T20：唇细节带内补唇色 identity 保护。T21：不追加鼻部项——鼻部无
-% identity 色度语义，肤色变化与脸颊连续。
+% identity 色度语义，肤色变化与脸颊连续。T22：同样不追加耳部项——
+% 耳部无 identity 色度语义，耳-颊 tone 差与 legacy 逐位相同。
 tone = max(1 - (1 - structure) .* (1 - .78 * chroma), ...
     .90 * lipDetailBand);
 
 % applySkinWhitening L53-57/L61：脸部浅退让 1 - .10*structure 与
 % featureSetback = 1 - whitening。T20：细节带内补假白光晕退让。
 % T21：鼻孔软带内补同档退让（防鼻孔边缘假白光晕）；鼻皮肤不设退让。
+% T22：耳部不设任何退让——耳-颊 whitening 差与 legacy 逐位相同，
+% 不引入耳-颊异色块（工单第 2 步：肤色连续）。
 structureGateWhitening = 1 - structure;
 faceSkinSupport = faceSkin >= .5;
 structureGateWhitening(faceSkinSupport) = ...
@@ -378,6 +446,28 @@ else
 end
 nostrilDetailBand = smoothStep(nostrilEdge, .40, .80);
 noseStructureBand = smoothStep(noseStructureField, .15, .50);
+end
+
+function earStructureBand = readEarBands(policyEvidence, imageSize)
+%READEARBANDS 从 policy evidence 读取 T22 耳部结构字段并构建结构带。
+%   缺省输入、空结构或缺少 earStructure 字段（partial V4）时返回零带
+%   （→ legacy 逐位还原）；字段存在但类型/尺寸/取值非法时 fail-fast，
+%   不静默修正。带的下/上支撑点（.05/.30）依据真实图 77 的 earStructure
+%   分布（P25=.004、P50=.144、P75=.570）选取：下支撑点≈P31 保证平坦耳
+%   皮肤零带、保持 processability，上支撑点≈P60 让高于中位数的耳结构
+%   （耳轮脊线/耳甲腔壁/对耳轮褶皱）进入满档；earStructure 本身已被
+%   ear 语义支持域约束，故带在 ear semantic 支持域外严格为 0。
+if isempty(policyEvidence)
+    earStructureBand = zeros(imageSize);
+    return;
+end
+if ~isstruct(policyEvidence) || ~isscalar(policyEvidence)
+    error('masks:InvalidEvidence', ...
+        'policyEvidence 必须是标量 evidence 结构或为空。');
+end
+earStructureField = readEvidenceField(policyEvidence, 'earStructure', ...
+    imageSize);
+earStructureBand = smoothStep(earStructureField, .05, .30);
 end
 
 function faceScale = readFaceScale(beautyMasks)

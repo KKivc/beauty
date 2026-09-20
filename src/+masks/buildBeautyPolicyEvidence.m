@@ -9,7 +9,23 @@ function [evidence, metadata] = buildBeautyPolicyEvidence( ...
 %     lip               — 唇部强度（唇体 + 唇周过渡带）；
 %     edgeDetail        — 边缘/线性细节（低频梯度 × 方向一致性）；
 %     structureGradient — 结构梯度（皮肤域 P55/P95 分位归一的低频梯度）；
-%     darkDetail        — 暗部细节（灰度低通与原图的暗残差 smoothstep）。
+%     darkDetail        — 暗部细节（灰度低通与原图的暗残差 smoothstep）；
+%     earStructure      — 耳部结构（T22，耳语义支持域 × 局部结构证据）。
+%
+%   T22（ear region policy 证据）：earStructure 由耳语义支持域门约束，
+%   不使用任何纯几何扩张（工单第 4 条：耳外背景不得被误纳入）：
+%     earSupport   = smoothStep(semantic.ear, .20, .45)
+%       下/上支撑点沿用 v3.1 probabilityMask 的概率域闭合阈值
+%       （.20/.45，见 buildBeautyContextFromParsing），即"耳语义概率
+%       进入皮肤域的同一门槛"；因此 earSupport 在 ear semantic < .20
+%       处严格为零（真实图 77 实测：耳外非零像素数 0）。
+%     structureEvidence = max(edgeDetail, darkDetail)
+%       稳定边缘（耳轮/对耳轮脊线，edgeDetail）与暗部沟槽（耳甲腔、
+%       耳屏间切迹，darkDetail）取并集：耳轮是亮脊、耳甲腔是暗谷，
+%       两者都是"结构"但落在不同的亮度极性上，max 同时覆盖。
+%     earStructure = clamp01(earSupport .* structureEvidence)
+%       两个因子都是 [0,1]，乘积天然 ∈[0,1]；耳语义支持域之外的像素
+%       被 earSupport 精确置零，不产生几何外溢。
 %
 %   边界纪律：
 %     * evidence 是只读旁路产物，不得回写或修改任何生产 protection
@@ -86,6 +102,13 @@ smoothedGray = imgaussfilt(grayImage, darkSigma, 'Padding', 'replicate');
 darkResidual = max(smoothedGray - grayImage, 0);
 darkDetail = smoothStep(darkResidual, .015, .12);
 
+% 耳部结构（T22）：耳语义支持域门 × 局部结构证据（稳定边缘 + 暗部沟槽）。
+% 支持域门复用 v3.1 probabilityMask 的 .20/.45 概率阈值，耳语义概率低于
+% .20 的像素（含全部耳外背景）严格置零，不做任何纯几何扩张。
+earSupport = smoothStep(readSemanticMask(beautyContext, 'ear', imageSize), ...
+    .20, .45);
+earStructure = clamp01(earSupport .* max(edgeDetail, darkDetail));
+
 evidence = struct( ...
     'periocular', periocular, ...
     'nostril', nostril, ...
@@ -93,13 +116,14 @@ evidence = struct( ...
     'lip', lip, ...
     'edgeDetail', edgeDetail, ...
     'structureGradient', structureGradient, ...
-    'darkDetail', darkDetail);
+    'darkDetail', darkDetail, ...
+    'earStructure', earStructure);
 validateEvidence(evidence, imageSize);
 
 contract = beautyPipelineContract();
 metadata = struct( ...
     'builder', 'masks.buildBeautyPolicyEvidence', ...
-    'evidenceVersion', 'v1', ...
+    'evidenceVersion', 'v2', ...
     'algorithmVersion', contract.algorithmVersion, ...
     'sources', struct( ...
     'periocular', 'maskDiagnostics.texture.eyeDetailProtection', ...
@@ -108,7 +132,8 @@ metadata = struct( ...
     'lip', 'maskDiagnostics.texture.lipProtection', ...
     'edgeDetail', 'maskDiagnostics.structure.continuousEvidence', ...
     'structureGradient', 'maskDiagnostics.structure.gradientMagnitude P55/P95', ...
-    'darkDetail', 'inputImage dark residual'));
+    'darkDetail', 'inputImage dark residual', ...
+    'earStructure', 'smoothStep(beautyContext.semantic.ear, .20, .45) .* max(continuousEvidence, darkDetail)'));
 end
 
 function evidenceValue = structureGradientEvidence(gradientMagnitude, ...
@@ -154,6 +179,30 @@ if (~isnumeric(value) && ~islogical(value)) || ~isreal(value) || ...
         ~isequal(size(value), imageSize) || any(~isfinite(value(:))) || ...
         any(value(:) < 0) || any(value(:) > 1)
     error('masks:InvalidContext', 'Context 字段 %s 无效。', name);
+end
+value = double(value);
+end
+
+function value = readSemanticMask(context, name, imageSize)
+%READSEMANTICMASK 读取 beautyContext.semantic 的分组语义字段。
+%   语义层缺失（partial V4 / compat 路径）、semantic 非法、或缺少该分组
+%   字段时返回零矩阵——对应 evidence 字段为零带，输出与 T07 legacy 折叠
+%   逐位相等；字段存在但类型/尺寸/取值非法时 fail-fast，不静默修正。
+value = zeros(imageSize);
+if ~isfield(context, 'semantic') || isempty(context.semantic)
+    return;
+end
+if ~isstruct(context.semantic) || ~isscalar(context.semantic)
+    error('masks:InvalidContext', 'Context 字段 semantic 必须是标量结构体。');
+end
+if ~isfield(context.semantic, name) || isempty(context.semantic.(name))
+    return;
+end
+value = context.semantic.(name);
+if (~isnumeric(value) && ~islogical(value)) || ~isreal(value) || ...
+        ~isequal(size(value), imageSize) || any(~isfinite(value(:))) || ...
+        any(value(:) < 0) || any(value(:) > 1)
+    error('masks:InvalidContext', 'Context 字段 semantic.%s 无效。', name);
 end
 value = double(value);
 end

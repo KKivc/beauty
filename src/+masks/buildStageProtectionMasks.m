@@ -8,7 +8,9 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %   policyEvidence（masks.buildBeautyPolicyEvidence 的第一输出，经
 %   rebuildBeautyDerivedMasks 桥接传入；生产调用点 beautifyImage 从
 %   normalized Context 的 evidence 层转发）。提供且包含 periocular/lip
-%   字段时，对眼周/唇周执行三带分级保护 policy：
+%   字段时，对眼周/唇周执行三带分级保护 policy（T20）；提供且包含
+%   nostril/noseStructure 字段时，对鼻部执行 identity/structure/skin
+%   分级保护 policy（T21，见下）：
 %
 %     identity core —— 眼语义（>= .65，经 occluderHard）、检测睫毛
 %       lashCore、唇核 lipCore。它们已全部位于 hardProtectionMask，
@@ -59,6 +61,66 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %   即生效；repairFine/repairMid/baseLuminance/tone/whitening 仍是
 %   T14--T18 consumer 的零瑕疵参考快照（算术门控由未折叠字段承载），
 %   分级数值先行发布，待对应 consumer 迁移后生效。
+%
+%   T21（nose region policy）：在 eye/lip 三带之外新增鼻部分级保护。
+%   policyEvidence 新增消费 nostril/noseStructure 两个语义字段（T06
+%   evidence 层既有字段，不自造检测模型）：
+%     nostril identity core —— evidence.nostril（0/1，鼻孔暗谷核心，
+%       由暗谷+梯度+面积/连续度几何筛选产生的高置信 dark/geometry
+%       证据）。它已全部位于 hardProtectionMask，T21 不新增任何 hard
+%       像素（hard 原样拷贝，严格二值不变）。
+%     nostril detail band（鼻孔边缘软带）——
+%       nostrilDetailBand = smoothStep(nostrilEdge, .40, .80)，
+%       nostrilEdge = max(0, 1 - bwdist(nostrilCore)/(r+1))，
+%       r = min(4, max(2, round(.006*faceScale)))，faceScale 取自
+%       beautyMasks.faceScale（缺失且 nostril 证据非零时 fail-fast）。
+%       依据：nostrilEdge 与 v3.1 texture 通道已有的鼻孔软羽化
+%      （buildTextureProtectionMask 的 nostrilProtection，峰值 .95、
+%       同一 r 公式）同 footprint；上支撑点 .80 ≈ 羽化内圈 1px
+%      （d≈.2r，暗边界内缘），下支撑点 .40 ≈ 羽化中点半径
+%      （d≈.6r）。band 只覆盖既有软羽化的 ≥.40 内圈，是 2--5px 的
+%       软带而非大半径硬膨胀（带外几何零扩张）。nostrilCore 本身
+%       hard 已满分，band 的作用是把 core 外 1--2px 暗边界的 Fine/
+%       Mid 保护从羽化衰减改为固定档位平台。
+%     nose structure band（鼻梁/鼻翼结构带）——
+%       noseStructureBand = smoothStep(noseStructure, .15, .50)。
+%       依据：evidence.noseStructure = 鼻语义支持 × 低频梯度 × 方向
+%       一致性（P55/P95 分位归一）。真实图实测（77 链路）鼻内
+%       P90=.071、P95=.368、max=.75，故 .15 下支撑点只让最强的
+%       5--10% 结构证据进入带（普通鼻皮肤零带、保持 processability）；
+%       上支撑点 .50 ≈ 2× v3.1 结构门饱和点（structure≥.25 时
+%       fineStructureGate=0）。带内主要抬升 Mid 家族与 baseLuminance：
+%       smoothingMid/repairMid 补 .85·band、baseLuminance 补
+%       .80·band；Fine（texture 通道）与 tone/whitening 不进结构带
+%       ——鼻梁/鼻翼是光影结构而非 identity 细节，美白/调色必须与
+%       脸颊连续（工单第 2/3 步）。
+%     鼻部分配（全部以 max 作用于 T07/T20 折叠式，带为零时逐位相等）：
+%       policyTexture 追加 max(.95·nostrilDetailBand)（.95 与 v3.1
+%         nostrilProtection 峰值对齐；结构带不进 texture 通道）；
+%       smoothingMid/repairMid 追加 max(.90·nostrilDetailBand,
+%         .85·noseStructureBand)（.90 与 T20 检测细节档位一致，
+%         .85 给光影结构保留 ≥15% 中频处理量）；
+%       baseLuminance 追加 max(.80·noseStructureBand)（鼻梁低频
+%         明暗是立体感主载体；.80 保留 ≥20% 亮度均衡量维持与脸颊
+%         的亮度连续）；
+%       whitening 追加 max(.85·nostrilDetailBand)（仅鼻孔软带内防
+%         假白光晕，与 T20 eye/lip 细节带同档；鼻皮肤不设任何美白
+%         退让）；
+%       tone 不追加任何鼻部项：鼻部无 identity 色度语义，肤色变化
+%         与脸颊连续（本快照与 T17 consumer 均不变）。
+%       两带可能重叠（鼻孔边缘梯度强），stage 字段全部取 max，重叠
+%       不双重计入。
+%
+%   消费侧现状（诚实边界，与 T20 相同）：smoothingFine/smoothingMid/
+%   hard 被 smoothSkinTexture（T12/T13）直接用于输出算术，nostril
+%   band 的 Fine/Mid 保护立即生效；repairFine/repairMid/
+%   baseLuminance/tone/whitening 仍是 T14--T18 consumer 的零瑕疵参
+%   考快照（T14--T18 的算术门控由未折叠字段承载，textureGate/
+%   featureGate 直接读取 v3.1 mask 产物而非本层 policyTexture），
+%   鼻部分级数值先行发布，待对应 consumer 迁移后生效。T21 不改变
+%   T07 legacy 折叠里的整鼻 .50 Mid 门（零带/compat 时必须逐位还
+%   原 legacy）；鼻皮肤的可处理性由证据带门槛（.15/.40 下支撑点）
+%   保证，普通鼻皮肤零带、不新增任何冻结。
 %
 %   统一语义：protection 字段是"该 stage 施加的保护量"，取值 [0,1]，
 %   消费侧用 gate = 1 - protection（或 1 - max(field, hard)）还原生产
@@ -138,11 +200,12 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %                   noseMask、faceSkinMask）；v3.1 顶层 Context 不直接
 %                   作为输入，保证与生产门控共用同一份 mask 产物。
 %     policyEvidence — 可选。masks.buildBeautyPolicyEvidence 的第一
-%                   输出；只消费 periocular/lip 两个 eye/lip 语义字段，
-%                   其余字段仍与本层解耦。缺省（nargin<2）、空结构或
-%                   缺少 periocular/lip 字段（partial V4）时按零带处理，
-%                   输出与 T07 legacy 折叠逐位相等；字段存在但尺寸/
-%                   取值非法时 fail-fast。
+%                   输出；T20 消费 periocular/lip，T21 追加消费
+%                   nostril/noseStructure 两个鼻部语义字段，其余字段
+%                   仍与本层解耦。缺省（nargin<2）、空结构或缺少任一
+%                   消费字段（partial V4）时按零带处理，输出与 T07
+%                   legacy 折叠逐位相等；字段存在但尺寸/取值非法时
+%                   fail-fast。
 
 if nargin < 2
     policyEvidence = [];
@@ -187,9 +250,17 @@ detailBand = max(eyeDetailBand, lipDetailBand);
 transitionBand = max(eyeTransitionBand, lipTransitionBand) .* ...
     (1 - detailBand);
 
-% T20 texture 通道替换：细节带内抬升到检测细节保护水平，过渡带内
-% 封顶保留处理量；带外逐位还原（max(x,0)=x，min(x,1)=x）。
-policyTexture = max(texture, .95 * detailBand);
+% T21：鼻部证据带（nostril 边缘软带 + 结构带）。缺省或 partial
+% evidence 时同样为零带；两带重叠处 stage 字段取 max，不双重计入。
+[nostrilDetailBand, noseStructureBand] = readNoseBands( ...
+    policyEvidence, beautyMasks, size(texture));
+
+% T20/T21 texture 通道替换：细节带内抬升到检测细节保护水平，过渡带
+% 内封顶保留处理量；带外逐位还原（max(x,0)=x，min(x,1)=x）。T21 的
+% 鼻孔软带加入 Fine 侧平台档位（.95 与 v3.1 nostrilProtection 峰值
+% 对齐）；结构带不进 texture 通道（鼻梁 Fine 处理量保持 legacy）。
+policyTexture = max(max(texture, .95 * detailBand), ...
+    .95 * nostrilDetailBand);
 policyTexture = min(policyTexture, 1 - .55 * transitionBand);
 
 % smoothSkinTexture L98：fineStructureGate = max(0, 1 - 4*structure)。
@@ -199,9 +270,11 @@ fineStructureGate = max(0, 1 - 4 * structure);
 smoothingFine = 1 - (1 - policyTexture) .* fineStructureGate;
 % Mid：midStructureGate（=fineStructureGate）与 noseMidGate 的静态满档
 % 快照（生产 noseMidGate = 1 - .50*nose.*alphaCurve，alphaCurve 归
-% effect-strength 侧）。T20：eye/lip 带内补中频保护。
-smoothingMid = max(max(1 - fineStructureGate .* (1 - .50 * nose), ...
-    .90 * detailBand), .30 * transitionBand);
+% effect-strength 侧）。T20：eye/lip 带内补中频保护。T21：鼻孔软带
+% （.90，identity 邻域）与结构带（.85，光影结构）补中频保护。
+smoothingMid = max(max(max(1 - fineStructureGate .* (1 - .50 * nose), ...
+    .90 * detailBand), .30 * transitionBand), ...
+    max(.90 * nostrilDetailBand, .85 * noseStructureBand));
 
 % repairSkinBlemishes L48-51：strongStructure 与 structureGate 上限，
 % 零瑕疵参考点为 min(1 - structure, 1 - .65*strongStructure)。
@@ -212,27 +285,32 @@ structureGateRepair = min(1 - structure, 1 - .65 * strongStructure);
 % fineWeight/mediumWeight/chromaWeight。T20：texture 通道同上替换。
 repairFine = 1 - structureGateRepair .* (1 - policyTexture);
 % repair 侧 noseMidGate = 1 - .50*nose（L78，无 alphaCurve，纯静态）。
-% T20：eye/lip 带内补中频保护（与 smoothingMid 同族）。
-repairMid = max(max(1 - structureGateRepair .* (1 - .50 * nose) .* ...
-    (1 - policyTexture), .90 * detailBand), .30 * transitionBand);
+% T20：eye/lip 带内补中频保护（与 smoothingMid 同族）。T21：鼻部带同上。
+repairMid = max(max(max(1 - structureGateRepair .* (1 - .50 * nose) .* ...
+    (1 - policyTexture), .90 * detailBand), .30 * transitionBand), ...
+    max(.90 * nostrilDetailBand, .85 * noseStructureBand));
 
 % evenSkinLuminance L42/L88-93：featureProtection = max(texture, chroma)。
 % T20：texture 通道同上替换（过渡带 cap 打开亮度均衡的处理量）。
-baseLuminance = 1 - (1 - structure) .* (1 - max(policyTexture, chroma));
+% T21：结构带内补低频参考保护（.80，鼻梁低频明暗是立体感主载体）。
+baseLuminance = max(1 - (1 - structure) .* (1 - max(policyTexture, chroma)), ...
+    .80 * noseStructureBand);
 
 % normalizeSkinTone L77-78：featureGate = 1 - .78*chroma（主分支）。
-% T20：唇细节带内补唇色 identity 保护。
+% T20：唇细节带内补唇色 identity 保护。T21：不追加鼻部项——鼻部无
+% identity 色度语义，肤色变化与脸颊连续。
 tone = max(1 - (1 - structure) .* (1 - .78 * chroma), ...
     .90 * lipDetailBand);
 
 % applySkinWhitening L53-57/L61：脸部浅退让 1 - .10*structure 与
 % featureSetback = 1 - whitening。T20：细节带内补假白光晕退让。
+% T21：鼻孔软带内补同档退让（防鼻孔边缘假白光晕）；鼻皮肤不设退让。
 structureGateWhitening = 1 - structure;
 faceSkinSupport = faceSkin >= .5;
 structureGateWhitening(faceSkinSupport) = ...
     1 - .10 * structure(faceSkinSupport);
 whiteningField = max(1 - structureGateWhitening .* (1 - whitening), ...
-    .85 * detailBand);
+    max(.85 * detailBand, .85 * nostrilDetailBand));
 
 protection = struct( ...
     'smoothingFine', clamp01(smoothingFine), ...
@@ -262,6 +340,61 @@ if ~isstruct(policyEvidence) || ~isscalar(policyEvidence)
 end
 eyeField = readEvidenceField(policyEvidence, 'periocular', imageSize);
 lipField = readEvidenceField(policyEvidence, 'lip', imageSize);
+end
+
+function [nostrilDetailBand, noseStructureBand] = readNoseBands( ...
+    policyEvidence, beautyMasks, imageSize)
+%READNOSEBANDS 从 policy evidence 读取鼻部语义字段并构建 T21 两条带。
+%   缺省输入、空结构或缺少 nostril/noseStructure 字段（partial V4）时
+%   返回零带（→ legacy 逐位还原）；字段存在但类型/尺寸/取值非法时
+%   fail-fast，不静默修正。nostril 软带几何：nostrilEdge =
+%   max(0, 1 - bwdist(nostrilCore)/(r+1))，r = min(4, max(2,
+%   round(.006*faceScale)))——与 buildTextureProtectionMask 的
+%   nostrilProtection 同一 radius 公式与 footprint（2--5px 软带，
+%   非大半径膨胀）；faceScale 取自 beautyMasks.faceScale，nostril
+%   证据非零而 faceScale 缺失/非法时 fail-fast。
+emptyField = zeros(imageSize);
+nostrilField = emptyField;
+noseStructureField = emptyField;
+if isempty(policyEvidence)
+    nostrilDetailBand = emptyField;
+    noseStructureBand = emptyField;
+    return;
+end
+if ~isstruct(policyEvidence) || ~isscalar(policyEvidence)
+    error('masks:InvalidEvidence', ...
+        'policyEvidence 必须是标量 evidence 结构或为空。');
+end
+nostrilField = readEvidenceField(policyEvidence, 'nostril', imageSize);
+noseStructureField = readEvidenceField(policyEvidence, 'noseStructure', ...
+    imageSize);
+nostrilCore = nostrilField >= .999;
+if any(nostrilCore(:))
+    faceScale = readFaceScale(beautyMasks);
+    nostrilRadius = min(4, max(2, round(.006 * faceScale)));
+    nostrilEdge = max(0, 1 - bwdist(nostrilCore) ./ (nostrilRadius + 1));
+else
+    nostrilEdge = emptyField;
+end
+nostrilDetailBand = smoothStep(nostrilEdge, .40, .80);
+noseStructureBand = smoothStep(noseStructureField, .15, .50);
+end
+
+function faceScale = readFaceScale(beautyMasks)
+%READFACESCALE 读取鼻孔软带几何所需的脸部尺度（fail-fast 校验）。
+if ~isfield(beautyMasks, 'faceScale')
+    error('masks:InvalidMasks', ...
+        'Beauty Masks 缺少 faceScale，无法构建鼻孔软带几何。');
+end
+value = beautyMasks.faceScale;
+if ~isnumeric(value) && ~islogical(value)
+    error('masks:InvalidMasks', 'Beauty Masks 字段 faceScale 无效。');
+end
+value = double(value);
+if ~isscalar(value) || ~isreal(value) || ~isfinite(value) || value <= 0
+    error('masks:InvalidMasks', 'Beauty Masks 字段 faceScale 无效。');
+end
+faceScale = value;
 end
 
 function value = readEvidenceField(evidence, name, imageSize)

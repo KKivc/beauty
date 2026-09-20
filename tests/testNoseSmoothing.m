@@ -1,5 +1,9 @@
 function tests = testNoseSmoothing
 %TESTNOSESMOOTHING 验证鼻内斑点参与磨皮且鼻部结构得到保护。
+%   T21 起新增 nose region policy 断言：受控 contract 测试
+%   （nostril/structure 两条证据带、hard 零膨胀、partial V4 逐位还
+%   原、fail-fast）与生产链路 wiring 测试（hard RGB 回源、tone 连续、
+%   雀斑 processability、cached 一致性）。
 tests = functiontests(localfunctions);
 end
 
@@ -204,6 +208,250 @@ verifyEqual(testCase, max(abs(protected.referenceReliability(nonFaceBlemish) - .
     .50 * baseline.referenceReliability(nonFaceBlemish))), 0, 'AbsTol', 1e-12);
 end
 
+function testNosePolicyBandsFollowEvidenceContract(testCase)
+%TESTNOSEPOLICYBANDSFOLLOWEVIDENCECONTRACT T21 nose region policy 的受控
+%   contract 断言（直接调用 buildStageProtectionMasks，屏蔽几何噪声），
+%   范式与 T20 的 eye/lip policy contract 测试一致：
+%     identity core —— hard 字段与输入 hardProtectionMask 逐位相等，
+%       不新增任何 hard 像素（nostrilCore 已在 hard 中）；
+%     nostril detail band —— band=1 像素抬升到固定档位
+%       smoothingFine/repairFine/baseLuminance=.95（与 v3.1
+%       nostrilProtection 峰值对齐）、smoothingMid=.90（与 T20 检测
+%       细节档位一致）、whitening=.85；repairMid 的 .90 是 max 下界，
+%       core 内因 (1 - policyTexture) 项实际为 .95（同 T20 约定）；
+%       tone 保持 legacy（鼻部无 identity 色度语义，肤色变化与脸颊
+%       连续）；
+%     nose structure band —— band=1 像素抬升 smoothingMid/repairMid=
+%       .85、baseLuminance=.80；smoothingFine/repairFine/whitening/
+%       tone 保持 legacy（结构带不进 texture 通道、不阻断美白）；
+%     evidence 零带或缺少 nostril/noseStructure 字段（partial V4）时
+%       与 T07 legacy 折叠逐位相等；带外像素逐位还原 legacy；
+%     非法 evidence（尺寸/取值）或 nostril 证据非零而缺少 faceScale
+%       时 fail-fast。
+[fixture, evidence] = nosePolicyUnitFixture();
+legacy = masks.buildStageProtectionMasks(fixture.masks);
+policy = masks.buildStageProtectionMasks(fixture.masks, evidence);
+
+% identity core：hard 原样拷贝，不新增任何 hard 像素。
+verifyEqual(testCase, policy.hard, fixture.hardIdentity, 'AbsTol', 0);
+corePoint = fixture.corePoint;
+verifyEqual(testCase, ...
+    policy.smoothingFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+verifyEqual(testCase, ...
+    policy.smoothingMid(corePoint(1), corePoint(2)), .90, 'AbsTol', 1e-12);
+verifyEqual(testCase, ...
+    policy.repairFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+% repairMid 的 .90 是 max 下界；identity core 内 policyTexture 已被抬到
+% .95，(1 - policyTexture) 项使实际值升到 .95（与 T20 eye/lip detail
+% band 的同一约定一致：repairMid = 1 - gate*(1-texture) 先于 max 下界）。
+verifyEqual(testCase, ...
+    policy.repairMid(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+verifyEqual(testCase, ...
+    policy.baseLuminance(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+verifyEqual(testCase, ...
+    policy.whitening(corePoint(1), corePoint(2)), .85, 'AbsTol', 1e-12);
+verifyEqual(testCase, policy.tone(corePoint(1), corePoint(2)), ...
+    legacy.tone(corePoint(1), corePoint(2)), 'AbsTol', 0, ...
+    '鼻部无 identity 色度语义，tone 不得被鼻带抬升。');
+
+% nose structure band：只抬升 Mid 家族与 baseLuminance。
+ridgePoint = fixture.ridgePoint;
+verifyEqual(testCase, ...
+    policy.smoothingMid(ridgePoint(1), ridgePoint(2)), .85, 'AbsTol', 1e-12);
+verifyEqual(testCase, ...
+    policy.baseLuminance(ridgePoint(1), ridgePoint(2)), .80, 'AbsTol', 1e-12);
+verifyEqual(testCase, ...
+    policy.smoothingFine(ridgePoint(1), ridgePoint(2)), ...
+    legacy.smoothingFine(ridgePoint(1), ridgePoint(2)), 'AbsTol', 0, ...
+    '结构带不得进入 texture 通道（鼻梁 Fine 处理量保持 legacy）。');
+verifyEqual(testCase, ...
+    policy.repairFine(ridgePoint(1), ridgePoint(2)), ...
+    legacy.repairFine(ridgePoint(1), ridgePoint(2)), 'AbsTol', 0);
+verifyEqual(testCase, ...
+    policy.whitening(ridgePoint(1), ridgePoint(2)), ...
+    legacy.whitening(ridgePoint(1), ridgePoint(2)), 'AbsTol', 0, ...
+    '鼻梁/鼻翼结构不得阻断美白（美白与脸颊连续）。');
+
+% 平坦鼻皮肤（evidence 低于下支撑点）：两带皆零，保持 processability。
+flatPoint = fixture.flatPoint;
+fieldNames = fieldnames(policy);
+for fieldIndex = 1:numel(fieldNames)
+    fieldName = fieldNames{fieldIndex};
+    verifyEqual(testCase, ...
+        policy.(fieldName)(flatPoint(1), flatPoint(2)), ...
+        legacy.(fieldName)(flatPoint(1), flatPoint(2)), 'AbsTol', 0, ...
+        '普通鼻皮肤零带，stage 字段必须逐位等于 legacy。');
+end
+
+% 证据零带（partial V4 / 缺字段 / 缺省输入）：与 legacy 逐位相等。
+zeroEvidence = struct('nostril', zeros(fixture.imageSize), ...
+    'noseStructure', zeros(fixture.imageSize));
+missingEvidence = struct('periocular', zeros(fixture.imageSize), ...
+    'lip', zeros(fixture.imageSize));
+for variant = {zeroEvidence, missingEvidence}
+    zeroPolicy = masks.buildStageProtectionMasks(fixture.masks, variant{1});
+    for fieldIndex = 1:numel(fieldNames)
+        fieldName = fieldNames{fieldIndex};
+        verifyEqual(testCase, zeroPolicy.(fieldName), ...
+            legacy.(fieldName), 'AbsTol', 0);
+    end
+end
+singleArgPolicy = masks.buildStageProtectionMasks(fixture.masks);
+for fieldIndex = 1:numel(fieldNames)
+    fieldName = fieldNames{fieldIndex};
+    verifyEqual(testCase, singleArgPolicy.(fieldName), ...
+        legacy.(fieldName), 'AbsTol', 0);
+end
+
+% 带外（两带皆零的像素）逐位还原 legacy。
+feather = max(0, 1 - bwdist(evidence.nostril >= .999) ./ 3);
+nostrilBand = smoothStepValue(feather, .40, .80);
+structureBand = smoothStepValue(evidence.noseStructure, .15, .50);
+outside = nostrilBand == 0 & structureBand == 0;
+verifyTrue(testCase, nnz(outside) > 0, 'fixture 必须包含带外像素。');
+for fieldIndex = 1:numel(fieldNames)
+    fieldName = fieldNames{fieldIndex};
+    verifyEqual(testCase, policy.(fieldName)(outside), ...
+        legacy.(fieldName)(outside), 'AbsTol', 0, ...
+        'evidence 带外的 stage 字段必须逐位等于 legacy。');
+end
+
+% 非法 evidence fail-fast，不静默修正。
+badSize = evidence;
+badSize.nostril = evidence.nostril(1:10, 1:10);
+verifyError(testCase, @() masks.buildStageProtectionMasks( ...
+    fixture.masks, badSize), 'masks:InvalidEvidence');
+badRange = evidence;
+badRange.noseStructure = evidence.noseStructure * 2;
+verifyError(testCase, @() masks.buildStageProtectionMasks( ...
+    fixture.masks, badRange), 'masks:InvalidEvidence');
+badNaN = evidence;
+badNaN.nostril = evidence.nostril;
+badNaN.nostril(2, 2) = NaN;
+verifyError(testCase, @() masks.buildStageProtectionMasks( ...
+    fixture.masks, badNaN), 'masks:InvalidEvidence');
+masksNoScale = rmfield(fixture.masks, 'faceScale');
+verifyError(testCase, @() masks.buildStageProtectionMasks( ...
+    masksNoScale, evidence), 'masks:InvalidMasks', ...
+    'nostril 证据非零而缺少 faceScale 时必须 fail-fast。');
+end
+
+function testNosePolicyWiringPreservesIdentityAndProcessability(testCase)
+%TESTNOSEPOLICYWIRINGPRESERVESIDENTITYANDPROCESSABILITY T21 生产链路
+%   （beautifyImage 经 bridge evidence 转发）端到端断言：
+%     identity —— hard 与 legacy 逐位相等（零膨胀），hard 区域 RGB 与
+%       源图逐位相等；
+%     processability —— 鼻内雀斑不进入 nostril 软带，雀斑处 alphaMap
+%       逐位不变（雀斑仍按瑕疵处理）；普通鼻皮肤带外 8 字段逐位等于
+%       legacy；
+%     tone 字段全图逐位等于 legacy（无鼻部项，肤色与脸颊连续）；
+%     nostril 软带内 Fine 处理量受控下降（探针实测比值≈.81，阈值
+%       .90 留几何余量）；repairFine 在带内严格抬升（快照先行发布）；
+%     美白-only 输出与 legacy 逐位一致（whitening consumer 未迁移）；
+%     cached 与 uncached 输出逐位一致。
+%   夹具说明：Fine 处理量下降只能在鼻内结构保护未饱和（Fine 门打开）
+%   的人像上观测。高结构脊的合成鼻（syntheticNosePortrait）在 nostril
+%   软带内 legacy smoothingFine 已为 1、alphaMap 恒为 0，比值断言无
+%   法成立；故本测试使用平坦鼻夹具 gentleNosePolicyPortrait（与
+%   t21_probe3 / T21 artifact 回归同一几何，探针实测比值≈.81）。
+[image, faceBox, noseData] = gentleNosePolicyPortrait();
+parsing = parsingForPortrait(size(image, [1, 2]), noseData);
+context = buildBeautyContextFromParsing(image, faceBox, parsing);
+bareContext = context;
+legacyContext = rmfield(bareContext, 'evidence');
+params = struct('smoothingStrength', 100, 'whiteningStrength', 0);
+
+[policyOut, policyDiagnostics] = beautifyImage(image, params, faceBox, ...
+    bareContext);
+[legacyOut, legacyDiagnostics] = beautifyImage(image, params, faceBox, ...
+    legacyContext);
+
+[beautyMasks, maskDiagnostics] = masks.buildBeautyMasks(image, ...
+    bareContext, faceBox);
+protection = masks.buildStageProtectionMasks(beautyMasks, ...
+    bareContext.evidence);
+legacyProtection = masks.buildStageProtectionMasks(beautyMasks);
+hardMask = protection.hard >= .999;
+verifyTrue(testCase, isequal(protection.hard, legacyProtection.hard), ...
+    'T21 不得改变 hard identity（nostrilCore 已在 hard 中，零膨胀）。');
+verifyTrue(testCase, nnz(hardMask) > 0, ...
+    '合成鼻孔必须产生非空 hard identity 区域。');
+verifyEqual(testCase, policyOut(repmat(hardMask, [1, 1, 3])), ...
+    image(repmat(hardMask, [1, 1, 3])), ...
+    'hard identity 区域 RGB 必须与源图逐位相等。');
+
+evidence = bareContext.evidence;
+faceScale = beautyMasks.faceScale;
+nostrilRadius = min(4, max(2, round(.006 * double(faceScale))));
+feather = max(0, 1 - bwdist(evidence.nostril >= .999) ./ ...
+    (nostrilRadius + 1));
+nostrilBand = smoothStepValue(feather, .40, .80);
+structureBand = smoothStepValue(evidence.noseStructure, .15, .50);
+softBand = nostrilBand > .5 & ~hardMask;
+verifyTrue(testCase, nnz(softBand) > 0, ...
+    'fixture 必须产生非空 nostril 软带。');
+
+% 雀斑 processability：软带与雀斑不相交，雀斑 alphaMap 逐位不变。
+verifyEqual(testCase, nnz(nostrilBand > .5 & noseData.freckle), 0, ...
+    '鼻孔软带不得覆盖鼻内雀斑。');
+alphaPolicy = policyDiagnostics.smoothing.alphaMap;
+alphaLegacy = legacyDiagnostics.smoothing.alphaMap;
+verifyEqual(testCase, alphaPolicy(noseData.freckle), ...
+    alphaLegacy(noseData.freckle), 'AbsTol', 0, ...
+    '雀斑处的 Fine 处理量不得因鼻部 policy 改变。');
+
+% tone 字段全图 bit-equal（无鼻部项）；美白-only 输出 bit-exact。
+verifyEqual(testCase, protection.tone, legacyProtection.tone, 'AbsTol', 0, ...
+    'T21 不得给 tone 增加鼻部项（肤色与脸颊连续）。');
+whiteningParams = struct('smoothingStrength', 0, 'whiteningStrength', 100);
+whiteningPolicyOut = beautifyImage(image, whiteningParams, faceBox, ...
+    bareContext);
+whiteningLegacyOut = beautifyImage(image, whiteningParams, faceBox, ...
+    legacyContext);
+verifyEqual(testCase, whiteningPolicyOut, whiteningLegacyOut, ...
+    '美白-only 输出必须与 legacy 逐位一致（whitening consumer 未迁移）。');
+
+% nostril 软带：Fine 处理量受控下降，保护字段不低于 legacy，
+% repairFine 快照在带内严格抬升。
+verifyGreaterThan(testCase, mean(alphaLegacy(softBand)), 0, ...
+    'legacy 在软带内必须有非零 Fine 处理量，否则比值断言无意义。');
+verifyLessThanOrEqual(testCase, mean(alphaPolicy(softBand)), ...
+    .90 * mean(alphaLegacy(softBand)), ...
+    'nostril 软带内 Fine 处理量必须明显低于 legacy（暗边界保留）。');
+verifyGreaterThanOrEqual(testCase, ...
+    min(protection.smoothingMid(softBand) - ...
+    legacyProtection.smoothingMid(softBand)), 0);
+verifyGreaterThanOrEqual(testCase, ...
+    min(protection.repairMid(softBand) - ...
+    legacyProtection.repairMid(softBand)), 0);
+verifyTrue(testCase, any(protection.repairFine(softBand) > ...
+    legacyProtection.repairFine(softBand)), ...
+    'nostril 软带内 repairFine 快照必须严格抬升。');
+
+% 带外（两带皆零）：8 个 stage 字段逐位等于 legacy。
+outside = nostrilBand == 0 & structureBand == 0;
+fieldNames = fieldnames(protection);
+for fieldIndex = 1:numel(fieldNames)
+    fieldName = fieldNames{fieldIndex};
+    verifyEqual(testCase, protection.(fieldName)(outside), ...
+        legacyProtection.(fieldName)(outside), 'AbsTol', 0, ...
+        'evidence 带外的 stage 字段必须逐位等于 legacy。');
+end
+
+% cached 与 uncached 输出逐位一致。
+cachedContext = context;
+cachedContext.runtimeCache = buildBeautyRuntimeCache(image, faceBox, ...
+    beautyMasks, maskDiagnostics, struct( ...
+    'status', 'generated', ...
+    'sourceSchemaVersion', '3.1', ...
+    'message', '回归测试生成运行时产物。'));
+[cachedOut, cachedDiagnostics] = beautifyImage(image, params, faceBox, ...
+    cachedContext);
+verifyTrue(testCase, cachedDiagnostics.reusedRuntimeCache);
+verifyEqual(testCase, cachedOut, policyOut, ...
+    'cached 路径必须与 uncached 逐位一致。');
+end
+
 function testNoseMidGateIsContinuousAndFineUsesCommonEvidence(testCase)
 [frequency, beautyMasks, noseRegion] = standaloneRepairFixture();
 blemishMap = .10 * ones(size(noseRegion));
@@ -312,6 +560,49 @@ if nnz(gradientRoi) >= 16
 end
 end
 
+function [fixture, evidence] = nosePolicyUnitFixture
+%NOSEPOLICYUNITFIXTURE 构造受控 Beauty Masks 与鼻部 evidence（40x60）：
+%   两个 nostrilCore 块（hard identity，羽化半径按 faceScale=120 为 2px）、
+%   一条 noseStructure=1 的结构脊、一块 evidence=.05 的平坦皮肤
+%   （低于 .15 下支撑点，两带皆零）。掩码其余通道全部为零，隔离
+%   geometry 噪声，使档位断言精确。
+imageSize = [40, 60];
+nostrilCore = false(imageSize);
+nostrilCore(29:32, 20:23) = true;
+nostrilCore(29:32, 34:37) = true;
+noseStructureEvidence = zeros(imageSize);
+noseStructureEvidence(12:13, 15:45) = 1;
+noseStructureEvidence(20:27, 10:50) = .05;
+evidence = struct('nostril', double(nostrilCore), ...
+    'noseStructure', noseStructureEvidence);
+fixture = struct( ...
+    'imageSize', imageSize, ...
+    'hardIdentity', double(nostrilCore), ...
+    'corePoint', [30, 21], ...
+    'ridgePoint', [12, 30], ...
+    'flatPoint', [24, 30], ...
+    'masks', unitNoseMasks(double(nostrilCore), imageSize));
+end
+
+function masksStruct = unitNoseMasks(hard, imageSize)
+%UNITNOSEMASKS 构建只含 buildStageProtectionMasks 必需字段的 mask 产物。
+masksStruct = struct( ...
+    'textureProtectionMask', zeros(imageSize), ...
+    'structureProtectionMask', zeros(imageSize), ...
+    'chromaProtectionMask', zeros(imageSize), ...
+    'whiteningProtectionMask', zeros(imageSize), ...
+    'hardProtectionMask', hard, ...
+    'noseMask', zeros(imageSize), ...
+    'faceSkinMask', zeros(imageSize), ...
+    'faceScale', 120);
+end
+
+function value = smoothStepValue(inputValue, low, high)
+%SMOOTHSTEPVALUE 复现生产 smoothstep 曲线（t^2*(3-2t)）。
+t = min(max((double(inputValue) - low) / max(high - low, eps), 0), 1);
+value = t .^ 2 .* (3 - 2 * t);
+end
+
 function [image, faceBox, masks] = syntheticNosePortrait
 imageHeight = 192;
 imageWidth = 256;
@@ -357,6 +648,57 @@ masks = struct('skin', face, 'nose', nose, 'freckle', freckle, ...
     yGrid >= 76 & yGrid <= 108, 'cheek', face & ...
     abs(xGrid - centerX) >= 32 & abs(xGrid - centerX) <= 46 & ...
     yGrid >= 76 & yGrid <= 108);
+end
+
+function [image, faceBox, masks] = gentleNosePolicyPortrait
+%GENTLENOSEPOLICYPORTRAIT 平坦鼻 + 浅鼻孔暗谷 + 鼻内雀斑的合成人像
+%   （与 t21_probe3 及 T21 artifact 回归夹具同一几何）。额头/下颌两条
+%   暗带抬高皮肤域梯度分位、压低鼻内低频梯度，使鼻内结构保护落在
+%   .22 下限、Fine 门打开——nostril 软带内的保护抬升才能被 alphaMap
+%   直接观测。鼻孔软带与鼻内雀斑保持不相交。
+imageHeight = 200;
+imageWidth = 300;
+faceBox = [40, 25, 220, 160];
+[xGrid, yGrid] = meshgrid(1:imageWidth, 1:imageHeight);
+centerX = 150;
+faceCenterY = 105;
+faceRegion = ((xGrid - centerX) / 95) .^ 2 + ...
+    ((yGrid - faceCenterY) / 78) .^ 2 <= 1;
+noseRegion = ((xGrid - centerX) / 24) .^ 2 + ...
+    ((yGrid - (faceCenterY + 8)) / 42) .^ 2 <= 1;
+base = 0.62 * ones(imageHeight, imageWidth);
+base(faceRegion) = 0.64;
+tBrow = min(max((yGrid - (faceCenterY - 58)) / 2, 0), 1);
+base = base - .32 * (1 - (tBrow .^ 2 .* (3 - 2 * tBrow)));
+tChin = min(max(((faceCenterY + 72) - yGrid) / 2, 0), 1);
+base = base - .28 * (1 - (tChin .^ 2 .* (3 - 2 * tChin))) .* faceRegion;
+base = base + .006 * sin(2 * pi * xGrid / 19) .* ...
+    sin(2 * pi * yGrid / 15) .* faceRegion;
+red = base .* 255 + 20;
+green = base .* 255 - 12;
+blue = base .* 255 - 28;
+nostril = (((xGrid - (centerX - 9)) / 6.0) .^ 2 + ...
+    ((yGrid - (faceCenterY + 34)) / 3.0) .^ 2 <= 1) | ...
+    (((xGrid - (centerX + 9)) / 6.0) .^ 2 + ...
+    ((yGrid - (faceCenterY + 34)) / 3.0) .^ 2 <= 1);
+red(nostril) = red(nostril) - 36;
+green(nostril) = green(nostril) - 30;
+blue(nostril) = blue(nostril) - 26;
+freckle = false(imageHeight, imageWidth);
+centers = [centerX - 10, faceCenterY - 16; centerX + 10, ...
+    faceCenterY - 8; centerX, faceCenterY + 6];
+for index = 1:size(centers, 1)
+    spot = ((xGrid - centers(index, 1)) / 2.2) .^ 2 + ...
+        ((yGrid - centers(index, 2)) / 1.8) .^ 2 <= 1;
+    freckle = freckle | spot;
+    red(spot) = red(spot) - 46;
+    green(spot) = green(spot) - 38;
+    blue(spot) = blue(spot) - 30;
+end
+image = uint8(cat(3, min(max(round(red), 0), 255), ...
+    min(max(round(green), 0), 255), min(max(round(blue), 0), 255)));
+masks = struct('skin', faceRegion, 'nose', noseRegion, ...
+    'freckle', freckle, 'nostril', nostril);
 end
 
 function parsing = parsingForPortrait(imageSize, masks)

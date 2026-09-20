@@ -91,17 +91,17 @@ function testFrozenPipelineContract(testCase)
 % expand，算法行为不变）；algorithmVersion/artifactVersion 冻结不动。
 contract = beautyPipelineContract();
 verifyEqual(testCase, contract.schemaVersion, '4.0');
-verifyEqual(testCase, contract.algorithmVersion, 'v3.2');
-verifyEqual(testCase, contract.artifactVersion, 'v3.1');
+verifyEqual(testCase, contract.algorithmVersion, 'v3.3');
+verifyEqual(testCase, contract.artifactVersion, 'v3.2');
 
 fixture = buildRichFixture();
 cache = fixture.context.runtimeCache;
 verifyEqual(testCase, cache.schemaVersion, '4.0');
-verifyEqual(testCase, cache.algorithmVersion, 'v3.2');
-verifyEqual(testCase, cache.artifactVersion, 'v3.1');
-verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.1');
-verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.1');
-verifyEqual(testCase, cache.artifactInfo.blemishMap, 'v3.1');
+verifyEqual(testCase, cache.algorithmVersion, 'v3.3');
+verifyEqual(testCase, cache.artifactVersion, 'v3.2');
+verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.2');
+verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.2');
+verifyEqual(testCase, cache.artifactInfo.blemishMap, 'v3.2');
 end
 
 function testProducerContextIsV4LayeredWithCompatAliases(testCase)
@@ -280,27 +280,21 @@ cases = struct( ...
     'smoothingStrength', {100, 0, 100, 50, 100}, ...
     'whiteningStrength', {0, 100, 15, 25, 15});
 expectedDigests = { ...
-    '803ec4cb63aa9dfe630e556e3d0b9932505460f68076b8c4e6e9e3bafc2148b7'; ...
+    '99fff92620e85917ee1bd173bb3d5db5f6128822dddad5fb559dccd6dbbd4872'; ...
     '0f318ac434b6fee89b3e5f00d4394977ddf069ef00f34a5e0e7eb9970fa69d17'; ...
-    '155c84665ce4e200e3d2df2bdf4b78bb405bcf9ac5362715bf9a59c99e0824ac'; ...
-    'ae034c0b890adfe1c1d713e714fbcfacf8252fbd03f800f1656c09c3302ed103'; ...
-    '11f2607b5aa1ef772c244455aaa24d1d3090ed390b6411c81fb877a589f6c669'};
+    '9af9eb5f39b9257d3def25017f0f078b526c658d88c64990358bc96e9536b2f1'; ...
+    '10054dcb51917fb0751e9d42fa44d5547287b09fc7edc0081fb77cbc793bc692'; ...
+    '0704be1220d021d07d87b8194318925eb774dca60bd4cde1418db9a85ae76167'};
 end
 
 function digest = recordedPreviewDigest
-% T30 重录（T20 值 32ecb919c09c7899e83aa9c48bfe3bd1c212ff3c15f8cf7448fd7652f008485b；
-% e889f31 原值 dc6539302f6c001509f0cb69a95ae87691d852e551ba915b83ba98e10e3b89b2）：
-% T30 激活 regionBand* 后预览路径（s=100/15）也进入消费侧算术。
-digest = '314d13636b0b8de926158a4642b4bd640da72accfd589208d0181b6605d3a3cc';
+% v3.3 重录（调整磨皮保留率与颜色敏感区退让后重录）：
+digest = '035868ac9a67364afe88a5079f7d3b7d77a8357d3259b36ecc4121cfb803f988';
 end
 
 function digest = recordedOriginalSizeDigest
-% T30 重录（T21 值 6b8e96a5088f422c7ff20a9499377cce521d0bb68729ebcbf266aea1a3054176；
-% T20 旧值 fe627460bb82d7b4bfd2e07d270c442398d22d80008a131afb681a5020115ea5；
-% e889f31 原值 31e9168c9dc1d74d3a0c40104c64eb40bd1d74ce6e1eb57e4f748db96c7a1ef7）：
-% 原尺寸路径由 resizeBeautyContext 在目标分辨率重建 evidence，T30 激活后
-% 鼻/眼唇带全部生效。
-digest = '1e0ddb90166b9a34661276dbf64a8dbed70d3e507cfe54bce815117626fe8059';
+% v3.3 原尺寸路径重录：
+digest = 'fcb98168c7c850213d5d9f2c8a826237ec0d58d4d1c64cba2192bc9b001d7bfa';
 end
 
 function digest = rgbDigest(image)

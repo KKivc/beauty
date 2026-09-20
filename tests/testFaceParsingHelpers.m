@@ -27,7 +27,7 @@ image = uint8(ones(80, 100, 3) * 128);
 parsing = syntheticParsing([80 100]);
 context = prepareBeautyContext(image, [20 15 60 50], parsing, ...
     emptyBodyParsing(size(image, [1 2])));
-verifyEqual(testCase, context.schemaVersion, '3.1');
+verifyEqual(testCase, context.schemaVersion, '4.0');
 verifyEqual(testCase, numel(fieldnames(context.regions)), 19);
 [beautyMasks, ~] = masks.buildBeautyMasks(image, context, [20 15 60 50]);
 verifyEqual(testCase, beautyMasks.hardProtectionMask(35, 45), 1);

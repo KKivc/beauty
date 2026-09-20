@@ -99,9 +99,16 @@ end
 faceScale = readFaceScale(frequency);
 highStrengthWeight = profile.highStrengthCurve;
 smallResolutionWeight = 1 - smoothStep(faceScale, 140, 180);
-textureRetentionFloor = .60 + .12 * smoothStep(fineEnergy, .004, .010) ...
-    - .08 * smallResolutionWeight - .08 * ...
-    smoothStep(blemishMean, .08, .14);
+% v3.3：放开正常尺寸人脸的高档 Fine 自适应下限至约 0.42（.60 - .18），
+% 小人脸保持不低于 0.60，避免小图细节丢失。
+normalRelaxation = .18 * highStrengthWeight * (1 - smallResolutionWeight);
+baseFloor = .60 - normalRelaxation;
+energyAdjustment = .08 * smoothStep(fineEnergy, .004, .010) - ...
+    .06 * smoothStep(blemishMean, .08, .14);
+textureRetentionFloor = baseFloor + energyAdjustment;
+if smallResolutionWeight > 0
+    textureRetentionFloor = max(textureRetentionFloor, .60 * smallResolutionWeight);
+end
 
 % 适应性保留率只设置单调下降曲线的下限。用 max 而不是在高档
 % 向上插值，保证固定输入下实际 Fine 保留率不会因高档自适应反弹。
@@ -113,6 +120,9 @@ smallFaceFloor = .66 - .06 * smallResolutionWeight;
 % 质感下限；目标为常数时，随着强度增加不会出现保留率反弹。
 fineRetention = fineRetention - smallFaceWeight .* ...
     max(fineRetention - smallFaceFloor, 0);
+if smallResolutionWeight > 0
+    fineRetention = max(fineRetention, .60 * smallResolutionWeight);
+end
 if all(isfield(beautyMasks, {'faceStrengthMap', 'nonFaceStrengthMap'}))
     nonFaceStrength = validateMask(beautyMasks.nonFaceStrengthMap, ...
         imageSize, 'nonFaceStrengthMap');

@@ -45,7 +45,7 @@ outputFine = mean(abs(outputGray(:, 2:end) - outputGray(:, 1:end - 1)), 'all');
 inputMedium = std(mean(inputGray, 1));
 outputMedium = std(mean(outputGray, 1));
 
-verifyGreaterThanOrEqual(testCase, outputFine, 0.55 * inputFine);
+verifyGreaterThanOrEqual(testCase, outputFine, 0.42 * inputFine);
 verifyGreaterThanOrEqual(testCase, outputMedium, 0.35 * inputMedium);
 end
 

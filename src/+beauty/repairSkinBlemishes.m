@@ -36,6 +36,8 @@ function [repairedFrequency, diagnostics] = repairSkinBlemishes( ...
 %   生产顺序（与 legacy 逐位等价的关键）：结构门在 [0,1] 截断之前作用于
 %   权重；纹理门作用于 Fine/Mid/chroma，鼻部门只作用于 Mid，二者均在截断
 %   之后、textureBandGate 之前，且鼻部门先于纹理门（legacy 乘法结合序）。
+%   V4 policy 额外要求所有 Repair 证据先经过紧凑 Blob 筛选，Fine 为默认
+%   通道，Mid 只接受极高置信紧凑目标；compat contract 保留原有公式。
 %
 %   生产链在结构门与纹理/鼻部门之间对权重做 [0,1] 截断（
 %   min(max(w·structureGate,0),1) 之后才乘纹理/鼻部门），把纹理或鼻部折叠
@@ -46,8 +48,8 @@ function [repairedFrequency, diagnostics] = repairSkinBlemishes( ...
 %   邻域参考统计（referenceReliability/referenceWeight）只用
 %   support.repairFine / support.repairMid 与 blemish 证据，**不**乘 target
 %   门与 textureBandGate：把 target 门并进参考池会让带内变化经 imfilter
-%   （radius = min(20, max(3, round(.070*faceScale)))）扩散到带外，产生
-%   >1 灰度级泄漏。全局参考统计因此与 target 门解耦。
+%   扩散到带外。compat 使用原有 face-scale 半径；V4 policy 按已接受
+%   目标面积与 face scale 收缩窗口，并将所有候选从参考池排除。
 %
 %   兼容入口（未提供第 5 参的旧调用方）：T31 起不再自行解释 general
 %   texture/structure/hard/nose masks，而是向 policy 层索取零带
@@ -100,6 +102,11 @@ highEndRepairCurve = max(profile.blemishStrength - .75 ^ .85, 0);
 % 组合 general masks。该门同时用于邻域参考池（见下）。
 structureGate = 1 - repairContract.support.repairMid;
 
+% policyRepairEnabled 由唯一组装点按 V4 region evidence 发布。旧的
+% compat/partial contract 没有该字段时保留旧路径；生产 V4 路径则对
+% 全部 Repair 证据启用紧凑局部约束。
+policyRepairEnabled = repairContract.policyRepairEnabled;
+
 % 低置信度瑕疵保留在 Fine 层；Mid 仅在连续置信度达到中高档后
 % 开启，避免普通皮肤被大面积拉向一个颜色。
 faceScale = readFaceScale(frequency);
@@ -115,9 +122,19 @@ globalGate = smoothStep(globalBlemishMean, .005, .015);
 repairEvidence = min(max(blemishMap .* sparseGate .* globalGate, 0), 1);
 mediumConfidence = smoothStep(repairEvidence, .60, .90);
 highConfidence = smoothStep(repairEvidence, .62, .90);
-if highEndRepairCurve > 0
-    blobMask = smallBlemishBlobs(blemishMap > .65, faceScale);
+if policyRepairEnabled
+    % 普通 Repair 也必须通过紧凑 Blob 筛选；大面积缓变、长线和沟槽
+    % 保持可见为拒绝修复，而不是拆分成多个伪小斑点。
+    compactCandidate = blemishMap > .60;
+    blobMask = smallBlemishBlobs(compactCandidate, faceScale);
+    repairEvidence = repairEvidence .* double(blobMask);
+    mediumConfidence = smoothStep(repairEvidence, .60, .90);
+    highConfidence = smoothStep(repairEvidence, .62, .90);
+elseif highEndRepairCurve > 0
+    compactCandidate = blemishMap > .65;
+    blobMask = smallBlemishBlobs(compactCandidate, faceScale);
 else
+    compactCandidate = false(imageSize);
     blobMask = false(imageSize);
 end
 % 高档额外修复必须同时满足高置信局部异常、紧凑 Blob 和全局证据；
@@ -136,13 +153,24 @@ repairCurveMap = min(max(repairCurveMap, 0), 1);
 %   chromaWeight : × (1 - target.repairFine)
 % blemish 证据与 target 门相互独立：改动 target 门只改变"该不该修"，不改变
 % blemish 证据；鼻部门先于纹理门相乘，与 legacy 乘法结合序一致（bit-exact）。
-fineWeight = repairCurveMap .* (repairEvidence + .25 * highConfidence) .* ...
-    allowed .* structureGate + (highEndRepairCurve .* ...
-    highEndConfidence) .* allowed .* structureGate;
-mediumWeight = repairCurveMap .* (.95 * mediumConfidence + ...
-    .40 * highConfidence) .* allowed .* structureGate + ...
-    (highEndRepairCurve .* ...
-    highEndConfidence) .* allowed .* structureGate;
+if policyRepairEnabled
+    % V4 Repair 以 Fine 为唯一默认修复通道；Mid 只接受极高置信、
+    % 紧凑且已通过同一结构门的目标，避免用中频把自然曲面拉平。
+    fineWeight = repairCurveMap .* repairEvidence .* allowed .* ...
+        structureGate;
+    midConfidence = smoothStep(repairEvidence, .82, .95);
+    mediumWeight = highEndRepairCurve .* midConfidence .* ...
+        double(blobMask) .* globalGate .* allowed .* structureGate;
+else
+    fineWeight = repairCurveMap .* (repairEvidence + .25 * highConfidence) .* ...
+        allowed .* structureGate + (highEndRepairCurve .* ...
+        highEndConfidence) .* allowed .* structureGate;
+    mediumWeight = repairCurveMap .* (.95 * mediumConfidence + ...
+        .40 * highConfidence) .* allowed .* structureGate + ...
+        (highEndRepairCurve .* ...
+        highEndConfidence) .* allowed .* structureGate;
+    midConfidence = highConfidence;
+end
 mediumWeight = min(max(mediumWeight, 0), 1);
 chromaWeight = .16 * repairCurveMap .* highConfidence .* allowed .* ...
     structureGate;
@@ -167,7 +195,7 @@ mediumWeight = mediumWeight .* midPixelGate .* targetFineGate .* ...
     textureBandGate;
 chromaWeight = chromaWeight .* targetFineGate .* textureBandGate;
 
-radius = min(20, max(3, round(.070 * faceScale)));
+radius = referenceRadius(faceScale, blobMask, policyRepairEnabled);
 kernelSize = 2 * radius + 1;
 kernel = ones(kernelSize, kernelSize);
 
@@ -177,8 +205,16 @@ kernel = ones(kernelSize, kernelSize);
 % （textureGate → blemish → structureGate），保证参考统计逐位不变。
 supportTextureGate = 1 - repairContract.support.repairFine;
 supportStructureGate = 1 - repairContract.support.repairMid;
+if policyRepairEnabled
+    % 通过紧凑性筛选的候选及被拒绝的大块候选均不进入参考池；否则
+    % 参考均值会把结构纹理跨边界传播到真正的修复点。
+    referenceBlemishGate = (1 - .86 * blemishMap) .* ...
+        double(~compactCandidate);
+else
+    referenceBlemishGate = 1 - .86 * blemishMap;
+end
 referenceReliability = allowed .* supportTextureGate .* ...
-    (1 - .86 * blemishMap) .* supportStructureGate;
+    referenceBlemishGate .* supportStructureGate;
 referenceWeight = imfilter(referenceReliability, kernel, 'replicate');
 fineReference = imfilter(fine .* referenceReliability, kernel, ...
     'replicate') ./ max(referenceWeight, eps);
@@ -228,6 +264,11 @@ diagnostics = struct( ...
     'globalGate', globalGate, ...
     'normalRepairCurve', normalRepairCurve, ...
     'highEndRepairCurve', highEndRepairCurve, ...
+    'policyRepairEnabled', policyRepairEnabled, ...
+    'compactCandidate', compactCandidate, ...
+    'compactBlobAreaLimit', blobAreaLimit(faceScale), ...
+    'compactBlobSpanLimit', blobSpanLimit(faceScale), ...
+    'compactBlobAcceptedPixels', nnz(blobMask), ...
     'repairEvidence', repairEvidence, ...
     'mediumConfidence', mediumConfidence, ...
     'highConfidence', highConfidence, ...
@@ -250,6 +291,7 @@ diagnostics = struct( ...
     'structureGate', structureGate, ...
     'referenceReliability', referenceReliability, ...
     'referenceWeight', referenceWeight, ...
+    'referenceRadius', radius, ...
     'fineReference', fineReference, ...
     'midReference', midReference, ...
     'fineTarget', fineTarget, ...
@@ -290,6 +332,17 @@ if ~isstruct(contract) || ~isscalar(contract) || ...
         'textureBandGate', 'midBandGate', 'snapshot'}))
     error('beauty:InvalidBlemishRepair', ...
         'Repair stage contract 必须是包含 hard/target/support/textureBandGate/midBandGate/snapshot 的标量结构。');
+end
+if ~isfield(contract, 'policyRepairEnabled')
+    contract.policyRepairEnabled = false;
+elseif ~islogical(contract.policyRepairEnabled) && ...
+        ~(isnumeric(contract.policyRepairEnabled) && ...
+        isreal(contract.policyRepairEnabled) && isscalar(contract.policyRepairEnabled) && ...
+        isfinite(contract.policyRepairEnabled))
+    error('beauty:InvalidBlemishRepair', ...
+        'Repair stage contract 的 policyRepairEnabled 无效。');
+else
+    contract.policyRepairEnabled = logical(contract.policyRepairEnabled);
 end
 if ~isstruct(contract.target) || ~isscalar(contract.target) || ...
         ~all(isfield(contract.target, {'repairFine', 'repairMid'}))
@@ -422,8 +475,8 @@ if ~any(candidate(:))
     return;
 end
 components = bwconncomp(candidate, 8);
-areaLimit = max(24, round(.006 * faceScale ^ 2));
-spanLimit = max(5, round(.045 * faceScale));
+areaLimit = blobAreaLimit(faceScale);
+spanLimit = blobSpanLimit(faceScale);
 for index = 1:components.NumObjects
     pixels = components.PixelIdxList{index};
     [rows, columns] = ind2sub(size(candidate), pixels);
@@ -435,6 +488,34 @@ for index = 1:components.NumObjects
         blobMask(pixels) = true;
     end
 end
+end
+
+function areaLimit = blobAreaLimit(faceScale)
+% 面积上限按人脸尺度归一，避免用单张图的绝对像素阈值。
+areaLimit = max(24, round(.006 * double(faceScale) ^ 2));
+end
+
+function spanLimit = blobSpanLimit(faceScale)
+% 跨度上限排除睫毛、眼线、鼻翼沟和耳轮等长线结构。
+spanLimit = max(5, round(.045 * double(faceScale)));
+end
+
+function radius = referenceRadius(faceScale, blobMask, policyRepairEnabled)
+% 参考窗口随已接受目标面积和人脸尺度变化。小斑点不再使用覆盖
+% 整个眼周/鼻部的固定大窗口；compat 路径保留既有尺度公式。
+if ~policyRepairEnabled || ~any(blobMask(:))
+    radius = min(20, max(3, round(.070 * double(faceScale))));
+    return;
+end
+components = bwconncomp(blobMask, 8);
+if components.NumObjects == 0
+    radius = 3;
+    return;
+end
+areas = cellfun(@numel, components.PixelIdxList);
+largestRadius = 2 * sqrt(max(areas) / pi);
+scaleRadius = .040 * double(faceScale);
+radius = min(12, max(3, round(min(scaleRadius, largestRadius))));
 end
 
 function valid = isValidStrength(value)

@@ -231,6 +231,7 @@ for eyeIndex = 1:numel(identityMasks)
         [rowGrid, ~] = ndgrid(1:size(identityCore, 1), ...
             1:size(identityCore, 2));
         upperAllowance = max(1, round(.004 * double(faceScale)));
+        eyelidDistance = min(20, max(6, round(.035 * double(faceScale))));
         upperDetailBand = identityRing & rowGrid <= topRow + upperAllowance;
         eyeDistance = bwdist(identityCore);
         upperCurve = .55 + .40 * max(0, 1 - ...
@@ -238,6 +239,16 @@ for eyeIndex = 1:numel(identityMasks)
         outerFeather = min(max((periocularRadius + 1 - eyeDistance) / 4, 0), 1);
         upperProtection = upperCurve .* outerFeather;
         upperProtection(~upperDetailBand) = 0;
+
+        % 加强紧邻上眼睑的几何软保护带：在 eyelidDistance 内平滑过渡，
+        % 保护上眼皮与细微折痕，不向外扩散至大面积眼窝皮肤。
+        upperEyelidBand = identityRing & rowGrid <= topRow + upperAllowance & ...
+            rowGrid >= topRow - eyelidDistance & eyeDistance <= eyelidDistance;
+        eyelidT = min(max(eyeDistance ./ (eyelidDistance + 1), 0), 1);
+        eyelidCurve = .88 * (1 - eyelidT .^ 1.5);
+        eyelidCurve(~upperEyelidBand) = 0;
+        upperProtection = max(upperProtection, eyelidCurve);
+
         currentPeriocular = max(currentPeriocular, upperProtection);
     end
 
@@ -339,6 +350,10 @@ end
 if any(protectionSeed(:))
     protection = featherSoftMask(protectionSeed, softRadius, .99);
     protection(protectionSeed) = .99;
+    % 局部软闭合：弥合相邻睫毛细线之间 1-2 像素的空洞，限制在 ring 约束内
+    % （复用 Issue 08.4 验证的局部连续性候选），不向大面积普通眼周扩张
+    closedProtection = imclose(protection, strel('disk', softRadius, 0));
+    protection = max(protection, closedProtection .* double(ring));
 end
 end
 

@@ -107,7 +107,7 @@ verifyTrue(testCase, all(diff(fineEnergies) <= 1e-12));
 verifyEqual(testCase, midRetentions(1), 1, 'AbsTol', 1e-12);
 verifyTrue(testCase, all(diff(midRetentions) <= 0));
 verifyTrue(testCase, all(diff(midEnergies) <= 1e-12));
-verifyGreaterThan(testCase, retentions(end), .55);
+verifyGreaterThan(testCase, retentions(end), .40);
 verifyGreaterThan(testCase, midRetentions(end), .50);
 end
 

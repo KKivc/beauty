@@ -40,12 +40,12 @@ function contract = repairStageContract(stageProtection, blemishMap)
 %   乘积与顺序重建：两条带门与鼻部退让门都在 [0,1] 截断之后作用于
 %   mediumWeight，且都不进参考池（与 textureBandGate 同款）。
 %
-%   结构门共享（为什么只有一个结构保护字段）：生产链里同一个
-%   structureGate = min(1 - structure·(1-.90·blemish), 1 - .65·strongStructure)
-%   既乘逐像素权重（截断之前），又乘邻域参考池门。它依赖运行期 blemish
-%   证据与 hard 特征带，无法在 policy 层一次算好，因此由本组装层重建。
-%   按契约"同一语义只留一个规范字段"，它在 support.repairMid 发布一次，
-%   消费侧两处都用 1 - support.repairMid 还原。
+%   结构门共享（为什么只有一个结构保护字段）：compat 路径沿用
+%   structureGate = min(1 - structure·(1-.90·blemish), 1 - .65·strongStructure)，
+%   既乘逐像素权重（截断之前），又乘邻域参考池门。V4 policy 路径对
+%   regionBandFine/regionBandMid 对应的结构证据不应用 blemish 退让，普通
+%   结构仍保留有限退让。两条路径都由本组装层重建，support.repairMid
+%   发布一次，消费侧两处都用 1 - support.repairMid 还原。
 %
 %   为什么 support.repairMid 取 max(a, b) 而不是 1 - structureGate：
 %   `1 - x` 的补码往返（1 - (1 - gate)）在 IEEE double 下不保证逐位还原，
@@ -72,9 +72,8 @@ function contract = repairStageContract(stageProtection, blemishMap)
 %
 %   Blemish ≠ Should Repair（上位契约第 3.2 节）：blemish 证据只回答"像不像
 %   瑕疵"，"该不该修"由 (1 - targetProtection) 单独决定；本层不把结构保护
-%   反向塞进 blemish 检测，也不让 blemish 证据单独决定修复强度。结构门里的
-%   (1 - .90·blemish) 是 legacy 既有的"高置信瑕疵可适度放宽一般结构门控"，
-%   属结构门对瑕疵证据的既有耦合，不改变"证据不单独决定强度"的约束。
+%   反向塞进 blemish 检测，也不让 blemish 证据单独决定修复强度。只有 compat
+%   路径保留"高置信瑕疵可适度放宽一般结构门控"；V4 关键 region band 不可放宽。
 %
 %   缺字段或取值无效一律 fail-fast，不在本函数内部重新拼装 protection，也不
 %   静默回退到 legacy masks 解释。
@@ -111,11 +110,33 @@ snapshotFine = readMask(stageProtection.target.repairFine, 'target.repairFine');
 snapshotMid = readMask(stageProtection.target.repairMid, 'target.repairMid');
 blemishMap = readMask(blemishMap, 'blemishMap');
 
-% 生产 structureGate = min(1 - structure·(1-.90·blemish), 1 - .65·strongStructure)。
-% 按上面的单调性推导，发布 max(a, b) 使消费侧 1 - support.repairMid 逐位还原。
+% V4 policy evidence 只在存在有效 region band 时启用 Repair 的严格局部
+% 模式。无新增 policy evidence 的 compat/partial 路径保持原有运行时
+% blemish 退让行为，避免无证据时静默改变旧契约。
+policyRepairEnabled = any(regionBandFine(:) > 0) || ...
+    any(regionBandMid(:) > 0);
+
+% compat 生产 structureGate = min(1 - structure·(1-.90·blemish),
+% 1 - .65·strongStructure)。V4 policy 在不可放宽 region band 内固定
+% protection，其余区域沿用同一单调推导；最终发布 max(a,b) 使消费侧
+% 1 - support.repairMid 逐位还原。
 strongStructure = smoothStep(structureProtection, .70, .90) .* ...
     double(bwdist(hard >= .999) <= 3);
-blemishRelaxedProtection = structureProtection .* (1 - .90 * blemishMap);
+if policyRepairEnabled
+    % region band 是静态结构证据，瑕疵置信度不得将其放宽。普通结构
+    % 仍保留旧的有限退让，避免把整张皮肤冻结。
+    nonRelaxableProtection = max(regionBandFine, regionBandMid);
+    relaxableProtection = structureProtection .* ...
+        (1 - nonRelaxableProtection);
+    blemishRelaxedProtection = relaxableProtection .* ...
+        (1 - .90 * blemishMap);
+    blemishRelaxedProtection = max(blemishRelaxedProtection, ...
+        nonRelaxableProtection);
+else
+    nonRelaxableProtection = zeros(size(structureProtection));
+    blemishRelaxedProtection = structureProtection .* ...
+        (1 - .90 * blemishMap);
+end
 structureSupportProtection = max(blemishRelaxedProtection, ...
     .65 * strongStructure);
 
@@ -129,6 +150,8 @@ contract = struct( ...
     'repairMid', noseProtection), ...
     'textureBandGate', 1 - regionBandFine, ...
     'midBandGate', 1 - regionBandMid, ...
+    'policyRepairEnabled', policyRepairEnabled, ...
+    'nonRelaxableProtection', nonRelaxableProtection, ...
     'snapshot', struct( ...
     'repairFine', snapshotFine, ...
     'repairMid', snapshotMid));

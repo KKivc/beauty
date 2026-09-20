@@ -60,14 +60,14 @@ function testRuntimeCacheDeclaresCanonicalArtifacts(testCase)
 context = prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60]));
 cache = context.runtimeCache;
-% T08：缓存记录的契约戳随生产 Context 升为 '4.0'；缓存兼容仍由
-% artifactVersion（'v3.1'）把握。
+% T08：缓存记录的契约戳随生产 Context 升为 '4.0'；缓存兼容由
+% artifactVersion（'v3.2'）把握。
 verifyEqual(testCase, cache.schemaVersion, '4.0');
-verifyEqual(testCase, cache.algorithmVersion, 'v3.2');
-verifyEqual(testCase, cache.artifactVersion, 'v3.1');
-verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.1');
-verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.1');
-verifyEqual(testCase, cache.artifactInfo.blemishMap, 'v3.1');
+verifyEqual(testCase, cache.algorithmVersion, 'v3.3');
+verifyEqual(testCase, cache.artifactVersion, 'v3.2');
+verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.2');
+verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.2');
+verifyEqual(testCase, cache.artifactInfo.blemishMap, 'v3.2');
 verifyEqual(testCase, cache.beautyMasks.chromaProtectionMask, ...
     cache.beautyMasks.toneProtectionMask, 'AbsTol', 0);
 verifyEqual(testCase, cache.frequency.schemaVersion, '4.0');
@@ -168,7 +168,7 @@ verifyEqual(testCase, diagnostics.runtimeCache.status, 'regenerated');
 verifyEqual(testCase, output, uncachedOutput);
 
 tampered = context;
-tampered.runtimeCache.algorithmVersion = 'v3.3';
+tampered.runtimeCache.algorithmVersion = 'v3.4';
 [output, diagnostics] = beautifyImage(image, params, faceBox, tampered);
 verifyFalse(testCase, diagnostics.reusedRuntimeCache);
 verifyEqual(testCase, diagnostics.runtimeCache.status, 'regenerated');
@@ -714,7 +714,8 @@ function testPolicyEvidenceLayerIsValidAndBounded(testCase)
 prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60])), 'runtimeCache');
 evidenceFields = {'periocular'; 'nostril'; 'noseStructure'; 'lip'; ...
-    'edgeDetail'; 'structureGradient'; 'darkDetail'; 'earStructure'};
+    'edgeDetail'; 'structureGradient'; 'darkDetail'; 'earStructure'; ...
+    'colorSensitiveSkin'};
 assertPolicyEvidenceValid(testCase, prepared.evidence, ...
     evidenceFields, size(image, [1, 2]));
 metadata = prepared.diagnostics.policyEvidence;

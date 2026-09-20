@@ -240,6 +240,9 @@ function testEarPolicyWiringPreservesIdentityAndSkinContinuity(testCase)
 %       texture 通道）、smoothingMid 与 regionBandBase 只增不减；
 %     cached 与 uncached 输出逐位一致。
 [image, faceBox, context, earData] = earPolicyPortrait();
+if isfield(context.evidence, 'colorSensitiveSkin')
+    context.evidence.colorSensitiveSkin(:) = 0;
+end
 params = struct('smoothingStrength', 100, 'whiteningStrength', 0);
 [policyOut, policyDiagnostics] = beautifyImage(image, params, faceBox, ...
     context);

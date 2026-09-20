@@ -399,6 +399,11 @@ transitionBand = max(eyeTransitionBand, lipTransitionBand) .* ...
 % T22：耳部结构带（耳轮/耳甲腔沟槽）。缺省或 partial evidence 时为零带；
 % 带由 ear 语义支持域约束，ear 语义支持域外严格为 0。
 earStructureBand = readEarBands(policyEvidence, size(texture));
+
+% v3.3：颜色敏感皮肤证据（colorSensitiveSkin）。只在可处理面部皮肤内非零；
+% 仅进入 Base/Tone/Whitening 的 target 与 support，不影响 Fine/Mid 磨皮与修复。
+colorSensitiveSkin = readEvidenceField(policyEvidence, 'colorSensitiveSkin', ...
+    size(texture));
 % T20/T21/T22 texture 通道替换：细节带内抬升到检测细节保护水平，过渡带
 % 内封顶保留处理量；带外逐位还原（max(x,0)=x，min(x,1)=x）。T21 的
 % 鼻孔软带加入 Fine 侧平台档位（.95 与 v3.1 nostrilProtection 峰值
@@ -458,29 +463,11 @@ repairMid = max(max(max(max(1 - structureGateRepair .* (1 - .50 * nose) .* ...
 %   由消费侧 gate := gate .* (1 - regionBandBase) 注入 supportMap，不进入
 %   referenceReliability（否则带内变化经 imgaussfilt 参考卷积扩散到带外，
 %   实测带外 2226px/0.94% 出现 ≤2 灰度级泄漏）。
-baseLuminanceTargetProtection = 1 - (1 - structure) .* ...
-    (1 - max(texture, chroma));
-baseLuminanceSupportProtection = 1 - (1 - structure) .* (1 - hard) .* ...
-    (1 - max(texture, chroma));
-
-% normalizeSkinTone L77-78：featureGate = 1 - .78*chroma（主分支）。
-% T20：唇细节带内补唇色 identity 保护。T21：不追加鼻部项——鼻部无
-% identity 色度语义，肤色变化与脸颊连续。T22：同样不追加耳部项——
-% 耳部无 identity 色度语义，耳-颊 tone 差与 legacy 逐位相同。
-tone = max(1 - (1 - structure) .* (1 - .78 * chroma), ...
-    .90 * lipDetailBand);
-
-% applySkinWhitening L53-57/L61：脸部浅退让 1 - .10*structure 与
-% featureSetback = 1 - whitening。T20：细节带内补假白光晕退让。
-% T21：鼻孔软带内补同档退让（防鼻孔边缘假白光晕）；鼻皮肤不设退让。
-% T22：耳部不设任何退让——耳-颊 whitening 差与 legacy 逐位相同，
-% 不引入耳-颊异色块（工单第 2 步：肤色连续）。
-structureGateWhitening = 1 - structure;
-faceSkinSupport = faceSkin >= .5;
-structureGateWhitening(faceSkinSupport) = ...
-    1 - .10 * structure(faceSkinSupport);
-whiteningField = max(1 - structureGateWhitening .* (1 - whitening), ...
-    max(.85 * detailBand, .85 * nostrilDetailBand));
+%   v3.3：colorSensitiveSkin 注入 target 与 support，使敏感区少改且不进参考统计。
+baseLuminanceTargetProtection = max(1 - (1 - structure) .* ...
+    (1 - max(texture, chroma)), colorSensitiveSkin);
+baseLuminanceSupportProtection = max(1 - (1 - structure) .* (1 - hard) .* ...
+    (1 - max(texture, chroma)), colorSensitiveSkin);
 
 % T30 纯 policy 带（激活载体，与上面的 legacy 折叠式解耦）。
 %   语义：某通道相对 legacy 追加的保护量，取值 [0,1]；消费侧唯一读取
@@ -521,48 +508,66 @@ regionBandBase = max(max(.95 * detailBand, .95 * nostrilDetailBand), ...
 regionBandTone = .90 * lipDetailBand;
 regionBandWhitening = max(.85 * detailBand, .85 * nostrilDetailBand);
 
-% T33 规范双门控（上位契约第 3.4/3.5 节）：Tone 与 Whitening 各自把
-% "能不能做该阶段处理"（target）与"能不能进入该阶段的参考统计"（support）
-% 拆成两个独立字段，与 T31/T32 同构：
-%   target.tone —— 逐像素修改门（1 - 该值 = 主分支门控积
-%     structureGate·featureGate）。零带时逐位等于 T07 折叠值
-%     tone = max(1-(1-structure).*(1-.78*chroma), .90*lipDetailBand)：
-%     零带下 lipDetailBand 恒零，max(x,0)=x，折叠式与上式逐位同值。
-%   support.tone —— 参考样本门（1 - 该值 = T30 之前 tone 候选选点门限
-%     candidateChromaGate = double(chroma < .70)）。色度保护高的像素
-%     （唇/五官）不得作为肤色目标估计样本；hard 与 skin/strength 仍由
-%     消费侧按生产原位单独组合（第 4 节：hard 不并入 target/support）。
-%   target.whitening —— 逐像素修改门（1 - 该值 = structureGate·
-%     featureSetback）。零带时逐位等于 T07 折叠值 whiteningField，其中
-%     已含 eye/lip detail 带与 nostril 软带的 .85 退让项（T20/T21 的
-%     高风险区退让即由本字段承载；上位契约 3.5"高风险区应能通过
-%     target.whitening 表达退让"）。
-%   support.whitening —— 参考样本门（1 - 该值 = T30 之前亮度统计选点
-%     门限 featureZeroGate = double(whitening <= eps)）。
-toneSupportProtection = 1 - double(chroma < .70);
-whiteningSupportProtection = 1 - double(whitening <= eps);
+% applySkinWhitening L53-57/L61：脸部浅退让 1 - .10*structure 与
+% featureSetback = 1 - whitening。T20：细节带内补假白光晕退让。
+% T21：鼻孔软带内补同档退让（防鼻孔边缘假白光晕）；鼻皮肤不设退让。
+% T22：耳部不设任何退让——耳-颊 whitening 差与 legacy 逐位相同，
+% 不引入耳-颊异色块（工单第 2 步：肤色连续）。
+structureGateWhitening = 1 - structure;
+faceSkinSupport = faceSkin >= .5;
+structureGateWhitening(faceSkinSupport) = ...
+    1 - .10 * structure(faceSkinSupport);
 
 % T33 门源发布（"组合逻辑上移到 policy 层"）：Tone/Whitening 执行层只消费
 % stageProtection，其未折叠门控在本层按生产原式一次算好并发布，执行层
 % 不再读 legacy general mask（structure/chroma/whitening/faceSkin）去重建：
 %   toneGates.structureGate      = 1 - structure（主/uniform 分支共用）；
-%   toneGates.featureGate        = (1-.78*chroma).*(1-regionBandTone)
-%                                  （主分支 feature 门，T30 唇带已注入）；
-%   toneGates.uniformFeatureGate = 1 - chroma（uniform 分支 feature 门；
-%                                  T07 快照 tone 只折叠主分支，ratio>.50
-%                                  的 uniform 分支更强，故必须分字段发布）；
+%   toneGates.featureGate        = (1-.78*chroma).*(1-regionBandTone).*(1-colorSensitiveSkin)
+%                                  （主分支 feature 门，T30 唇带与 v3.3 颜色敏感退让已注入）；
+%   toneGates.uniformFeatureGate = (1-chroma).*(1-colorSensitiveSkin)
+%                                  （uniform 分支 feature 门；v3.3 颜色敏感退让已注入）；
 %   whiteningGates.structureGate = 生产原式，含 faceSkin>=.5 的浅退让分支
 %                                  （1-.10*structure，避免整个鼻部语义阻断美白）；
-%   whiteningGates.featureGate   = (1-whitening).*(1-regionBandWhitening)
-%                                  （五官退让门，T30 eye/lip/nostril 带已注入）。
+%   whiteningGates.featureGate   = (1-whitening).*(1-regionBandWhitening).*(1-colorSensitiveSkin)
+%                                  （五官退让门，T30 eye/lip/nostril 带与 v3.3 颜色敏感退让已注入）。
 % 发布值即生产门的未折叠因子，消费侧按生产原位相乘，与 legacy 路径逐位等价。
 toneGates = struct( ...
     'structureGate', 1 - structure, ...
-    'featureGate', (1 - .78 * chroma) .* (1 - regionBandTone), ...
-    'uniformFeatureGate', 1 - chroma);
+    'featureGate', (1 - .78 * chroma) .* (1 - regionBandTone) .* ...
+    (1 - colorSensitiveSkin), ...
+    'uniformFeatureGate', (1 - chroma) .* (1 - colorSensitiveSkin));
 whiteningGates = struct( ...
     'structureGate', structureGateWhitening, ...
-    'featureGate', (1 - whitening) .* (1 - regionBandWhitening));
+    'featureGate', (1 - whitening) .* (1 - regionBandWhitening) .* ...
+    (1 - colorSensitiveSkin));
+
+% T33 规范双门控（上位契约第 3.4/3.5 节）：Tone 与 Whitening 各自把
+% "能不能做该阶段处理"（target）与"能不能进入该阶段的参考统计"（support）
+% 拆成两个独立字段，与 T31/T32 同构：
+%   target.tone —— 逐像素修改门（1 - 该值 = 主分支门控积
+%     structureGate·featureGate）。与实际未折叠门控语义严格一致：
+%     tone = 1 - structureGate .* featureGate
+%          = 1 - (1-structure) .* (1-.78*chroma) .* (1-regionBandTone) .* (1-colorSensitiveSkin)。
+%     零证据时（colorSensitiveSkin=0）逐位等于 legacy 门控快照。
+%   support.tone —— 参考样本门（1 - 该值 = T30 之前 tone 候选选点门限
+%     candidateChromaGate = double(chroma < .70)）。色度保护高的像素
+%     （唇/五官）不得作为肤色目标估计样本；hard 与 skin/strength 仍由
+%     消费侧按生产原位单独组合（第 4 节：hard 不并入 target/support）。
+%     v3.3：colorSensitiveSkin >= .20 的敏感像素亦被排除在参考样本之外。
+%   target.whitening —— 逐像素修改门（1 - 该值 = structureGate·
+%     featureGate）。与实际未折叠门控语义严格一致：
+%     whiteningField = 1 - structureGateWhitening .* (1-whitening) .* (1-regionBandWhitening) .* (1-colorSensitiveSkin)。
+%     零证据时（colorSensitiveSkin=0）逐位等于 legacy 门控快照。
+%   support.whitening —— 参考样本门（1 - 该值 = T30 之前亮度统计选点
+%     门限 featureZeroGate = double(whitening <= eps)）。
+%     v3.3：colorSensitiveSkin >= .20 的敏感像素亦被排除在参考样本之外。
+tone = 1 - toneGates.structureGate .* toneGates.featureGate;
+whiteningField = 1 - whiteningGates.structureGate .* whiteningGates.featureGate;
+
+toneSupportProtection = max(1 - double(chroma < .70), ...
+    double(colorSensitiveSkin >= .20));
+whiteningSupportProtection = max(1 - double(whitening <= eps), ...
+    double(colorSensitiveSkin >= .20));
 
 % T33 鼻部退让（上位契约 3.5）：原 applySkinWhitening 读 beautyMasks.noseMask
 % 做"存在鼻部结构时幅度封顶 .07"的特殊分支，现由 policy 层一次判定，发布为

@@ -154,24 +154,37 @@ verifyEqual(testCase, max(longDetails.highEndConfidence(longAnomaly)), ...
     0, 'AbsTol', 1e-12);
 end
 
-function testRepairRequiresValidTextureProtectionMask(testCase)
+function testRepairRequiresValidSkinAndStrengthMasks(testCase)
+% T31：repair 执行层只读取 skinMask/strengthMap（processability 与
+%   strength 层），保护门全部来自 stage contract，不再校验/读取任何
+%   legacy general protection mask。兼容入口（4 参）在内部向 policy 层
+%   索取零带 stage protection，mask 产物不完整时仍 fail-fast。
 [frequency, beautyMasks, noseRegion] = standaloneRepairFixture();
 blemishMap = .10 * ones(size(noseRegion));
 blemishMap(noseRegion) = .95;
 
-missing = rmfield(beautyMasks, 'textureProtectionMask');
+missing = rmfield(beautyMasks, 'skinMask');
 verifyError(testCase, @() beauty.repairSkinBlemishes( ...
     frequency, missing, blemishMap, 100), ...
     'beauty:InvalidBlemishRepair');
 
 invalid = beautyMasks;
-invalid.textureProtectionMask(1, 1) = NaN;
+invalid.strengthMap(1, 1) = NaN;
 verifyError(testCase, @() beauty.repairSkinBlemishes( ...
     frequency, invalid, blemishMap, 100), ...
     'beauty:InvalidBlemishRepair');
+
+incomplete = rmfield(beautyMasks, 'textureProtectionMask');
+verifyError(testCase, @() beauty.repairSkinBlemishes( ...
+    frequency, incomplete, blemishMap, 100), 'masks:InvalidMasks', ...
+    '兼容入口必须向 policy 层索取 stage protection 并在 mask 不完整时 fail-fast。');
 end
 
-function testTextureProtectionGatesFaceAndNonFaceRepair(testCase)
+function testRepairTargetProtectionScalesFaceAndNonFaceRepair(testCase)
+% T31：逐像素修复权重由 stage contract 的 target 门（纹理退让保护）
+%   线性缩放，脸部与脸外一致；参考池统计由 support 门（与 target 门
+%   解耦）单独缩放。只改 target/support 门、不改 blemish 证据即可验证
+%   二者独立。
 [frequency, beautyMasks, noseRegion] = standaloneRepairFixture();
 imageSize = size(noseRegion);
 faceBlemish = false(imageSize);
@@ -182,15 +195,18 @@ blemishMap = .10 * ones(imageSize);
 blemishMap(faceBlemish | nonFaceBlemish) = .95;
 beautyMasks.nonFaceStrengthMap(nonFaceBlemish) = 1;
 
-baselineMasks = beautyMasks;
-baselineMasks.textureProtectionMask = zeros(imageSize);
-protectedMasks = baselineMasks;
-protectedMasks.textureProtectionMask(faceBlemish | nonFaceBlemish) = .50;
+protection = masks.buildStageProtectionMasks(beautyMasks);
+protectedProtection = protection;
+protectedProtection.support.repairFine = .50 * ones(imageSize);
+protectedProtection.target.repairFine = .50 * ones(imageSize);
+
+baselineContract = beauty.repairStageContract(protection, blemishMap);
+protectedContract = beauty.repairStageContract(protectedProtection, blemishMap);
 
 [~, baseline] = beauty.repairSkinBlemishes( ...
-    frequency, baselineMasks, blemishMap, 100);
+    frequency, beautyMasks, blemishMap, 100, baselineContract);
 [~, protected] = beauty.repairSkinBlemishes( ...
-    frequency, protectedMasks, blemishMap, 100);
+    frequency, beautyMasks, blemishMap, 100, protectedContract);
 
 verifyGreaterThan(testCase, min(baseline.fineWeight(faceBlemish)), 0);
 verifyGreaterThan(testCase, min(baseline.fineWeight(nonFaceBlemish)), 0);
@@ -236,16 +252,16 @@ policy = masks.buildStageProtectionMasks(fixture.masks, evidence);
 verifyEqual(testCase, policy.hard, fixture.hardIdentity, 'AbsTol', 0);
 corePoint = fixture.corePoint;
 verifyEqual(testCase, ...
-    policy.smoothingFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+    policy.target.smoothingFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
-    policy.smoothingMid(corePoint(1), corePoint(2)), .90, 'AbsTol', 1e-12);
+    policy.target.smoothingMid(corePoint(1), corePoint(2)), .90, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
-    policy.repairFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+    policy.target.repairFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
 % repairMid 的 .90 是 max 下界；identity core 内 policyTexture 已被抬到
 % .95，(1 - policyTexture) 项使实际值升到 .95（与 T20 eye/lip detail
 % band 的同一约定一致：repairMid = 1 - gate*(1-texture) 先于 max 下界）。
 verifyEqual(testCase, ...
-    policy.repairMid(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+    policy.target.repairMid(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
     policy.baseLuminance(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
@@ -257,16 +273,16 @@ verifyEqual(testCase, policy.tone(corePoint(1), corePoint(2)), ...
 % nose structure band：只抬升 Mid 家族与 baseLuminance。
 ridgePoint = fixture.ridgePoint;
 verifyEqual(testCase, ...
-    policy.smoothingMid(ridgePoint(1), ridgePoint(2)), .85, 'AbsTol', 1e-12);
+    policy.target.smoothingMid(ridgePoint(1), ridgePoint(2)), .85, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
     policy.baseLuminance(ridgePoint(1), ridgePoint(2)), .80, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
-    policy.smoothingFine(ridgePoint(1), ridgePoint(2)), ...
-    legacy.smoothingFine(ridgePoint(1), ridgePoint(2)), 'AbsTol', 0, ...
+    policy.target.smoothingFine(ridgePoint(1), ridgePoint(2)), ...
+    legacy.target.smoothingFine(ridgePoint(1), ridgePoint(2)), 'AbsTol', 0, ...
     '结构带不得进入 texture 通道（鼻梁 Fine 处理量保持 legacy）。');
 verifyEqual(testCase, ...
-    policy.repairFine(ridgePoint(1), ridgePoint(2)), ...
-    legacy.repairFine(ridgePoint(1), ridgePoint(2)), 'AbsTol', 0);
+    policy.target.repairFine(ridgePoint(1), ridgePoint(2)), ...
+    legacy.target.repairFine(ridgePoint(1), ridgePoint(2)), 'AbsTol', 0);
 verifyEqual(testCase, ...
     policy.whitening(ridgePoint(1), ridgePoint(2)), ...
     legacy.whitening(ridgePoint(1), ridgePoint(2)), 'AbsTol', 0, ...
@@ -274,12 +290,14 @@ verifyEqual(testCase, ...
 
 % 平坦鼻皮肤（evidence 低于下支撑点）：两带皆零，保持 processability。
 flatPoint = fixture.flatPoint;
-fieldNames = fieldnames(policy);
+flatPolicy = flattenProtection(policy);
+flatLegacy = flattenProtection(legacy);
+fieldNames = fieldnames(flatPolicy);
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
     verifyEqual(testCase, ...
-        policy.(fieldName)(flatPoint(1), flatPoint(2)), ...
-        legacy.(fieldName)(flatPoint(1), flatPoint(2)), 'AbsTol', 0, ...
+        flatPolicy.(fieldName)(flatPoint(1), flatPoint(2)), ...
+        flatLegacy.(fieldName)(flatPoint(1), flatPoint(2)), 'AbsTol', 0, ...
         '普通鼻皮肤零带，stage 字段必须逐位等于 legacy。');
 end
 
@@ -289,18 +307,20 @@ zeroEvidence = struct('nostril', zeros(fixture.imageSize), ...
 missingEvidence = struct('periocular', zeros(fixture.imageSize), ...
     'lip', zeros(fixture.imageSize));
 for variant = {zeroEvidence, missingEvidence}
-    zeroPolicy = masks.buildStageProtectionMasks(fixture.masks, variant{1});
+    zeroPolicy = flattenProtection(masks.buildStageProtectionMasks( ...
+        fixture.masks, variant{1}));
     for fieldIndex = 1:numel(fieldNames)
         fieldName = fieldNames{fieldIndex};
         verifyEqual(testCase, zeroPolicy.(fieldName), ...
-            legacy.(fieldName), 'AbsTol', 0);
+            flatLegacy.(fieldName), 'AbsTol', 0);
     end
 end
-singleArgPolicy = masks.buildStageProtectionMasks(fixture.masks);
+singleArgPolicy = flattenProtection(masks.buildStageProtectionMasks( ...
+    fixture.masks));
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
     verifyEqual(testCase, singleArgPolicy.(fieldName), ...
-        legacy.(fieldName), 'AbsTol', 0);
+        flatLegacy.(fieldName), 'AbsTol', 0);
 end
 
 % 带外（两带皆零的像素）逐位还原 legacy。
@@ -311,8 +331,8 @@ outside = nostrilBand == 0 & structureBand == 0;
 verifyTrue(testCase, nnz(outside) > 0, 'fixture 必须包含带外像素。');
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
-    verifyEqual(testCase, policy.(fieldName)(outside), ...
-        legacy.(fieldName)(outside), 'AbsTol', 0, ...
+    verifyEqual(testCase, flatPolicy.(fieldName)(outside), ...
+        flatLegacy.(fieldName)(outside), 'AbsTol', 0, ...
         'evidence 带外的 stage 字段必须逐位等于 legacy。');
 end
 
@@ -446,22 +466,24 @@ verifyLessThanOrEqual(testCase, mean(alphaPolicy(softBand)), ...
     .90 * mean(alphaLegacy(softBand)), ...
     'nostril 软带内 Fine 处理量必须明显低于 legacy（暗边界保留）。');
 verifyGreaterThanOrEqual(testCase, ...
-    min(protection.smoothingMid(softBand) - ...
-    legacyProtection.smoothingMid(softBand)), 0);
+    min(protection.target.smoothingMid(softBand) - ...
+    legacyProtection.target.smoothingMid(softBand)), 0);
 verifyGreaterThanOrEqual(testCase, ...
-    min(protection.repairMid(softBand) - ...
-    legacyProtection.repairMid(softBand)), 0);
-verifyTrue(testCase, any(protection.repairFine(softBand) > ...
-    legacyProtection.repairFine(softBand)), ...
+    min(protection.target.repairMid(softBand) - ...
+    legacyProtection.target.repairMid(softBand)), 0);
+verifyTrue(testCase, any(protection.target.repairFine(softBand) > ...
+    legacyProtection.target.repairFine(softBand)), ...
     'nostril 软带内 repairFine 快照必须严格抬升。');
 
-% 带外（两带皆零）：8 个 stage 字段逐位等于 legacy。
+% 带外（两带皆零）：全部 stage 叶子字段逐位等于 legacy。
 outside = nostrilBand == 0 & structureBand == 0;
-fieldNames = fieldnames(protection);
+flatProtection = flattenProtection(protection);
+flatLegacyProtection = flattenProtection(legacyProtection);
+fieldNames = fieldnames(flatProtection);
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
-    verifyEqual(testCase, protection.(fieldName)(outside), ...
-        legacyProtection.(fieldName)(outside), 'AbsTol', 0, ...
+    verifyEqual(testCase, flatProtection.(fieldName)(outside), ...
+        flatLegacyProtection.(fieldName)(outside), 'AbsTol', 0, ...
         'evidence 带外的 stage 字段必须逐位等于 legacy。');
 end
 
@@ -479,25 +501,30 @@ verifyEqual(testCase, cachedOut, policyOut, ...
     'cached 路径必须与 uncached 逐位一致。');
 end
 
-function testNoseMidGateIsContinuousAndFineUsesCommonEvidence(testCase)
+function testNoseMidGateIsContinuousAndUsesCommonEvidence(testCase)
+% T31：Mid 鼻部退让门只来自 stage contract 的 target.repairMid
+%   （= protection.noseMidProtection，policy 层发布 .50·nose），算法侧
+%   不再读取 noseMask。鼻门是连续量：连续抬升保护 → mediumWeight 连续
+%   下降（比例恰为 1 - 保护），Fine 权重与 blemish 证据完全不受影响
+%   （Blemish ≠ Should Repair：证据与 target 门独立）。
 [frequency, beautyMasks, noseRegion] = standaloneRepairFixture();
 blemishMap = .10 * ones(size(noseRegion));
 blemishMap(noseRegion) = .95;
+protection = masks.buildStageProtectionMasks(beautyMasks);
 
-ordinaryMasks = beautyMasks;
-ordinaryMasks.noseMask = zeros(size(noseRegion));
-[~, ordinary] = beauty.repairSkinBlemishes( ...
-    frequency, ordinaryMasks, blemishMap, 100);
+zeroProtection = protection;
+zeroProtection.noseMidProtection = zeros(size(noseRegion));
+halfProtection = protection;
+halfProtection.noseMidProtection = .25 * double(noseRegion);
+fullProtection = protection;
+fullProtection.noseMidProtection = .50 * double(noseRegion);
 
-halfMasks = beautyMasks;
-halfMasks.noseMask = .50 * double(noseRegion);
-[~, halfNose] = beauty.repairSkinBlemishes( ...
-    frequency, halfMasks, blemishMap, 100);
-
-fullMasks = beautyMasks;
-fullMasks.noseMask = double(noseRegion);
-[~, fullNose] = beauty.repairSkinBlemishes( ...
-    frequency, fullMasks, blemishMap, 100);
+[~, ordinary] = beauty.repairSkinBlemishes(frequency, beautyMasks, ...
+    blemishMap, 100, beauty.repairStageContract(zeroProtection, blemishMap));
+[~, halfNose] = beauty.repairSkinBlemishes(frequency, beautyMasks, ...
+    blemishMap, 100, beauty.repairStageContract(halfProtection, blemishMap));
+[~, fullNose] = beauty.repairSkinBlemishes(frequency, beautyMasks, ...
+    blemishMap, 100, beauty.repairStageContract(fullProtection, blemishMap));
 
 verifyEqual(testCase, halfNose.fineWeight, ordinary.fineWeight, ...
     'AbsTol', 1e-12);
@@ -506,9 +533,9 @@ verifyEqual(testCase, fullNose.fineWeight, ordinary.fineWeight, ...
 verifyEqual(testCase, fullNose.repairEvidence, ordinary.repairEvidence, ...
     'AbsTol', 1e-12);
 verifyGreaterThan(testCase, max(ordinary.highEndConfidence(noseRegion)), 0);
-verifyEqual(testCase, unique(halfNose.noseMidGate(noseRegion)), .75, ...
+verifyEqual(testCase, unique(halfNose.targetMidGate(noseRegion)), .75, ...
     'AbsTol', 1e-12);
-verifyEqual(testCase, unique(fullNose.noseMidGate(noseRegion)), .50, ...
+verifyEqual(testCase, unique(fullNose.targetMidGate(noseRegion)), .50, ...
     'AbsTol', 1e-12);
 verifyEqual(testCase, halfNose.mediumWeight(noseRegion), ...
     .75 * ordinary.mediumWeight(noseRegion), 'AbsTol', 1e-12);
@@ -772,8 +799,12 @@ beautyMasks = struct('skinMask', ones(imageSize), ...
     'strengthMap', ones(imageSize), ...
     'textureProtectionMask', zeros(imageSize), ...
     'structureProtectionMask', zeros(imageSize), ...
+    'chromaProtectionMask', zeros(imageSize), ...
+    'whiteningProtectionMask', zeros(imageSize), ...
     'hardProtectionMask', zeros(imageSize), ...
     'noseMask', double(noseRegion), ...
+    'faceSkinMask', ones(imageSize), ...
+    'faceScale', 100, ...
     'nonFaceStrengthMap', zeros(imageSize));
 end
 
@@ -787,5 +818,28 @@ if lower == upper
 else
     weight = position - lower;
     value = (1 - weight) * values(lower) + weight * values(upper);
+end
+end
+
+function flat = flattenProtection(protection)
+%FLATTENPROTECTION 把 T31 双门控嵌套展平为 <group>_<name> 叶子字段。
+%   protection.target.* / protection.support.* 为标量结构，无法直接按
+%   像素索引；逐字段 bit-exact 比较循环需要叶子级字段名，故展平为
+%   target_smoothingFine / support_repairMid 等扁平名（顶层扁平字段
+%   原样保留）。仅测试辅助，不改变任何生产语义。
+flat = struct();
+names = fieldnames(protection);
+for index = 1:numel(names)
+    name = names{index};
+    value = protection.(name);
+    if isstruct(value) && isscalar(value)
+        innerNames = fieldnames(value);
+        for innerIndex = 1:numel(innerNames)
+            flat.([name '_' innerNames{innerIndex}]) = ...
+                value.(innerNames{innerIndex});
+        end
+    else
+        flat.(name) = value;
+    end
 end
 end

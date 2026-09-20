@@ -104,7 +104,11 @@ function testEarPolicyBandsFollowEvidenceContract(testCase)
 [fixture, evidence] = earPolicyUnitFixture();
 legacy = masks.buildStageProtectionMasks(fixture.masks);
 policy = masks.buildStageProtectionMasks(fixture.masks, evidence);
-fieldNames = fieldnames(policy);
+% T31 起 protection 含嵌套 target/support（标量结构，不可按像素索引），
+% 逐字段 bit-exact 循环统一在展平后的叶子字段名上进行。
+flatPolicy = flattenProtection(policy);
+flatLegacy = flattenProtection(legacy);
+fieldNames = fieldnames(flatPolicy);
 
 % identity：hard 原样拷贝，严格二值、nnz 不变。
 verifyEqual(testCase, policy.hard, fixture.hardIdentity, 'AbsTol', 0);
@@ -116,15 +120,15 @@ verifyEqual(testCase, nnz(policy.hard), nnz(fixture.hardIdentity), ...
 % ear structure band 核心档位。
 corePoint = fixture.corePoint;
 verifyEqual(testCase, ...
-    policy.smoothingFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+    policy.target.smoothingFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
-    policy.smoothingMid(corePoint(1), corePoint(2)), .90, 'AbsTol', 1e-12);
+    policy.target.smoothingMid(corePoint(1), corePoint(2)), .90, 'AbsTol', 1e-12);
 verifyEqual(testCase, ...
-    policy.repairFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+    policy.target.repairFine(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
 % repairMid 的 .90 是 max 下界；带内 policyTexture 已被抬到 .95，
 % (1 - policyTexture) 项使实际值升到 .95（与 T20/T21 同一约定）。
 verifyEqual(testCase, ...
-    policy.repairMid(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
+    policy.target.repairMid(corePoint(1), corePoint(2)), .95, 'AbsTol', 1e-12);
 % baseLuminance：耳结构带给出 >= .80 的亮度结构保护下界；带内
 % policyTexture 已被抬到 .95，(1 - max(texture,chroma)) 项使实际值升到
 % .95（.80 是 max 下界，与 T21 鼻结构带同一写法）。
@@ -145,8 +149,8 @@ flatPoint = fixture.flatPoint;
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
     verifyEqual(testCase, ...
-        policy.(fieldName)(flatPoint(1), flatPoint(2)), ...
-        legacy.(fieldName)(flatPoint(1), flatPoint(2)), 'AbsTol', 0, ...
+        flatPolicy.(fieldName)(flatPoint(1), flatPoint(2)), ...
+        flatLegacy.(fieldName)(flatPoint(1), flatPoint(2)), 'AbsTol', 0, ...
         '平坦耳皮肤零带，stage 字段必须逐位等于 legacy。');
 end
 
@@ -155,18 +159,20 @@ zeroEvidence = struct('earStructure', zeros(fixture.imageSize));
 missingEvidence = struct('periocular', zeros(fixture.imageSize), ...
     'nostril', zeros(fixture.imageSize));
 for variant = {zeroEvidence, missingEvidence, struct()}
-    zeroPolicy = masks.buildStageProtectionMasks(fixture.masks, variant{1});
+    zeroPolicy = flattenProtection( ...
+        masks.buildStageProtectionMasks(fixture.masks, variant{1}));
     for fieldIndex = 1:numel(fieldNames)
         fieldName = fieldNames{fieldIndex};
         verifyEqual(testCase, zeroPolicy.(fieldName), ...
-            legacy.(fieldName), 'AbsTol', 0);
+            flatLegacy.(fieldName), 'AbsTol', 0);
     end
 end
-singleArgPolicy = masks.buildStageProtectionMasks(fixture.masks);
+singleArgPolicy = flattenProtection( ...
+    masks.buildStageProtectionMasks(fixture.masks));
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
     verifyEqual(testCase, singleArgPolicy.(fieldName), ...
-        legacy.(fieldName), 'AbsTol', 0);
+        flatLegacy.(fieldName), 'AbsTol', 0);
 end
 
 % 带外（band 为零的像素）逐位还原 legacy。
@@ -175,16 +181,16 @@ outside = band == 0;
 verifyTrue(testCase, nnz(outside) > 0, 'fixture 必须包含带外像素。');
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
-    verifyEqual(testCase, policy.(fieldName)(outside), ...
-        legacy.(fieldName)(outside), 'AbsTol', 0, ...
+    verifyEqual(testCase, flatPolicy.(fieldName)(outside), ...
+        flatLegacy.(fieldName)(outside), 'AbsTol', 0, ...
         'evidence 带外的 stage 字段必须逐位等于 legacy。');
 end
 
 % 带内单调性：结构保护只增不减，且 tone/whitening 全图逐位不变。
 verifyGreaterThanOrEqual(testCase, ...
-    min(policy.smoothingMid(:) - legacy.smoothingMid(:)), 0);
+    min(policy.target.smoothingMid(:) - legacy.target.smoothingMid(:)), 0);
 verifyGreaterThanOrEqual(testCase, ...
-    min(policy.smoothingFine(:) - legacy.smoothingFine(:)), 0);
+    min(policy.target.smoothingFine(:) - legacy.target.smoothingFine(:)), 0);
 verifyGreaterThanOrEqual(testCase, ...
     min(policy.baseLuminance(:) - legacy.baseLuminance(:)), 0);
 verifyEqual(testCase, policy.tone, legacy.tone, 'AbsTol', 0, ...
@@ -266,11 +272,13 @@ verifyEqual(testCase, nnz(band > .5 & earData.face & ear < .10), 0, ...
 
 % 带外零泄漏：T22 增量不得出现在 band == 0 处（stage 字段逐位一致）。
 outside = band == 0;
-fieldNames = fieldnames(protection);
+flatProtection = flattenProtection(protection);
+flatEarOnly = flattenProtection(earOnlyProtection);
+fieldNames = fieldnames(flatProtection);
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
-    verifyEqual(testCase, protection.(fieldName)(outside), ...
-        earOnlyProtection.(fieldName)(outside), 'AbsTol', 0, ...
+    verifyEqual(testCase, flatProtection.(fieldName)(outside), ...
+        flatEarOnly.(fieldName)(outside), 'AbsTol', 0, ...
         'evidence 带外的 stage 字段必须逐位等于无 T22 基线。');
 end
 diffMap = mean(abs(double(policyOut) - double(earOnlyOut)), 3);
@@ -319,12 +327,12 @@ verifyEqual(testCase, ...
 % 结构保护：耳结构带内 Fine 严格抬升，Mid/baseLuminance 只增不减。
 structureBand = band > .5 & ~hardMask;
 verifyGreaterThan(testCase, nnz(structureBand), 0);
-verifyTrue(testCase, any(protection.smoothingFine(structureBand) > ...
-    earOnlyProtection.smoothingFine(structureBand)), ...
+verifyTrue(testCase, any(protection.target.smoothingFine(structureBand) > ...
+    earOnlyProtection.target.smoothingFine(structureBand)), ...
     'ear 结构带内 smoothingFine 必须严格抬升（耳轮/沟槽细节保留）。');
 verifyGreaterThanOrEqual(testCase, ...
-    min(protection.smoothingMid(structureBand) - ...
-    earOnlyProtection.smoothingMid(structureBand)), 0);
+    min(protection.target.smoothingMid(structureBand) - ...
+    earOnlyProtection.target.smoothingMid(structureBand)), 0);
 verifyGreaterThanOrEqual(testCase, ...
     min(protection.baseLuminance(structureBand) - ...
     earOnlyProtection.baseLuminance(structureBand)), 0);
@@ -449,4 +457,27 @@ function value = smoothStepValue(inputValue, low, high)
 %SMOOTHSTEPVALUE 复现生产 smoothstep 曲线（t^2*(3-2t)）。
 t = min(max((double(inputValue) - low) / max(high - low, eps), 0), 1);
 value = t .^ 2 .* (3 - 2 * t);
+end
+
+function flat = flattenProtection(protection)
+%FLATTENPROTECTION 把 T31 双门控嵌套展平为 <group>_<name> 叶子字段。
+%   protection.target.* / protection.support.* 为标量结构，无法直接按
+%   像素索引；逐字段 bit-exact 比较循环需要叶子级字段名，故展平为
+%   target_smoothingFine / support_repairMid 等扁平名（顶层扁平字段
+%   原样保留）。仅测试辅助，不改变任何生产语义。
+flat = struct();
+names = fieldnames(protection);
+for index = 1:numel(names)
+    name = names{index};
+    value = protection.(name);
+    if isstruct(value) && isscalar(value)
+        innerNames = fieldnames(value);
+        for innerIndex = 1:numel(innerNames)
+            flat.([name '_' innerNames{innerIndex}]) = ...
+                value.(innerNames{innerIndex});
+        end
+    else
+        flat.(name) = value;
+    end
+end
 end

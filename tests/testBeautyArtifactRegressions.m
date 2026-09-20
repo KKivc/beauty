@@ -272,13 +272,13 @@ params = struct('smoothingStrength', 80, 'whiteningStrength', 30);
     params, faceBox, context);
 
 % Fine alphaMap 与 stage contract 重算逐像素 bit-exact：
-% gate = 1 - max(protection.smoothingFine, protection.hard)。
+% gate = 1 - max(protection.target.smoothingFine, protection.hard)。
 profile = beautySmoothingProfile(params.smoothingStrength);
 effectStrength = profile.alphaCurve .* beautyMasks.strengthMap;
 nonFacePixels = beautyMasks.nonFaceStrengthMap > .01;
 effectStrength(nonFacePixels) = profile.outsideFaceStrength .* ...
     beautyMasks.nonFaceStrengthMap(nonFacePixels);
-fineGate = 1 - max(protection.smoothingFine, protection.hard);
+fineGate = 1 - max(protection.target.smoothingFine, protection.hard);
 verifyEqual(testCase, uncachedDiagnostics.smoothing.alphaMap, ...
     effectStrength .* fineGate, 'AbsTol', 0);
 hard = beautyMasks.hardProtectionMask >= .999;
@@ -403,6 +403,121 @@ for index = 1:size(strengthCombos, 1)
     verifyEqual(testCase, repairedStage.fine, ...
         uncachedDiagnostics.repairResult.fine, 'AbsTol', 0);
 end
+end
+
+function testRepairTargetGateAndBlemishEvidenceAreIndependentFactors(testCase)
+% T31 / 上位契约 3.2「Blemish ≠ Should Repair」双因子解耦单测：
+%   1) 固定 blemishEvidence，只抬高 target 保护门 → 修复强度按 (1-target)
+%      线性下降，且 blemish 证据链逐位不变（保护门不得反向影响证据）；
+%   2) 固定 target 门，只降低 blemishEvidence → 修复强度随之下降
+%      （证据因子独立生效），且 target 门逐位不变。
+% 两因子互相独立：证据不单独决定"该不该修"，保护门也不改变"像不像"。
+[frequency, beautyMasks, region] = repairDecouplingFixture();
+blemishMap = .10 * ones(size(region));
+blemishMap(region) = .95;
+protection = masks.buildStageProtectionMasks(beautyMasks);
+% 强度取 50：normalRepairCurve < 1 且 highEndRepairCurve = 0，修复权重
+% 不饱和（fineWeight/mediumWeight 均 < 1），(1 - target) 的线性缩放可观测。
+repairStrength = 50;
+
+baseContract = beauty.repairStageContract(protection, blemishMap);
+[~, baseDetails] = beauty.repairSkinBlemishes(frequency, beautyMasks, ...
+    blemishMap, repairStrength, baseContract);
+verifyGreaterThan(testCase, max(baseDetails.fineWeight(region)), 0);
+verifyGreaterThan(testCase, max(baseDetails.mediumWeight(region)), 0);
+verifyLessThan(testCase, max(baseDetails.fineWeight(region)), 1);
+verifyLessThan(testCase, max(baseDetails.mediumWeight(region)), 1);
+
+% --- 因子 1a：只改 target 纹理退让门（blemishEvidence 与 support 门不变）---
+textureProtected = baseContract;
+textureProtected.target.repairFine = .40 * ones(size(region));
+[~, textureDetails] = beauty.repairSkinBlemishes(frequency, beautyMasks, ...
+    blemishMap, repairStrength, textureProtected);
+% 证据链与参考池逐位不变（target 门不得扰动 support 门/证据）。
+verifyEqual(testCase, textureDetails.repairEvidence, ...
+    baseDetails.repairEvidence, 'AbsTol', 0);
+verifyEqual(testCase, textureDetails.highConfidence, ...
+    baseDetails.highConfidence, 'AbsTol', 0);
+verifyEqual(testCase, textureDetails.referenceReliability, ...
+    baseDetails.referenceReliability, 'AbsTol', 0);
+verifyEqual(testCase, textureDetails.targetMidGate, ...
+    baseDetails.targetMidGate, 'AbsTol', 0);
+% 强度按 (1 - target.repairFine) = .60 线性下降。
+verifyEqual(testCase, max(abs(textureDetails.fineWeight(region) - ...
+    .60 * baseDetails.fineWeight(region))), 0, 'AbsTol', 1e-12);
+verifyEqual(testCase, max(abs(textureDetails.mediumWeight(region) - ...
+    .60 * baseDetails.mediumWeight(region))), 0, 'AbsTol', 1e-12);
+verifyLessThan(testCase, max(textureDetails.fineWeight(region)), ...
+    max(baseDetails.fineWeight(region)), ...
+    '只抬高 target 门必须降低修复强度。');
+
+% --- 因子 1b：只改 target 专属门（Mid 鼻部退让）→ 仅 Mid 权重下降 ---
+noseProtected = baseContract;
+noseProtected.target.repairMid = .40 * ones(size(region));
+[~, noseDetails] = beauty.repairSkinBlemishes(frequency, beautyMasks, ...
+    blemishMap, repairStrength, noseProtected);
+verifyEqual(testCase, noseDetails.fineWeight, baseDetails.fineWeight, ...
+    'AbsTol', 0);
+verifyEqual(testCase, noseDetails.referenceReliability, ...
+    baseDetails.referenceReliability, 'AbsTol', 0);
+verifyEqual(testCase, max(abs(noseDetails.mediumWeight(region) - ...
+    .60 * baseDetails.mediumWeight(region))), 0, 'AbsTol', 1e-12);
+
+% --- 因子 2：只改 blemishEvidence（target 门不变）---
+weakBlemish = .35 * blemishMap;
+[~, weakDetails] = beauty.repairSkinBlemishes(frequency, beautyMasks, ...
+    weakBlemish, repairStrength, baseContract);
+verifyEqual(testCase, weakDetails.targetFineGate, ...
+    baseDetails.targetFineGate, 'AbsTol', 0);
+verifyEqual(testCase, weakDetails.targetMidGate, ...
+    baseDetails.targetMidGate, 'AbsTol', 0);
+verifyLessThan(testCase, max(weakDetails.repairEvidence(region)), ...
+    max(baseDetails.repairEvidence(region)), ...
+    '只降低 blemishEvidence 必须降低证据强度。');
+verifyLessThan(testCase, max(weakDetails.fineWeight(region)), ...
+    max(baseDetails.fineWeight(region)), ...
+    '只降低 blemishEvidence 必须降低修复强度（证据因子独立生效）。');
+end
+
+function testRepairContractAssemblyForwardsStageProtectionGates(testCase)
+% T31：contract 组装是纯转发——每个输出门都能由 stageProtection 的规范
+%   门精确重建（不读取任何 legacy general mask）；扰动 stageProtection 的
+%   规范门会按位透传到 contract。
+[~, beautyMasks, region] = repairDecouplingFixture();
+blemishMap = .10 * ones(size(region));
+blemishMap(region) = .95;
+protection = masks.buildStageProtectionMasks(beautyMasks);
+contract = beauty.repairStageContract(protection, blemishMap);
+
+verifyEqual(testCase, contract.hard, protection.hard, 'AbsTol', 0);
+verifyEqual(testCase, contract.support.repairFine, ...
+    protection.support.repairFine, 'AbsTol', 0);
+verifyEqual(testCase, contract.target.repairFine, ...
+    protection.support.repairFine, 'AbsTol', 0);
+verifyEqual(testCase, contract.target.repairMid, ...
+    protection.noseMidProtection, 'AbsTol', 0);
+verifyEqual(testCase, contract.textureBandGate, ...
+    1 - protection.regionBandFine, 'AbsTol', 0);
+% 结构保护 = 1 - 生产 structureGate，由 support.repairMid 与运行期
+% blemish 证据按生产原式重建（min(1-a, 1-b) 的补码逐位还原）。
+structureProtection = protection.support.repairMid;
+strongStructure = smoothStep(structureProtection, .70, .90) .* ...
+    double(bwdist(protection.hard >= .999) <= 3);
+expectedGate = min(1 - structureProtection .* (1 - .90 * blemishMap), ...
+    1 - .65 * strongStructure);
+verifyEqual(testCase, 1 - contract.support.repairMid, expectedGate, ...
+    'AbsTol', 0);
+% 纯转发：改动 stageProtection 规范门，contract 同步变化。
+changedProtection = protection;
+changedProtection.support.repairFine = .30 * ones(size(region));
+changedProtection.noseMidProtection = .20 * ones(size(region));
+changedContract = beauty.repairStageContract(changedProtection, blemishMap);
+verifyEqual(testCase, changedContract.support.repairFine, ...
+    .30 * ones(size(region)), 'AbsTol', 0);
+verifyEqual(testCase, changedContract.target.repairFine, ...
+    .30 * ones(size(region)), 'AbsTol', 0);
+verifyEqual(testCase, changedContract.target.repairMid, ...
+    .20 * ones(size(region)), 'AbsTol', 0);
 end
 
 function testComposeStageContractWiringIsBitExactAndCacheStable(testCase)
@@ -540,11 +655,13 @@ verifyEqual(testCase, ...
     nnz((alphaPolicy ~= alphaLegacy) & feather == 0), 0, ...
     'Fine alphaMap 的变化必须局限在 nostril 羽化 footprint 内。');
 outside = nostrilBand == 0 & structureBand == 0;
-fieldNames = fieldnames(protection);
+flatProtection = flattenProtection(protection);
+flatLegacy = flattenProtection(legacyProtection);
+fieldNames = fieldnames(flatProtection);
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
-    verifyEqual(testCase, protection.(fieldName)(outside), ...
-        legacyProtection.(fieldName)(outside), 'AbsTol', 0, ...
+    verifyEqual(testCase, flatProtection.(fieldName)(outside), ...
+        flatLegacy.(fieldName)(outside), 'AbsTol', 0, ...
         'evidence 带外的 stage 字段必须逐位等于 legacy。');
 end
 verifyEqual(testCase, protection.tone, legacyProtection.tone, ...
@@ -685,11 +802,13 @@ verifyEqual(testCase, nnz(softBand & earData.face & ear < .10), 0, ...
 % 缝合：带外 stage 字段逐位还原；tone 全图 bit-equal；输出带外
 % 不超过 1 个灰度级（全局参考统计的舍入响应）。
 outside = band == 0;
-fieldNames = fieldnames(protection);
+flatProtection = flattenProtection(protection);
+flatEarOnly = flattenProtection(earOnlyProtection);
+fieldNames = fieldnames(flatProtection);
 for fieldIndex = 1:numel(fieldNames)
     fieldName = fieldNames{fieldIndex};
-    verifyEqual(testCase, protection.(fieldName)(outside), ...
-        earOnlyProtection.(fieldName)(outside), 'AbsTol', 0, ...
+    verifyEqual(testCase, flatProtection.(fieldName)(outside), ...
+        flatEarOnly.(fieldName)(outside), 'AbsTol', 0, ...
         'evidence 带外的 stage 字段必须逐位等于无 T22 基线。');
 end
 verifyEqual(testCase, protection.tone, earOnlyProtection.tone, ...
@@ -709,8 +828,8 @@ verifyEqual(testCase, midPolicy(cheek), midEarOnly(cheek), 'AbsTol', 0, ...
 
 % 结构损失：带内 Fine/Mid 处理量下降，Mid 尺度（耳轮脊线/耳甲腔沟槽的
 % 实际尺度，mediumSigma = .045*faceScale）细节能量不低于基线。
-verifyTrue(testCase, any(protection.smoothingFine(softBand) > ...
-    earOnlyProtection.smoothingFine(softBand)), ...
+verifyTrue(testCase, any(protection.target.smoothingFine(softBand) > ...
+    earOnlyProtection.target.smoothingFine(softBand)), ...
     'ear 结构带内 smoothingFine 必须严格抬升。');
 verifyLessThan(testCase, mean(alphaPolicy(softBand)), ...
     mean(alphaEarOnly(softBand)), ...
@@ -1038,26 +1157,65 @@ context = buildBeautyContextFromParsing(sourceImage, faceBox, parsing);
 end
 
 function contract = makeRegressionRepairContract(beautyMasks, ...
-    protection, blemishMap)
-%MAKEREGRESSIONREPAIRCONTRACT 复现生产端
-%   makeRepairStageContract（T14/T15/T30）的未折叠字段公式。T30 起
-%   textureGate 保持"未带"语义（全局参考采样），分级保护经
-%   textureBandGate（1 - protection.regionBandFine）单独发布，只乘逐像素
-%   权重。
-hard = protection.hard;
-hardFeatureBand = bwdist(hard >= .999) <= 3;
-strongStructure = smoothStep(beautyMasks.structureProtectionMask, ...
-    .70, .90) .* double(hardFeatureBand);
-contract = struct( ...
-    'repairFine', protection.repairFine, ...
-    'repairMid', protection.repairMid, ...
-    'hard', hard, ...
-    'blemishRelaxedGate', 1 - beautyMasks.structureProtectionMask .* ...
-    (1 - .90 * blemishMap), ...
-    'strongStructureCap', 1 - .65 * strongStructure, ...
-    'textureGate', 1 - beautyMasks.textureProtectionMask, ...
-    'textureBandGate', 1 - protection.regionBandFine, ...
-    'noseMidGate', 1 - .50 * beautyMasks.noseMask);
+    protection, blemishMap) %#ok<INUSD>
+%MAKEREGRESSIONREPAIRCONTRACT 调用生产端唯一组装点
+%   beauty.repairStageContract（T14/T15/T30/T31），保证测试与生产同源：
+%   组装只消费 stage protection 的规范门（target.*/support.*/hard/
+%   noseMidProtection/regionBandFine）与 runtime blemish 证据。
+contract = beauty.repairStageContract(protection, blemishMap);
+end
+
+function [frequency, beautyMasks, region] = repairDecouplingFixture
+%REPAIRDECOUPLINGFIXTURE T31 双因子解耦单测夹具：120x160 皮肤，
+%   texture/structure/chroma/whitening/hard/nose 保护全零（保护门全部
+%   可辨识地由测试注入），单个紧凑高置信瑕疵区域（5x5）。背景 blemish
+%   取 .10 保证全局证据门打开、局部密度不触发 sparseGate 抑制。
+imageSize = [120, 160];
+region = false(imageSize);
+region(48:52, 70:74) = true;
+[xGrid, yGrid] = meshgrid(1:imageSize(2), 1:imageSize(1));
+spot = exp(-((xGrid - 72) / 2.0) .^ 2 - ((yGrid - 50) / 2.0) .^ 2);
+base = .56 + .04 * exp(-((xGrid - 80) / 18) .^ 2);
+mid = .045 * spot;
+fine = .065 * spot;
+frequency = struct('base', base, 'mid', mid, 'fine', fine, ...
+    'sourceLuminance', base + mid + fine, ...
+    'imageSize', [imageSize, 3], 'faceScale', 100, ...
+    'faceBox', [31, 11, 100, 100]);
+beautyMasks = struct('skinMask', ones(imageSize), ...
+    'strengthMap', ones(imageSize), ...
+    'textureProtectionMask', zeros(imageSize), ...
+    'structureProtectionMask', zeros(imageSize), ...
+    'chromaProtectionMask', zeros(imageSize), ...
+    'whiteningProtectionMask', zeros(imageSize), ...
+    'hardProtectionMask', zeros(imageSize), ...
+    'noseMask', zeros(imageSize), ...
+    'faceSkinMask', ones(imageSize), ...
+    'faceScale', 100, ...
+    'nonFaceStrengthMap', zeros(imageSize));
+end
+
+function flat = flattenProtection(protection)
+%FLATTENPROTECTION 把 T31 双门控嵌套展平为 <group>_<name> 叶子字段。
+%   protection.target.* / protection.support.* 为标量结构，无法直接按
+%   像素索引；逐字段 bit-exact 比较循环需要叶子级字段名，故展平为
+%   target_smoothingFine / support_repairMid 等扁平名（顶层扁平字段
+%   原样保留）。仅测试辅助，不改变任何生产语义。
+flat = struct();
+names = fieldnames(protection);
+for index = 1:numel(names)
+    name = names{index};
+    value = protection.(name);
+    if isstruct(value) && isscalar(value)
+        innerNames = fieldnames(value);
+        for innerIndex = 1:numel(innerNames)
+            flat.([name '_' innerNames{innerIndex}]) = ...
+                value.(innerNames{innerIndex});
+        end
+    else
+        flat.(name) = value;
+    end
+end
 end
 
 function evidence = zeroEvidenceFields(evidence, names, imageSize)

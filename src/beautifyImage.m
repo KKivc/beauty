@@ -143,12 +143,12 @@ end
 [smoothedFrequency, smoothingDiagnostics] = beauty.smoothSkinTexture( ...
     runtimeEvidence.frequency, beautyMasks, smoothingStrength, ...
     runtimeEvidence.blemishMap, stageProtection);
-% T14/T15：Fine/Mid repair 只消费生产端拼装的 stage contract（T07 零
-%   瑕疵快照 repairFine/repairMid/hard + runtime blemish 放宽后的未折
-%   叠门控字段），与 smoothing 的 stage contract 同源（同一份
-%   beautyMasks 产物推导）。
-repairContract = makeRepairStageContract(beautyMasks, ...
-    stageProtection, runtimeEvidence.blemishMap);
+% T31：Fine/Mid repair 的 contract 组装只转发 V4 stage protection 的规范门
+%   （target.*/support.*/hard + noseMidProtection + regionBandFine），
+%   不再读取 legacy general masks；组装点在 +beauty/repairStageContract，
+%   与 repairSkinBlemishes 的兼容入口共用同一份实现。
+repairContract = beauty.repairStageContract(stageProtection, ...
+    runtimeEvidence.blemishMap);
 [repairedFrequency, repairDiagnostics] = beauty.repairSkinBlemishes( ...
     smoothedFrequency, beautyMasks, runtimeEvidence.blemishMap, ...
     smoothingStrength, repairContract);
@@ -258,72 +258,6 @@ evidence = struct( ...
     'frequencyDiagnostics', frequencyDiagnostics, ...
     'blemishMap', blemishMap, ...
     'blemishDiagnostics', blemishDiagnostics);
-end
-
-function contract = makeRepairStageContract(beautyMasks, ...
-    stageProtection, blemishMap)
-%MAKEREPAIRSTAGECONTRACT 组装 Repair（Fine/Mid）的 stage contract
-%   （T14/T15）。
-%   快照与 hard 取自 T07 protection 分层（与生产门控共用同一份
-%   beautyMasks 产物推导）；未折叠门控字段按 repairSkinBlemishes 的
-%   生产原式从同一份产物 + 本次调用的 runtime blemishMap 计算，保证
-%   消费侧重建与 legacy 路径逐位等价：
-%     blemishRelaxedGate — 零瑕疵参考门 + runtime 放宽量
-%                          1 - structure·(1 - .90·blemish)
-%                          （structureGate0 = 1 - structure 恒成立）；
-%     strongStructureCap — 1 - .65·strongStructure（强结构固定下限）；
-%     textureGate        — 1 - texture（v3.2 线性纹理门）。T30 起该字段
-%                          保持"未带"语义：全局参考采样
-%                          （repairSkinBlemishes 的 referenceReliability
-%                          → imfilter 邻域参考）仍用它计算，band 不进入
-%                          该乘子；
-%     textureBandGate    — T30 纯 policy 带 1 - protection.regionBandFine，
-%                          **只作用于逐像素权重**（fineWeight/
-%                          mediumWeight/chromaWeight），不参与全局参考
-%                          采样；
-%     noseMidGate        — 1 - .50·nose（Mid 鼻部门；repair 侧无
-%                          alphaCurve，纯静态），T30 起再乘
-%                          (1 - protection.regionBandMid)。该门只作用于
-%                          逐像素 mediumWeight（不经 imfilter），故 band
-%                          可直接并入。
-%   T30 激活：textureBandGate 承载 T20/T21/T22 的 texture 通道追加保护
-%   （regionBandFine），noseMidGate 只承载 Mid 专属追加保护
-%   （regionBandMid = max(.30·transitionBand, .85·noseStructureBand)）。
-%   两条带刻意不重叠于同一语义：mediumWeight 同时乘 noseMidGate 与
-%   textureGate·textureBandGate，若把 detail/nostril/ear 项也放进
-%   regionBandMid 就会与 regionBandFine 重复计入（实测会把 detail 带的
-%   .95 档位抬到 .9975 保护，违反 T20 记录的"保留 >=5% 中频处理量"）。
-%   缺省/零带时 1 - band == 1，乘法为恒等，与 legacy 逐位相等。
-%   textureGate/textureBandGate 拆分的原因（T30 带外零泄漏）：生产链在
-%   逐像素权重之外，还把 textureGate 用作 referenceReliability 的邻域
-%   参考采样门（repairSkinBlemishes L202），随后经 imfilter（radius =
-%   min(20, max(3, round(.070*faceScale)))）把带内变化扩散到带外 ±radius
-%   像素。实测（T22 ear fixture）把 band 并入 textureGate 会让耳带外出现
-%   1px 的 2 灰度级泄漏，违反工单"带外零泄漏（逐位一致）"。拆出
-%   textureBandGate 后，带外（band==0 → gate==1）参考采样与逐像素权重
-%   都逐位还原 legacy。
-%   快照不参与输出算术的原因：生产链在结构门与纹理/鼻部门之间对权重做
-%   [0,1] 截断，折叠进门控积会在截断饱和区改变结果；repairFine/
-%   repairMid 的 1-x 补码往返亦有舍入，因此快照只作为零瑕疵参考由消费侧
-%   诊断与测试消费。runtime 耦合字段不进入 policy-time protection 分层
-%   （T07 边界），只在本次调用的 call site 组装，不写入 runtimeEvidence
-%   （后者只承载 producer 产物，见 makeRuntimeEvidence）；cached/uncached
-%   路径共用同一份 beautyMasks 产物，组装结果一致。
-hard = stageProtection.hard;
-hardFeatureBand = bwdist(hard >= .999) <= 3;
-strongStructure = smoothStep(beautyMasks.structureProtectionMask, ...
-    .70, .90) .* double(hardFeatureBand);
-contract = struct( ...
-    'repairFine', stageProtection.repairFine, ...
-    'repairMid', stageProtection.repairMid, ...
-    'hard', hard, ...
-    'blemishRelaxedGate', 1 - beautyMasks.structureProtectionMask .* ...
-    (1 - .90 * blemishMap), ...
-    'strongStructureCap', 1 - .65 * strongStructure, ...
-    'textureGate', 1 - beautyMasks.textureProtectionMask, ...
-    'textureBandGate', 1 - stageProtection.regionBandFine, ...
-    'noseMidGate', (1 - .50 * beautyMasks.noseMask) .* ...
-    (1 - stageProtection.regionBandMid));
 end
 
 function contract = makeBaseLuminanceStageContract(beautyMasks, ...

@@ -272,3 +272,86 @@ rich 0/100、rich 50/25、compact 100/15 与预览路径）。
   `testBeautyArtifactRegressions`、`testPortraitBeautyHelpers`、`testBaseLuminanceEqualization`、
   `testBeautyV3`、`testBeautyContextV3`、`testMaskSystemV4CompatibilityBaseline`；
   见 `.scratch/tmp/T30-target-tests5.log`）。
+
+### T31 Smoothing + Repair 执行契约重录记录（2026-09-20）
+
+T31（工单 `31-a-smoothing-repair-execution-contract`）是**纯架构重构**：把 Smoothing 与
+Repair 两个 stage 从"执行层自行读取 legacy general mask"改为"执行层只消费 policy 层发布的
+规范双门控"（上位契约第 1 节 Single Protection Authority）。算法数值路径无任何改动。
+
+**规范门结构发布**（`masks.buildStageProtectionMasks` 输出 `protection`）：
+
+| 字段 | 语义 |
+| --- | --- |
+| `hard` | 严格二值身份保护；独立字段，**不**参与 target/support 的 max 折叠 |
+| `target.smoothingFine` / `.smoothingMid` | 逐像素修改门（该像素能不能被改） |
+| `target.repairFine` / `.repairMid` | 同上（Repair stage） |
+| `support.smoothingFine` / `.smoothingMid` | 邻域参考样本池门（能不能当参考样本） |
+| `support.repairFine` / `.repairMid` | 同上（Repair stage） |
+| `noseMidProtection` / `baseLuminance` / `tone` / `whitening` | 过渡扁平字段（T32/T33 前由各 stage contract 组装点消费） |
+| `regionBandFine/Mid/Base/Tone/Whitening` | T30 纯 policy 带 |
+
+- **旧扁平折叠名已删除**：`smoothingFine` / `smoothingMid` / `repairFine` / `repairMid`
+  不再出现在 `protection` 顶层（同一语义只保留 `target.*` 一个规范字段）；`target`/`support`
+  各恰好 4 个字段。`fieldnames(protection)` 精确断言见 `testBeautyV3` / `testBeautyContextV3`。
+- `target.*` 零带值与 T07 折叠快照逐位相等；`support.*` 零带值与 **T30 之前 consumer 侧同名
+  基准门**逐位相等：`smoothingFine = max(max(texture,structure),hard)`、
+  `smoothingMid = min(4·structure,1)`、`repairFine = texture`、`repairMid = structure`。
+- 组装层只转发：`beautifyImage` 的 `makeRepairStageContract` 已删除，Repair contract 由唯一
+  组装点 `+beauty/repairStageContract.m` 生成（生产组装层与 `repairSkinBlemishes` 兼容入口共用），
+  只从 `stageProtection` + runtime `blemishMap` 组装，不再读 legacy mask。
+- `repairStageContract` 新增 `midBandGate`（= `1 - regionBandMid`）：Mid 逐像素门按生产原式
+  结合序重建为 `(1 - target.repairMid) .* midBandGate`（= legacy `noseMidGate`），
+  **逐位**还原 T30 的 `mediumWeight`。`textureBandGate` 语义不变（只乘逐像素权重，不进参考池）。
+- **Blemish ≠ Should Repair**（上位契约第 3.2 节）：`repairTargetWeight = blemishEvidence ×
+  processability × strength × (1 - target.repairFine/Mid)`；`repairSupportWeight =
+  validSkinReference × (1 - support.repairFine/Mid)`。blemish 证据只回答"像不像瑕疵"，
+  不单独决定修复强度；结构保护也不反向塞进 blemish 检测。双因子解耦单测
+  `testBeautyArtifactRegressions/testRepairTargetGateAndBlemishEvidenceAreIndependentFactors`
+  实测：仅扰动 `target.repairFine` → fine/medium 各 ×.60；仅扰动 `target.repairMid` → 只 medium
+  ×.60；仅扰动 blemish 证据 → 证据与强度变化而 target 门逐位不变。
+- **T30 之前 consumer 侧 `structureGate` 合并**：生产链里同一个
+  `structureGate = min(1 - structure·(1-.90·blemish), 1 - .65·strongStructure)` 既乘逐像素权重
+  （截断之前）又乘邻域参考池门；它依赖 runtime blemish 与 hard 特征带，无法在 policy 层预算，
+  故由组装层重建并按"同一语义一个规范字段"发布为 `support.repairMid`。发布取 `max(a,b)` 而非
+  `1 - structureGate`，利用舍入单调性 `min(1-a,1-b) === 1-max(a,b)` 保证消费侧
+  `1 - support.repairMid` 逐位还原生产 `structureGate`（`1-(1-x)` 补码往返不保证逐位）。
+
+**合成 oracle digest：全部 7 项保持 T30 值，无需重录**（`testFinalRgbMatchesRecordedBaselineDigests`
+与 `testPreviewAndOriginalSizePathsMatchRecordedBaselineDigests` 均按 T30 重录基线通过）。
+
+**真实图 77 链路验收实测**（`.scratch/tmp/T31-accept.log`，T30 源码同夹具对照
+`.scratch/tmp/T31_t30_real.mat`）：
+
+- compat / legacy 路径 digest == 冻结 oracle `ce17e323dc4208d973ccae4b4a2cc122b2fed75fe7500088197c5278806bdc4c`（逐位相等）。
+- 零带（显式全零 evidence）下 `protection` 全部字段（含嵌套 `target`/`support`）与最终输出
+  逐位还原 legacy；`support.*` 逐位等于上述 pre-T30 基准门；`bridge`（`buildStageProtectionMasks`
+  vs `Context.protection`）逐位一致。
+- hard identity：nnz policy=82266 legacy=82266（**不增**）、严格二值、hard 区 RGB 逐位回源、
+  `protection.hard` 逐位不变。
+- 全局参考统计逐位不变：`base.referenceWeight`/`referenceReliability`、
+  `repair.referenceReliability`/`referenceWeight`、smoothing `fineEnergy`/`blemishMean`/
+  `ordinarySkinMask` 全部相等（`target` 门不扰动参考统计）。
+- 带外泄漏：policy-vs-legacy 带外（223324px）变化 196px（0.088%），**max = 1.000 灰度级**
+  （`>1` 计数 0）；逐 consumer 诊断（`repair.fineWeight`/`mediumWeight`/`referenceReliability`、
+  `base.baseAfter`/`referenceWeight`、`tone.deltaCb`/`deltaCr`、`whitening.delta`、
+  `smoothing.alphaMap`）在带外**全部逐位相等**（outside changed = 0）。
+- 结构断言：零强度（0/0）= 源图逐位；cached/uncached 逐位；预览路径 / 原尺寸路径输出与 T30
+  **逐位相等**（`preview vs T30 bit-exact=1`、`original-size vs T30 bit-exact=1`），未加任何容差。
+- ROI 细节保留 vs T30：smoothing ROI（鼻结构带 ∪ 耳结构带，nnz=2719）Mid 尺度 `|hp|`
+  T31/T30 = **1.0000**、Fine 尺度 = **1.0000**；repair ROI（`blemishMap > .30`，nnz=19396）
+  Mid/Fine 尺度 T31/T30 均 = **1.0000**（输出逐位相等 ⇒ 比值恒为 1）。
+  对照 legacy（未带）：smoothing ROI T31/legacy = 1.5059、repair ROI T31/legacy = 1.0795。
+  ROI 裁剪图：`.scratch/tmp/t31_{ear,nose,eyelip}_{source,legacy,policy}.png`。
+
+**测试同步**（未放宽任何容差）：目标测试 111 项全部通过
+（`testBeautyArtifactRegressions`、`testNoseSmoothing`、`testPortraitBeautyHelpers`、
+`testBaseLuminanceEqualization`、`testBeautyV3`、`testBeautyContextV3`；
+见 `.scratch/tmp/T31-target-tests.log`）；兼容基线 7 项全部通过
+（见 `.scratch/tmp/T31-compat-baseline.log`）。`testEarProtectionPolicy` 的
+`flattenProtection` 适配与字段名重命名属同步改动（3 项全部通过）。
+执行层净化证据见 `.scratch/tmp/T31-grep-proof.txt`：`smoothSkinTexture.m` /
+`repairSkinBlemishes.m` 的**代码行**中 `ProtectionMask`（仅剩
+`masks.buildStageProtectionMasks` 兼容入口调用与 `fineProtectionMask` 诊断字段名）、
+`noseMask`、`semantic`、`evidence`、`textureProtection`、`structureProtection`、
+`chromaProtection`、`whiteningProtection`、`toneProtection`、`nose` **全部无匹配**。

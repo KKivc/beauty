@@ -96,8 +96,18 @@ end
 function layer = normalizeMaskLayer(layer, imageSize, layerName)
 fields = fieldnames(layer);
 for index = 1:numel(fields)
-    layer.(fields{index}) = validateMaskValue(layer.(fields{index}), ...
-        imageSize, sprintf('%s.%s', layerName, fields{index}));
+    name = fields{index};
+    value = layer.(name);
+    if isstruct(value) && isscalar(value)
+        % T31：protection 层的规范双门控 target.*/support.* 是标量嵌套
+        % 结构（各含 smoothingFine/smoothingMid/repairFine/repairMid），
+        % 递归校验其叶子 Mask；processability/evidence 层保持扁平。
+        layer.(name) = normalizeMaskLayer(value, imageSize, ...
+            sprintf('%s.%s', layerName, name));
+        continue;
+    end
+    layer.(name) = validateMaskValue(value, imageSize, ...
+        sprintf('%s.%s', layerName, name));
 end
 end
 

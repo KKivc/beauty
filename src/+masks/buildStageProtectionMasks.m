@@ -1,8 +1,18 @@
 function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %BUILDSTAGEPROTECTIONMASKS 从 v3.1 Beauty Masks 推导 V4 stage protection。
 %   T07 兼容阶段：把当前 texture/structure/chroma/whitening/hard/nose
-%   门控按各生产 stage 的真实组合方式映射为八个 stage 字段，只做行为
+%   门控按各生产 stage 的真实组合方式映射为 stage 字段，只做行为
 %   等价的 algebra 组合，不重新设计任何权重。
+%
+%   T31（执行契约）：发布规范双门控 target.*/support.*（上位契约第 2 节
+%   "目标保护 / 支撑保护双门控"）。target.* = 该像素能不能被修改，
+%   support.* = 该像素能不能作为邻域计算的参考样本；T07 的扁平折叠名
+%   smoothingFine/smoothingMid/repairFine/repairMid 迁入 target.* 并删除
+%   旧名（同一语义只留一个规范字段）。support.* 把 legacy consumer 原先
+%   自行组合/读取的参考池门与结构锚点上移到本层一次算好，零带取值与
+%   T30 之前 consumer 侧同名基准逐位一致。执行层算法自此只允许读
+%   target.*/support.*/hard（及 strength 层与运行期证据），不再读取
+%   semantic/evidence/*ProtectionMask/noseMask 去重新判定保护。
 %
 %   T30（region policy gate activation）：在本层额外发布五条纯 policy
 %   带 regionBandFine/regionBandMid/regionBandBase/regionBandTone/
@@ -168,22 +178,26 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %     两带（ear 结构带与 eye/lip/nose 带）可能重叠，stage 字段全部取
 %     max，重叠不双重计入。
 %
-%   消费侧现状（T30 已激活）：beautifyImage 的 stage contract 组装把
-%   本层发布的纯 policy 带 regionBand* 注入各 stage 的真实算术门控
+%   消费侧现状（T30 已激活，T31 收口）：beautifyImage 的 stage contract
+%   组装把本层发布的纯 policy 带 regionBand* 注入各 stage 的真实算术门控
 %   （gate := gate .* (1 - band)，见 beautifyImage 的
-%   makeRepairStageContract/makeBaseLuminanceStageContract/
-%   makeToneStageContract/makeWhiteningStageContract）：
-%     regionBandFine     → repair.textureGate（Fine/Mid/chroma 权重与
-%                          共享 referenceReliability 的纹理门）；
-%     regionBandMid      → repair.noseMidGate（仅 mediumWeight 的鼻部
-%                          Mid 门，不与 textureGate 重复计入）；
+%   makeBaseLuminanceStageContract/makeToneStageContract/
+%   makeWhiteningStageContract 与 +beauty/repairStageContract）：
+%     regionBandFine     → repair.textureBandGate（只乘 Fine/Mid/chroma
+%                          逐像素权重，不进 referenceReliability）；
+%     regionBandMid      → repair 的鼻部/过渡 Mid 追加保护（仅
+%                          mediumWeight，不与纹理门重复计入）；
 %     regionBandBase     → evenSkinLuminance 的 regionBandGate（只作用于
 %                          逐像素 supportMap，不进全局参考统计）；
 %     regionBandTone     → normalizeSkinTone.featureGate（主分支）；
 %     regionBandWhitening→ applySkinWhitening.featureGate。
-%   smoothingFine/smoothingMid/hard 继续被 smoothSkinTexture（T12/T13）
-%   与 compose hard restore（T19）直接消费。因此 T20/T21/T22 的分级保
-%   护不再只作用于快照，而是真正进入输出算术。
+%   T31 起 consumer 侧只允许读 target.*/support.*/hard（及 strength 层
+%   与运行期证据），不得再自行解释 general masks。smoothSkinTexture
+%   （T12/T13/T31）读 target.smoothingFine/smoothingMid +
+%   support.smoothingFine/smoothingMid + hard；repairSkinBlemishes
+%   （T14/T15/T31）读 producer 组装层按本层 support.* 重建的
+%   target/support 门；compose hard restore（T19）读 hard。
+%   因此 T20/T21/T22 的分级保护不再只作用于快照，而是真正进入输出算术。
 %   带外（band == 0）时 gate .* 1 与 legacy 逐位相等，compat 路径与零带
 %   路径输出逐位不变；耳部瑕疵修复（blemishMap 驱动）仍不在本层可控
 %   范围内。
@@ -198,47 +212,78 @@ function protection = buildStageProtectionMasks(beautyMasks, policyEvidence)
 %     * runtime 证据（blemishMap 及其耦合的 structure gate 放宽）不进
 %       入本层，字段记录其在零瑕疵参考点的快照（见 repairFine 说明）。
 %
-%   字段语义分两类（T30 起）：
-%     * 八个 stage 字段（smoothingFine…hard）—— "该 stage 施加的保护
-%       量"，取值 [0,1]，消费侧用 gate = 1 - protection（或
-%       1 - max(field, hard)）还原生产门控；T20/T21/T22 的分级数值已
-%       按 max 折入这些快照，继续作为零瑕疵参考/诊断。
+%   字段语义分三类（T31 定稿，T32/T33 沿用）：
+%     * protection.target.<stage> —— 目标保护门（上位契约第 2 节）：
+%       该像素"能不能被修改"，0 = 可自由修改，1 = 完全不可修改。T31
+%       发布 smoothingFine/smoothingMid/repairFine/repairMid 四个规范
+%       字段；T07 的扁平折叠名（smoothingFine/smoothingMid/repairFine/
+%       repairMid）在同一语义上被 target.* 取代并删除，不允许并存两个
+%       真值来源。baseLuminance/tone/whitening 仍为扁平字段，留待
+%       T32/T33 迁移。
+%     * protection.support.<stage> —— 支撑保护门：该像素"能不能作为
+%       邻域计算的参考样本"，0 = 完全可作为参考，1 = 不可作为参考。
+%       零带取值逐位等于 T30 之前各 stage 参考池/统计池的等价基准门：
+%         support.smoothingFine = max(texture, structure, hard)
+%           —— legacy `beautyMasks.protectionMask` 的等价合并（smoothing
+%              统计池门，T07/T12 起由 consumer 直接读取该合并产物）；
+%         support.smoothingMid  = min(4·structure, 1)
+%           —— legacy Mid 结构锚点门 fineStructureGate = max(0,1-4·structure)
+%              的补码（1 - support.smoothingMid 逐位还原该锚点）；
+%         support.repairFine    = texture
+%           —— repair 邻域参考池的纹理保护源（1 - support.repairFine 逐位
+%              等于生产 textureGate = 1 - texture）；
+%         support.repairMid     = structure
+%           —— repair 邻域参考池的结构保护源（供 producer 按生产原式
+%              重建 blemish 放宽结构门与强结构上限）。
+%     * protection.noseMidProtection —— T31 过渡扁平字段：repair Mid 的
+%       鼻部退让保护 .50·nose（= 1 - noseMidGate）。鼻部语义尚未纳入
+%       target/support 规范名（与 regionBand* 同为过渡扁平字段），
+%       consumer 用 noseMidGate = 1 - noseMidProtection 还原生产门控。
 %     * 五条 regionBand* 纯 policy 带 —— 追加保护量，消费侧用
 %       gate := gate .* (1 - band) 注入；它们才是分级保护的激活载体。
 %
-%   legacy 折叠式（T07 推导，Bands 全零时逐位还原）：
-%     smoothingFine
+%   legacy 折叠式（T07 推导，Bands 全零时逐位还原；T31 起发布为
+%   target.* 规范名）：
+%     target.smoothingFine
 %       beauty.smoothSkinTexture 的 Fine 门控（fineProtection =
 %       max(texture, hard) 与 fineStructureGate = max(0, 1-4*structure)，
 %       alphaMap = effectStrength .* (1 - fineProtection) .*
 %       fineStructureGate）：hard 走 max 合并，余下部分折叠为
-%       smoothingFine = 1 - (1 - texture) .* max(0, 1 - 4*structure)。
-%       重算 alphaMap = effectStrength .* (1 - max(smoothingFine, hard))
+%       target.smoothingFine = 1 - (1 - texture) .* max(0, 1 - 4*structure)。
+%       重算 alphaMap = effectStrength .* (1 - max(target.smoothingFine, hard))
 %       与生产逐像素等价。
-%     smoothingMid
+%     target.smoothingMid
 %       同函数 Mid 分支的额外门控（midStructureGate = fineStructureGate
 %       与 noseMidGate = 1 - .50*nose.*profile.alphaCurve）：nose 项取
 %       生产系数 .50 的满档快照（alphaCurve=1；alphaCurve 的强度插值
 %       属 effect-strength 侧，见上），折叠为
-%       smoothingMid = 1 - fineStructureGate .* (1 - .50*nose)。
-%       重算 midAlphaMap = alphaMap .* (1 - smoothingMid) 在
+%       target.smoothingMid = 1 - fineStructureGate .* (1 - .50*nose)。
+%       重算 midAlphaMap = alphaMap .* (1 - target.smoothingMid) 在
 %       alphaCurve=1 时与生产等价；alphaCurve<1 时生产 nose 门控为
-%       1 与该快照的凸组合（快照即最强保护）。
-%     repairFine
+%       1 与该快照的凸组合（快照即最强保护），强度无关结构锚点由
+%       support.smoothingMid 提供。
+%     target.repairFine
 %       beauty.repairSkinBlemishes 的 fineWeight 门控（structureGate =
 %       min(1 - structure.*(1-.90*blemish), 1 - .65*strongStructure)，
 %       strongStructure = smoothStep(structure,.70,.90) .* (hard 特征
 %       3px 带)；textureGate = 1 - texture 线性作用；allowed 中的
 %       (1-hard) 单独保留）：记录零瑕疵参考点 structureGate0 =
 %       min(1 - structure, 1 - .65*strongStructure)，折叠为
-%       repairFine = 1 - structureGate0 .* (1 - texture)。runtime
+%       target.repairFine = 1 - structureGate0 .* (1 - texture)。runtime
 %       blemish 证据只放宽 structureGate（≥ structureGate0），由
-%       consumer 与 runtime evidence 一起消费。
-%     repairMid
+%       producer 按 support.repairMid 重建后随 contract 消费。
+%     target.repairMid
 %       同函数 mediumWeight 门控：与 fine 共享 structureGate，另有
 %       noseMidGate = 1 - .50*nose（repair 侧无 alphaCurve，完全静态）
-%       与 textureGate：repairMid = 1 - structureGate0 .*
+%       与 textureGate：target.repairMid = 1 - structureGate0 .*
 %       (1 - .50*nose) .* (1 - texture)。零瑕疵参考点重算与生产等价。
+%     support.smoothingFine / support.smoothingMid / support.repairFine /
+%     support.repairMid
+%       T31 新增的支撑保护门（见文首"字段语义分三类"）：分别为
+%       max(texture, structure, hard)、min(4·structure, 1)、texture、
+%       structure。它们不是新的行为折叠，而是把 legacy consumer 原先
+%       自行组合/读取的参考池门与结构锚点上移到 policy 层一次算好，
+%       零带取值与 T30 之前 consumer 侧的同名基准逐位一致。
 %     baseLuminance
 %       beauty.evenSkinLuminance 的 supportMap 门控（structureGate =
 %       1 - structure；featureProtection = max(texture, chroma)；
@@ -439,15 +484,31 @@ regionBandBase = max(max(.95 * detailBand, .95 * nostrilDetailBand), ...
 regionBandTone = .90 * lipDetailBand;
 regionBandWhitening = max(.85 * detailBand, .85 * nostrilDetailBand);
 
+% T31 规范门发布（上位契约第 2 节）：
+%   target.* —— 该像素能不能被修改（逐像素修改门）；
+%   support.* —— 该像素能不能作为邻域计算的参考样本。
+% 两者必须分离：进入邻域/参考统计的门（support.*）与逐像素修改门
+% （target.*）解耦，使 referenceWeight/referenceReliability 不被 target
+% 门扰动。target.* 的零带值逐位等于 T07 折叠快照；support.* 的零带值
+% 逐位等于 T30 之前 consumer 侧同名基准门（见文首"字段语义分三类"）。
+% 同一语义只保留一个规范字段：T07 的扁平折叠名 smoothingFine/
+% smoothingMid/repairFine/repairMid 已被 target.* 取代并删除。
 protection = struct( ...
+    'hard', hard, ...
+    'target', struct( ...
     'smoothingFine', clamp01(smoothingFine), ...
     'smoothingMid', clamp01(smoothingMid), ...
     'repairFine', clamp01(repairFine), ...
-    'repairMid', clamp01(repairMid), ...
+    'repairMid', clamp01(repairMid)), ...
+    'support', struct( ...
+    'smoothingFine', clamp01(max(max(texture, structure), hard)), ...
+    'smoothingMid', clamp01(min(4 * structure, 1)), ...
+    'repairFine', clamp01(texture), ...
+    'repairMid', clamp01(structure)), ...
+    'noseMidProtection', clamp01(.50 * nose), ...
     'baseLuminance', clamp01(baseLuminance), ...
     'tone', clamp01(tone), ...
     'whitening', clamp01(whiteningField), ...
-    'hard', hard, ...
     'regionBandFine', clamp01(regionBandFine), ...
     'regionBandMid', clamp01(regionBandMid), ...
     'regionBandBase', clamp01(regionBandBase), ...

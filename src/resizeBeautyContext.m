@@ -13,7 +13,8 @@ function resizedContext = resizeBeautyContext(context, targetImageSize, ...
 %        按"最终 regions + 最终皮肤域"刷新分层；分层不得停留在合并
 %        前的旧值。源 Context 缺少 bodySkinMask 时 bodySkin 语义保持
 %        全零，不把颈部解析语义伪造成 body。
-%     3. soft protection（protection 层七个 stage 字段）与全部 compat
+%     3. soft protection（T31 起 protection 层的规范双门控
+%        target.*/support.* 与过渡扁平字段）与全部 compat
 %        派生字段 — 由 rebuildBeautyDerivedMasks 在目标分辨率重算，
 %        不缩放预览侧数值。
 %     4. protection.hard — 由目标图像的 hardProtectionMask 原样重建，

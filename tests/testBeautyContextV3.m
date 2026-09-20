@@ -747,15 +747,17 @@ end
 
 function testStageProtectionLayerIsValidAndBounded(testCase)
 %TESTSTAGEPROTECTIONLAYERISVALIDANDBOUNDED 生产链发布的 V4 protection
-%   层必须逐字段满足规范（八个 stage 字段 + T30 五条纯 policy 带
+%   层必须逐字段满足规范（T31 起为独立 hard + 规范双门控
+%   target.*/support.*（各四个 stage 门）+ 过渡扁平字段
+%   noseMidProtection/baseLuminance/tone/whitening + T30 五条纯 policy 带
 %   regionBand*，HxW double、real、finite、[0,1]），hard 严格二值；
 %   预览→原尺寸迁移路径在目标尺寸重建 protection，且与直接桥接重建
 %   bit-exact 一致。
 [image, faceBox, parsing] = fixtureContext(40, 60);
 prepared = rmfield(prepareBeautyContext(image, faceBox, parsing, ...
     emptyBodyParsing([40, 60])), 'runtimeCache');
-stageNames = {'smoothingFine'; 'smoothingMid'; 'repairFine'; ...
-    'repairMid'; 'baseLuminance'; 'tone'; 'whitening'; 'hard'; ...
+stageNames = {'hard'; 'target'; 'support'; 'noseMidProtection'; ...
+    'baseLuminance'; 'tone'; 'whitening'; ...
     'regionBandFine'; 'regionBandMid'; 'regionBandBase'; ...
     'regionBandTone'; 'regionBandWhitening'};
 assertStageProtectionValid(testCase, prepared.protection, stageNames, ...
@@ -782,12 +784,27 @@ verifyTrue(testCase, isstruct(protection) && isscalar(protection));
 verifyEqual(testCase, fieldnames(protection), stageNames);
 for index = 1:numel(stageNames)
     value = protection.(stageNames{index});
-    verifyTrue(testCase, isnumeric(value) && ~islogical(value));
-    verifySize(testCase, value, imageSize);
-    verifyTrue(testCase, all(isfinite(value(:))));
-    verifyGreaterThanOrEqual(testCase, min(value(:)), 0);
-    verifyLessThanOrEqual(testCase, max(value(:)), 1);
+    if isstruct(value) && isscalar(value)
+        % T31：target.*/support.* 为规范双门控嵌套，各含四个 stage 门。
+        innerNames = {'smoothingFine'; 'smoothingMid'; ...
+            'repairFine'; 'repairMid'};
+        verifyEqual(testCase, fieldnames(value), innerNames);
+        for innerIndex = 1:numel(innerNames)
+            assertUnitMask(testCase, value.(innerNames{innerIndex}), ...
+                imageSize);
+        end
+        continue;
+    end
+    assertUnitMask(testCase, value, imageSize);
 end
+end
+
+function assertUnitMask(testCase, value, imageSize)
+verifyTrue(testCase, isnumeric(value) && ~islogical(value));
+verifySize(testCase, value, imageSize);
+verifyTrue(testCase, all(isfinite(value(:))));
+verifyGreaterThanOrEqual(testCase, min(value(:)), 0);
+verifyLessThanOrEqual(testCase, max(value(:)), 1);
 end
 
 function testLegacyAndCanonicalChromaFieldsAreEquivalent(testCase)

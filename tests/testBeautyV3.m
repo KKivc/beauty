@@ -150,13 +150,32 @@ context = prepareBeautyContext(image, faceBox, parsing, ...
     image, context, faceBox);
 protection = masks.buildStageProtectionMasks(beautyMasks);
 
-stageNames = {'smoothingFine'; 'smoothingMid'; 'repairFine'; ...
-    'repairMid'; 'baseLuminance'; 'tone'; 'whitening'; 'hard'; ...
+% T31：发布规范双门控 target.*/support.*（+ 独立 hard、过渡扁平字段
+% noseMidProtection/baseLuminance/tone/whitening/regionBand*）。T07 的
+% 扁平折叠名 smoothingFine/smoothingMid/repairFine/repairMid 已被
+% target.* 取代并删除（同一语义只留一个规范字段）。
+stageNames = {'hard'; 'target'; 'support'; 'noseMidProtection'; ...
+    'baseLuminance'; 'tone'; 'whitening'; ...
     'regionBandFine'; 'regionBandMid'; 'regionBandBase'; ...
     'regionBandTone'; 'regionBandWhitening'};
 verifyEqual(testCase, fieldnames(protection), stageNames);
 for index = 1:numel(stageNames)
     value = protection.(stageNames{index});
+    if strcmp(stageNames{index}, 'target') || strcmp(stageNames{index}, 'support')
+        targetNames = {'smoothingFine'; 'smoothingMid'; 'repairFine'; ...
+            'repairMid'};
+        verifyEqual(testCase, fieldnames(value), targetNames);
+        for innerIndex = 1:numel(targetNames)
+            inner = value.(targetNames{innerIndex});
+            verifyTrue(testCase, isnumeric(inner) && ~islogical(inner) && ...
+                isreal(inner));
+            verifySize(testCase, inner, [120, 160]);
+            verifyTrue(testCase, all(isfinite(inner(:))));
+            verifyGreaterThanOrEqual(testCase, min(inner(:)), 0);
+            verifyLessThanOrEqual(testCase, max(inner(:)), 1);
+        end
+        continue;
+    end
     verifyTrue(testCase, isnumeric(value) && ~islogical(value) && ...
         isreal(value));
     verifySize(testCase, value, [120, 160]);
@@ -192,11 +211,11 @@ for index = 1:numel(strengths)
     nonFacePixels = beautyMasks.nonFaceStrengthMap > .01;
     effectStrength(nonFacePixels) = profile.outsideFaceStrength .* ...
         beautyMasks.nonFaceStrengthMap(nonFacePixels);
-    fineGate = 1 - max(protection.smoothingFine, protection.hard);
+    fineGate = 1 - max(protection.target.smoothingFine, protection.hard);
     verifyEqual(testCase, details.alphaMap, effectStrength .* fineGate, ...
         'AbsTol', 1e-12);
 
-    midGate = 1 - protection.smoothingMid;
+    midGate = 1 - protection.target.smoothingMid;
     midRecomputed = details.alphaMap .* midGate;
     nosePixels = beautyMasks.noseMask > 0;
     if profile.alphaCurve == 1
@@ -219,15 +238,15 @@ for index = 1:numel(strengths)
 end
 
 % Repair：零瑕疵参考点的生产 structureGate（blemish=0）与
-% textureGate/noseMidGate 的组合必须 bit-exact 重建两个 stage 字段。
+% textureGate/noseMidGate 的组合必须 bit-exact 重建两个 target 字段。
 blemishMap = zeros(size(image, 1), size(image, 2));
 [~, repairDetails] = beauty.repairSkinBlemishes(smoothed, beautyMasks, ...
     blemishMap, 50);
-verifyEqual(testCase, protection.repairFine, ...
+verifyEqual(testCase, protection.target.repairFine, ...
     1 - repairDetails.structureGate .* ...
     (1 - beautyMasks.textureProtectionMask), 'AbsTol', 0);
-verifyEqual(testCase, protection.repairMid, ...
-    1 - repairDetails.structureGate .* repairDetails.noseMidGate .* ...
+verifyEqual(testCase, protection.target.repairMid, ...
+    1 - repairDetails.structureGate .* (1 - .50 * beautyMasks.noseMask) .* ...
     (1 - beautyMasks.textureProtectionMask), 'AbsTol', 0);
 
 % Base luminance：supportMap 完整重算（该 stage 无 runtime 耦合）。
@@ -269,10 +288,69 @@ verifyEqual(testCase, whiteningDetails.supportMap, whiteningSupport, ...
     'AbsTol', 1e-12);
 end
 
+function testSupportGatesAreCanonicalAndBitEqualLegacy(testCase)
+%TESTSUPPORTGATESARECANONICALANDBITEQUALLegacy T31：protection 层发布规范
+%   双门控 target.*/support.*，同一语义只留一个规范字段（T07 扁平折叠名
+%   smoothingFine/smoothingMid/repairFine/repairMid 已删除）。
+%   target.* 的零带值逐位等于 T07 折叠式；support.* 的零带值逐位等于
+%   T30 之前各 stage 参考池/结构锚点的等价门（补码逐位还原生产门控）。
+[image, faceBox, parsing] = fixtureImage(120, 160);
+context = prepareBeautyContext(image, faceBox, parsing, ...
+    emptyBodyParsing([120, 160]));
+[beautyMasks, ~] = masks.buildBeautyMasks(image, context, faceBox);
+protection = masks.buildStageProtectionMasks(beautyMasks);
+
+% 同一语义只留一个规范字段：旧扁平折叠名必须已删除。
+verifyFalse(testCase, any(isfield(protection, ...
+    {'smoothingFine', 'smoothingMid', 'repairFine', 'repairMid'})), ...
+    'T07 扁平折叠名必须被 target.* 取代并删除。');
+
+texture = double(beautyMasks.textureProtectionMask);
+structure = double(beautyMasks.structureProtectionMask);
+hard = double(beautyMasks.hardProtectionMask);
+nose = double(beautyMasks.noseMask);
+
+% support.*：零带值逐位等于 legacy 参考池等价门。
+verifyEqual(testCase, protection.support.smoothingFine, ...
+    max(cat(3, texture, structure, hard), [], 3), 'AbsTol', 0, ...
+    'support.smoothingFine 必须逐位等于 legacy 合并 protectionMask。');
+verifyEqual(testCase, protection.support.smoothingFine, ...
+    beautyMasks.protectionMask, 'AbsTol', 0);
+verifyEqual(testCase, protection.support.smoothingMid, ...
+    min(4 * structure, 1), 'AbsTol', 0);
+verifyEqual(testCase, 1 - protection.support.smoothingMid, ...
+    max(0, 1 - 4 * structure), 'AbsTol', 0, ...
+    '补码必须逐位还原 legacy fineStructureGate。');
+verifyEqual(testCase, protection.support.repairFine, texture, 'AbsTol', 0);
+verifyEqual(testCase, 1 - protection.support.repairFine, ...
+    1 - texture, 'AbsTol', 0, '补码必须逐位还原 legacy textureGate。');
+verifyEqual(testCase, protection.support.repairMid, structure, 'AbsTol', 0);
+
+% target.*：零带值逐位等于 T07 折叠式。
+fineStructureGate = max(0, 1 - 4 * structure);
+verifyEqual(testCase, protection.target.smoothingFine, ...
+    1 - (1 - texture) .* fineStructureGate, 'AbsTol', 0);
+verifyEqual(testCase, protection.target.smoothingMid, ...
+    1 - fineStructureGate .* (1 - .50 * nose), 'AbsTol', 0);
+strongStructure = smoothStep(structure, .70, .90) .* ...
+    double(bwdist(hard >= .999) <= 3);
+structureGateRepair = min(1 - structure, 1 - .65 * strongStructure);
+verifyEqual(testCase, protection.target.repairFine, ...
+    1 - structureGateRepair .* (1 - texture), 'AbsTol', 0);
+verifyEqual(testCase, protection.target.repairMid, ...
+    1 - structureGateRepair .* (1 - .50 * nose) .* (1 - texture), ...
+    'AbsTol', 0);
+
+% hard 独立发布，严格二值，不参与 target/support 的 max 折叠。
+verifyEqual(testCase, protection.hard, hard, 'AbsTol', 0);
+verifyTrue(testCase, all(protection.hard(:) == 0 | protection.hard(:) == 1));
+verifyEqual(testCase, protection.noseMidProtection, .50 * nose, 'AbsTol', 0);
+end
+
 function testFineSmoothingConsumesStageProtectionContract(testCase)
 %TESTFINESMOOTHINGCONSUMESSTAGEPROTECTIONCONTRACT T12：提供 stage
 %   contract（protection 分层）时，Fine smoothing 只从
-%   protection.smoothingFine / protection.hard 派生 Fine 门控，不再自行
+%   protection.target.smoothingFine / protection.hard 派生 Fine 门控，不再自行
 %   解释 general texture/structure masks：扰动 textureProtectionMask 不
 %   改变 stage 路径的任何输出，而 legacy 路径会随之变化。统计路径
 %   （processableSkin → fineEnergy/blemishMean/fineRetention）改读生产
@@ -313,7 +391,7 @@ for index = 1:numel(strengths)
     effectStrength(nonFacePixels) = profile.outsideFaceStrength .* ...
         beautyMasks.nonFaceStrengthMap(nonFacePixels);
     verifyEqual(testCase, stageDetails.alphaMap, ...
-        effectStrength .* (1 - max(protection.smoothingFine, ...
+        effectStrength .* (1 - max(protection.target.smoothingFine, ...
         protection.hard)), 'AbsTol', 0);
     verifyEqual(testCase, ...
         nnz(stageDetails.alphaMap(protection.hard >= .999)), 0);
@@ -378,7 +456,7 @@ end
 
 function testMidSmoothingConsumesStageProtectionContract(testCase)
 %TESTMIDSMOOTHINGCONSUMESSTAGEPROTECTIONCONTRACT T13：提供 stage
-%   contract 时，Mid smoothing 只从 protection.smoothingMid 派生 Mid
+%   contract 时，Mid smoothing 只从 protection.target.smoothingMid 派生 Mid
 %   门控，不再读取 noseMask/局部 nose 特判。快照 smoothingMid 取
 %   alphaCurve=1 满档（T07），生产 noseMidGate 的强度插值归属
 %   effect-strength 侧：midGate = alphaCurve .* (1 - smoothingMid) +
@@ -408,18 +486,19 @@ for index = 1:numel(strengths)
     profile = beautySmoothingProfile(strength);
 
     % Mid 门控恰为 stage contract 凸组合重算（bit-exact），且与生产
-    % 组合式 midStructureGate .* noseMidGate 只差浮点噪声（≤1e-15）。
+    % 组合式 midStructureGate .* noseMidGate 只差浮点噪声（≤1e-15）；
+    % T31 起 noseMidGate 由 policy 层从 nose 保护发布，算法侧不再持有。
     expectedMidGate = profile.alphaCurve .* ...
-        (1 - protection.smoothingMid) + ...
+        (1 - protection.target.smoothingMid) + ...
         (1 - profile.alphaCurve) .* stageDetails.fineStructureGate;
     verifyEqual(testCase, stageDetails.midGate, expectedMidGate, ...
         'AbsTol', 0);
     verifyEqual(testCase, stageDetails.midAlphaMap, ...
         stageDetails.alphaMap .* stageDetails.midGate, 'AbsTol', 0);
+    noseMidGate = 1 - .50 * beautyMasks.noseMask .* profile.alphaCurve;
     verifyLessThanOrEqual(testCase, ...
         max(abs(stageDetails.midGate(:) - ...
-        legacyDetails.midStructureGate(:) .* ...
-        legacyDetails.noseMidGate(:))), 1e-15);
+        legacyDetails.midStructureGate(:) .* noseMidGate(:))), 1e-15);
     verifyLessThanOrEqual(testCase, ...
         max(abs(stageDetails.midAlphaMap(:) - ...
         legacyDetails.midAlphaMap(:))), 1e-15);
@@ -444,7 +523,7 @@ end
     beautyMasks, 100, blemishMap, protection);
 verifyLessThanOrEqual(testCase, ...
     max(abs(stageDetails100.midAlphaMap(:) - ...
-    stageDetails100.alphaMap(:) .* (1 - protection.smoothingMid(:)))), ...
+    stageDetails100.alphaMap(:) .* (1 - protection.target.smoothingMid(:)))), ...
     1e-15);
 
 % 零强度端点（alphaCurve=0）：凸组合退化为纯结构锚点，Mid 保留率恒 1。
@@ -476,22 +555,25 @@ verifyEqual(testCase, perturbedStageDetails.midAlphaMap, ...
 verifyEqual(testCase, smoothedPerturbedStage.mid, ...
     smoothedStage60.mid, 'AbsTol', 0);
 
-% 诊断收口：stage 路径不再报告 nose 特判字段，新增 midGate 快照；
-% legacy 路径字段保持不变。
+% 诊断收口：T31 起算法侧不再持有 nose 语义，两条入口都只报告
+% protection（= support.smoothingFine 参考样本池门）与单一 midGate 快照，
+% 不再报告 noseMask/noseMidGate。
 verifyEqual(testCase, ...
     isfield(stageDetails60, {'noseMask', 'noseMidGate'}), ...
     [false, false], ...
-    'stage 路径不得再报告 nose 特判诊断字段。');
+    'smoothing 诊断不得再报告 nose 特判字段。');
 verifyTrue(testCase, isfield(stageDetails60, 'midGate'));
-verifyTrue(testCase, isfield(legacyDetails60, 'noseMask') && ...
-    isfield(legacyDetails60, 'noseMidGate'));
+verifyEqual(testCase, ...
+    isfield(legacyDetails60, {'noseMask', 'noseMidGate'}), ...
+    [false, false], ...
+    '兼容入口同样不得再报告 nose 特判字段。');
 end
 
 function testFineRepairConsumesStageProtectionContract(testCase)
 %TESTFINEREPAIRCONSUMESSTAGEPROTECTIONCONTRACT T14：提供生产端拼装的
 %   Fine repair stage contract 时，fineWeight 门控只按生产原式从
-%   contract 重建（min(blemishRelaxedGate, strongStructureCap) 与截断
-%   后的 textureGate），不再自行组合 general texture/structure/hard
+%   contract 重建（前置结构门 = 1 - support.repairMid，截断后纹理门 =
+%   1 - target.repairFine），不再自行组合 general texture/structure/hard
 %   masks：扰动 textureProtectionMask 不改变 stage 路径的 fineWeight，
 %   legacy 路径则会随之变化。生产链在结构门与纹理门之间对权重做
 %   [0,1] 截断，且快照 repairFine 的 1-x 补码往返有舍入，因此 texture
@@ -555,10 +637,10 @@ for caseIndex = 1:numel(blemishCases)
             beauty.repairSkinBlemishes(smoothed, beautyMasks, ...
             blemishMap, strength, contract);
 
-        % stage 门控恰为 contract 按生产原式重建（bit-exact）。
+        % stage 门控恰为 contract 按生产原式重建（bit-exact）：
+        % 前置结构门 = 1 - contract.support.repairMid。
         verifyEqual(testCase, stageDetails.fineGateRuntime, ...
-            min(contract.blemishRelaxedGate, ...
-            contract.strongStructureCap), 'AbsTol', 0);
+            1 - contract.support.repairMid, 'AbsTol', 0);
 
         % 与 legacy 路径逐位等价：T14 迁移不改变任何数值。
         verifyEqual(testCase, stageDetails.fineWeight, ...
@@ -571,11 +653,11 @@ for caseIndex = 1:numel(blemishCases)
             repairedLegacy.alphaMap, 'AbsTol', 0);
 
         % 零瑕疵快照语义（T07 衔接）：blemish = 0 时 stage 门控积与
-        % 1 - repairFine 一致（仅 1-x 补码往返舍入）；blemish > 0 时
-        % 相对快照只增不减（runtime 放宽约定）。
+        % 1 - protection.target.repairFine 一致（仅 1-x 补码往返舍入）；
+        % blemish > 0 时相对快照只增不减（runtime 放宽约定）。
         gateProduct = stageDetails.fineGateRuntime .* ...
-            contract.textureGate;
-        snapshotReference = 1 - protection.repairFine;
+            (1 - contract.target.repairFine);
+        snapshotReference = 1 - protection.target.repairFine;
         if max(blemishMap(:)) == 0
             verifyLessThanOrEqual(testCase, ...
                 max(abs(gateProduct(:) - snapshotReference(:))), 1e-15);
@@ -635,7 +717,11 @@ verifyEqual(testCase, perturbedStageDetails.fineWeight, ...
 % mediumCorrection）对 texture 扰动不变。
 
 % 缺字段 fail-fast：不静默回退拼装。
-brokenContract = rmfield(contract, 'blemishRelaxedGate');
+brokenContract = rmfield(contract, 'textureBandGate');
+verifyError(testCase, @() beauty.repairSkinBlemishes( ...
+    smoothed60, beautyMasks, blemishMap, 60, brokenContract), ...
+    'beauty:InvalidBlemishRepair');
+brokenContract = rmfield(contract, 'midBandGate');
 verifyError(testCase, @() beauty.repairSkinBlemishes( ...
     smoothed60, beautyMasks, blemishMap, 60, brokenContract), ...
     'beauty:InvalidBlemishRepair');
@@ -644,9 +730,10 @@ end
 function testMidRepairConsumesStageProtectionContract(testCase)
 %TESTMIDREPAIRCONSUMESSTAGEPROTECTIONCONTRACT T15：提供生产端拼装的
 %   repair stage contract 时，mediumWeight 门控只按生产原式从 contract
-%   重建（结构门 min(blemishRelaxedGate, strongStructureCap) 作用于
-%   [0,1] 截断之前，noseMidGate 与 textureGate 按生产顺序作用于截断之
-%   后），不再自行组合 general texture/structure/nose masks；共享
+%   重建（结构门 = 1 - support.repairMid 作用于 [0,1] 截断之前，
+%   target.repairMid（鼻部）与 midBandGate（T30 Mid 专属纯 policy 带）
+%   合成后与 target.repairFine（纹理）按生产顺序作用于截断之后），不再
+%   自行组合 general texture/structure/nose masks；共享
 %   referenceReliability 与 chromaWeight 的门控来源同步收口（bit-exact
 %   同值）：扰动 texture/structure/nose masks 不改变 stage 路径的任何
 %   输出（含 fineCorrection/mediumCorrection），legacy 路径则会随之变
@@ -710,9 +797,8 @@ for caseIndex = 1:numel(blemishCases)
             blemishMap, strength, contract);
 
         % stage 门控恰为 contract 按生产原式、原顺序重建（bit-exact）：
-        % 结构门在截断之前，nose/texture 门在截断之后。
-        structureGateRuntime = min(contract.blemishRelaxedGate, ...
-            contract.strongStructureCap);
+        % 前置结构门在截断之前，target 门（鼻部→纹理）在截断之后。
+        structureGateRuntime = 1 - contract.support.repairMid;
         verifyEqual(testCase, stageDetails.structureGate, ...
             structureGateRuntime, 'AbsTol', 0);
         expectedMedium = stageDetails.repairCurveMap .* ...
@@ -723,20 +809,26 @@ for caseIndex = 1:numel(blemishCases)
             stageDetails.highEndConfidence) .* ...
             stageDetails.allowed .* structureGateRuntime;
         expectedMedium = min(max(expectedMedium, 0), 1);
-        expectedMedium = expectedMedium .* contract.noseMidGate;
-        expectedMedium = expectedMedium .* contract.textureGate;
+        % Mid 逐像素门 = (1 - target.repairMid) .* midBandGate（鼻部退让 ×
+        % T30 Mid 专属纯 policy 带），按生产原式的结合序先乘，再乘纹理门与
+        % textureBandGate。
+        expectedMedium = expectedMedium .* ...
+            ((1 - contract.target.repairMid) .* contract.midBandGate) .* ...
+            (1 - contract.target.repairFine);
+        expectedMedium = expectedMedium .* contract.textureBandGate;
         verifyEqual(testCase, stageDetails.mediumWeight, ...
             expectedMedium, 'AbsTol', 0);
         expectedChroma = .16 * stageDetails.repairCurveMap .* ...
             stageDetails.highConfidence .* stageDetails.allowed .* ...
             structureGateRuntime;
         expectedChroma = min(max(expectedChroma, 0), 1);
-        expectedChroma = expectedChroma .* contract.textureGate;
+        expectedChroma = expectedChroma .* ...
+            (1 - contract.target.repairFine) .* contract.textureBandGate;
         verifyEqual(testCase, stageDetails.chromaWeight, ...
             expectedChroma, 'AbsTol', 0);
         expectedReference = stageDetails.allowed .* ...
-            contract.textureGate .* (1 - .86 * blemishMap) .* ...
-            structureGateRuntime;
+            (1 - contract.support.repairFine) .* (1 - .86 * blemishMap) .* ...
+            (1 - contract.support.repairMid);
         verifyEqual(testCase, stageDetails.referenceReliability, ...
             expectedReference, 'AbsTol', 0);
 
@@ -758,12 +850,13 @@ for caseIndex = 1:numel(blemishCases)
         verifyEqual(testCase, repairedStage.base, repairedLegacy.base, ...
             'AbsTol', 0);
 
-        % 零瑕疵快照语义（T07 衔接）：blemish = 0 时结构门·noseMidGate
-        % ·textureGate 与 1 - repairMid 一致（仅 1-x 补码往返舍入）；
+        % 零瑕疵快照语义（T07 衔接）：blemish = 0 时前置结构门·
+        % target 门与 1 - protection.target.repairMid 一致（仅 1-x 补码往返舍入）；
         % blemish > 0 时相对快照只增不减（runtime 放宽约定）。
         gateProduct = stageDetails.structureGate .* ...
-            contract.noseMidGate .* contract.textureGate;
-        snapshotReference = 1 - protection.repairMid;
+            (1 - contract.target.repairMid) .* ...
+            (1 - contract.target.repairFine);
+        snapshotReference = 1 - protection.target.repairMid;
         verifyEqual(testCase, stageDetails.mediumGateZeroBlemish, ...
             snapshotReference, 'AbsTol', 0);
         if max(blemishMap(:)) == 0
@@ -820,22 +913,40 @@ verifyEqual(testCase, perturbedStageDetails.referenceReliability, ...
 verifyEqual(testCase, repairedPerturbedStage, repairedStage60, ...
     'AbsTol', 0);
 
-% 诊断收口：stage 路径不再报告 noseMask（Mid 不读取 nose 特判输入），
-% 新增 mediumGateZeroBlemish 快照；legacy 路径字段保持不变。
+% contract 只发布规范门：midBandGate 逐位等于 1 - regionBandMid（T30 Mid
+% 专属纯 policy 带的补码），target/support 门逐位等于 policy 发布值。
+verifyEqual(testCase, contract.midBandGate, ...
+    1 - protection.regionBandMid, 'AbsTol', 0);
+verifyEqual(testCase, contract.target.repairMid, ...
+    protection.noseMidProtection, 'AbsTol', 0);
+verifyEqual(testCase, contract.support.repairFine, ...
+    protection.support.repairFine, 'AbsTol', 0);
+
+% 诊断收口：T31 起 repair 算法侧不再持有 nose/texture 语义，两条入口都
+% 报告 mediumGateZeroBlemish 快照，且都不再报告 noseMask/noseMidGate。
 verifyEqual(testCase, isfield(stageDetails60, 'noseMask'), false, ...
-    'stage 路径不得再报告 noseMask 诊断字段。');
+    'repair 诊断不得再报告 noseMask 诊断字段。');
 verifyTrue(testCase, isfield(stageDetails60, ...
     'mediumGateZeroBlemish'));
-verifyTrue(testCase, isfield(legacyDetails60, 'noseMask') && ...
-    isfield(legacyDetails60, 'noseMidGate') && ...
-    ~isfield(legacyDetails60, 'mediumGateZeroBlemish'));
+verifyEqual(testCase, ...
+    isfield(legacyDetails60, {'noseMask', 'noseMidGate'}), ...
+    [false, false], ...
+    '兼容入口同样不得再报告 nose 特判字段。');
 
 % 缺字段 fail-fast：不静默回退拼装。
-brokenContract = rmfield(contract, 'noseMidGate');
+brokenContract = rmfield(contract, 'textureBandGate');
 verifyError(testCase, @() beauty.repairSkinBlemishes( ...
     smoothed60, beautyMasks, blemishMap, 60, brokenContract), ...
     'beauty:InvalidBlemishRepair');
-brokenContract = rmfield(contract, 'repairMid');
+brokenContract = rmfield(contract, 'midBandGate');
+verifyError(testCase, @() beauty.repairSkinBlemishes( ...
+    smoothed60, beautyMasks, blemishMap, 60, brokenContract), ...
+    'beauty:InvalidBlemishRepair');
+brokenContract = rmfield(contract, 'target');
+verifyError(testCase, @() beauty.repairSkinBlemishes( ...
+    smoothed60, beautyMasks, blemishMap, 60, brokenContract), ...
+    'beauty:InvalidBlemishRepair');
+brokenContract = rmfield(contract, 'support');
 verifyError(testCase, @() beauty.repairSkinBlemishes( ...
     smoothed60, beautyMasks, blemishMap, 60, brokenContract), ...
     'beauty:InvalidBlemishRepair');
@@ -1553,26 +1664,13 @@ options = struct('probabilities', zeros([imageSize, 20], 'single'));
 end
 
 function contract = makeTestRepairContract(beautyMasks, protection, ...
-    blemishMap)
-%MAKETESTREPAIRCONTRACT 复现生产端 makeRepairStageContract（T14/T15/T30）
-%   的未折叠字段公式，供消费侧重建断言与扰动负向证明使用。T30 起
-%   textureGate 保持"未带"语义（全局参考采样），分级保护经
-%   textureBandGate（1 - protection.regionBandFine）单独发布，只乘逐像素
-%   权重。
-hard = protection.hard;
-hardFeatureBand = bwdist(hard >= .999) <= 3;
-strongStructure = smoothStep(beautyMasks.structureProtectionMask, ...
-    .70, .90) .* double(hardFeatureBand);
-contract = struct( ...
-    'repairFine', protection.repairFine, ...
-    'repairMid', protection.repairMid, ...
-    'hard', hard, ...
-    'blemishRelaxedGate', 1 - beautyMasks.structureProtectionMask .* ...
-    (1 - .90 * blemishMap), ...
-    'strongStructureCap', 1 - .65 * strongStructure, ...
-    'textureGate', 1 - beautyMasks.textureProtectionMask, ...
-    'textureBandGate', 1 - protection.regionBandFine, ...
-    'noseMidGate', 1 - .50 * beautyMasks.noseMask);
+    blemishMap) %#ok<INUSD>
+%MAKETESTREPAIRCONTRACT 调用生产端唯一组装点 beauty.repairStageContract
+%   （T14/T15/T30/T31），供消费侧重建断言与扰动负向证明使用：组装只消费
+%   stage protection 的规范门（target.*/support.*/hard/noseMidProtection/
+%   regionBandFine/regionBandMid）与 runtime blemish 证据，不读取任何
+%   general mask。
+contract = beauty.repairStageContract(protection, blemishMap);
 end
 
 function contract = makeTestBaseLuminanceContract(beautyMasks, protection)

@@ -665,12 +665,16 @@ end
 
 function testPolicyEvidenceFeedsOnlyStageProtection(testCase)
 %TESTPOLICYEVIDENCEFEEDSONLYSTAGEPROTECTION evidence 层的只读边界与
-%   T20 消费边界：篡改任何 evidence 字段都不得改变 buildBeautyMasks 的
-%   v3.1 产物（evidence 不回写保护 mask）；V4 stage protection 只消费
-%   periocular/lip 两个语义字段——篡改其余字段时端到端输出逐位不变
-%   （T06 边界保持），篡改 periocular/lip 时输出经 policy 通道变化
-%   （T20 正控制），且两种情形下 hard identity 区域 RGB 都与源图逐位
-%   相等（hard 来自未被篡改的 beautyMasks 产物）。
+%   policy 消费边界：篡改任何 evidence 字段都不得改变 buildBeautyMasks
+%   的 v3.1 产物（evidence 不回写保护 mask）；V4 stage protection 的
+%   消费字段随 Ticket 递增——T20 起 periocular/lip、T21 起 nostril/
+%   noseStructure、T22 起 earStructure（见
+%   masks.buildStageProtectionMasks 的 readEyeLipEvidence/
+%   readNoseBands/readEarBands）——篡改这些字段时输出经 policy 通道
+%   变化（正控制），篡改其余字段（edgeDetail/structureGradient/
+%   darkDetail）时端到端输出逐位不变（T06 边界保持）；且各情形下 hard
+%   identity 区域 RGB 都与源图逐位相等（hard 来自未被篡改的
+%   beautyMasks 产物）。
 [sourceImage, faceBox, parsing] = evidencePortraitFixture();
 prepared = prepareBeautyContext(sourceImage, faceBox, parsing, ...
     emptyBodyParsing(size(sourceImage, [1 2])));
@@ -705,9 +709,19 @@ for index = 1:numel(maskNames)
         cleanMasks.(maskNames{index}), 'AbsTol', 0);
 end
 
-% 只篡改 stage protection 不消费的五个 evidence 字段：输出逐位不变。
-nonConsumedNames = {'nostril', 'noseStructure', 'edgeDetail', ...
-    'structureGradient', 'darkDetail'};
+% 只篡改 stage protection 不消费的三个 evidence 字段：输出逐位不变。
+%   T21 起 nostril/noseStructure 已被 policyTexture（Fine 侧 .95）与
+%   smoothingMid/repairMid（.90/.85）、baseLuminance（.80）、whitening
+%   （.85）消费；T22 起 earStructure 已被 policyTexture 与
+%   smoothingMid/repairMid/baseLuminance 消费——三者均不得再列入本
+%   清单（篡改它们必然改变输出，旧清单因此过期）。
+%   剩余字段 edgeDetail/structureGradient/darkDetail 未被任何 consumer
+%   读取：全仓 grep 显示它们只由 masks.buildBeautyPolicyEvidence 生产，
+%   仅在**构建期**作为 earStructure 的输入被使用，构建完成后作为
+%   evidence 字段不再进入任何 stage（buildStageProtectionMasks 只读
+%   periocular/lip/nostril/noseStructure/earStructure）。本断言通过即
+%   为实测确认。
+nonConsumedNames = {'edgeDetail', 'structureGradient', 'darkDetail'};
 nonConsumedTampered = prepared;
 for index = 1:numel(nonConsumedNames)
     nonConsumedTampered.evidence.(nonConsumedNames{index}) = ...

@@ -110,3 +110,59 @@ T20（工单 `20-eye-lip-identity-policy`）是 V4 迁移完成后第一批**真
 - policy 相对 legacy 的全图变化：135 像素（0.06%），max |dRGB|=4.7，全部集中在眼/唇 evidence 带内（带内 mean|dRGB|=0.05）。
 - 眼/唇 detail band 高频细节能量保留：policy=1.045 vs legacy=1.047（以源图为 1）；transition band 输出变化保持连续，无未处理环带回归。
 - hard 区域（82266 像素）RGB 与源图逐位相等；视觉上眼周/唇周无新增光晕、无缝合描边，唇缘色彩与眼睑细节保留完整。
+
+### T21 nose region policy 重录记录（2026-09-20）
+
+T21（工单 `21-nose-region-policy`）是第二批**真实 policy 行为变化**：`masks.buildStageProtectionMasks` 新增消费 `evidence.nostril` / `evidence.noseStructure`（经 `readNoseBands`，缺省/partial evidence 时两带恒零 → 逐位还原 T07 legacy 折叠）：
+
+- 鼻孔边缘软带：`nostrilEdge = max(0, 1 - bwdist(nostrilCore)/(r+1))`，`r = min(4, max(2, round(.006*faceScale)))`——与 `buildTextureProtectionMask` 的 `nostrilProtection` 同一 radius 公式与 footprint（2–5px 软带，非大半径膨胀）；`nostrilDetailBand = smoothStep(nostrilEdge, .40, .80)`。
+- 鼻结构带：`noseStructureBand = smoothStep(noseStructure, .15, .50)`（鼻语义支持 × 低频梯度 × 方向一致性）。
+- stage 分配：`smoothingFine`（经 `policyTexture`）`+ .95·nostrilDetailBand`；`smoothingMid`/`repairMid` `+ max(.90·nostrilDetailBand, .85·noseStructureBand)`；`baseLuminance` `+ .80·noseStructureBand`；`whitening` `+ .85·nostrilDetailBand`；`tone` **不追加**鼻部项（鼻部无 identity 色度语义，肤色与脸颊保持连续）。
+- 消费侧边界与 T20 相同：只有 `smoothingFine`/`smoothingMid` 直接进入输出算术；`repairFine`/`repairMid`/`baseLuminance`/`tone`/`whitening` 仍是 T14–T18 consumer 的零瑕疵参考快照。
+
+**合成 oracle digest 新旧对照**（fixture 与参数组合不变；仅 digest 重录）：
+
+| fixture | smoothing | whitening | T20 旧值 | T21 新值 | 变化 |
+| --- | ---: | ---: | --- | --- | --- |
+| rich | 100 | 0 | `fffa926c215f1ad2ca4ec2adb027c5f0d56eb1a0ff014145092151190b61bf61` | `330ddc30c63bf9a9d896d1a65e6ef62421a3006230ed2fc8026e65e50ee04204` | 是（鼻孔软带抬升 Fine 侧保护） |
+| rich | 0 | 100 | `58ab2f354176fb258dcef67e01ff65d5c4c2b98f0085902cfe16c604281bfe80` | `58ab2f354176fb258dcef67e01ff65d5c4c2b98f0085902cfe16c604281bfe80` | 否（s=0 不触发 smoothing） |
+| rich | 100 | 15 | `e981883d03041d1835ce4993ee4b8741feadbe8fdf32e41449cd8dbc214d32a1` | `64f0a75e37bbcc8d893376dc702e83b180823fc717051a9d3098539ba5be9782` | 是（3px，带内） |
+| rich | 50 | 25 | `b4cfffbf09872912e27fdc8d1c3f202b1a22d5bf80bef80da8963aa414e00cd7` | `b4cfffbf09872912e27fdc8d1c3f202b1a22d5bf80bef80da8963aa414e00cd7` | 否（T21 增量未越过 uint8 量化） |
+| compact | 100 | 15 | `35279975228d5c25334e8b3a3a8fb243a532e9fb85a94a11acbff8c407a21b75` | `35279975228d5c25334e8b3a3a8fb243a532e9fb85a94a11acbff8c407a21b75` | 否（T21 增量只落在非消费参考快照） |
+| 预览路径（0.5 缩放，rich） | 100 | 15 | `32ecb919c09c7899e83aa9c48bfe3bd1c212ff3c15f8cf7448fd7652f008485b` | `32ecb919c09c7899e83aa9c48bfe3bd1c212ff3c15f8cf7448fd7652f008485b` | 否 |
+| 原尺寸路径（preview→resize 重建，rich） | 100 | 15 | `fe627460bb82d7b4bfd2e07d270c442398d22d80008a131afb681a5020115ea5` | `6b8e96a5088f422c7ff20a9499377cce521d0bb68729ebcbf266aea1a3054176` | 是（resize 在目标分辨率重建 evidence，鼻结构带生效） |
+
+上表"T21 新值"即 `tests/testMaskSystemV4CompatibilityBaseline.m` 当前生效的 `recordedRgbBaseline` / `recordedOriginalSizeDigest`（预览路径保持 T20 值）。
+
+**归因证据（逐 Ticket 字段置零探针，`.scratch/tmp/T21T22-digest-remeasure.log`）**：把某 Ticket 消费的 evidence 字段置零后重算最终 RGB，判定该 Ticket 是否真的改变了该 case 的输出——
+
+| case | T20（periocular+lip） | T21（nostril+noseStructure） | T22（earStructure） |
+| --- | ---: | ---: | ---: |
+| rich 100/0 | 87px | 9px | 0px |
+| rich 0/100 | 0px | 0px | 0px |
+| rich 100/15 | 177px | 3px | 0px |
+| rich 50/25 | 9px | 0px | 0px |
+| compact 100/15 | 158px | 0px | 0px |
+| 预览路径 | 变化 | 0px | 0px |
+| 原尺寸路径 | 变化 | 变化 | 0px |
+
+带 footprint（合成 fixture）：rich `nostril nnz>0=37`、`noseStructure nnz>0=1353 (max=0.279)`、`earStructure nnz>0=0`；compact `nostril=55`、`noseStructure=572 (max=1.000)`、`earStructure=0`。
+
+**structural 不变量复核**（T21 重录批内实测）：
+
+- 零强度（0/0）输出 = 源图：逐位相等（rich/compact）。
+- hard identity 区域 RGB = 源图：逐位相等；hard nnz rich 220、compact 269，与 T20 记录一致（零膨胀）。
+- cached/uncached 输出：逐位相等（rich、预览/原尺寸路径）。
+- compat / legacy 路径（剥离 evidence 层）：7 项 digest **全部**等于 e889f31 原值（rich 100/0 `8ef2bf0e…`、rich 100/15 `6716ed9e…`、rich 50/25 `b18986f6…`、compact 100/15 `012175a4…`、预览 `dc653930…`、原尺寸 `31e9168c…`；rich 0/100 因不触发 smoothing 本就相同）；真实图 77 链路 compat digest == 冻结 oracle `ce17e323dc4208d973ccae4b4a2cc122b2fed75fe7500088197c5278806bdc4c`（逐位相等）。
+- 结构性断言（`testFrozenPipelineContract`、零强度=源图、hard 区域=源图、cached/uncached 一致、预览/原尺寸等价）全部保持 bit-exact，未加任何容差。
+
+### T22 ear region policy：对本合成 oracle 零影响（2026-09-20）
+
+T22（工单 `22-ear-region-policy`）新增 `evidence.earStructure`（第 8 个字段）与耳结构带（`smoothingFine` 经 `policyTexture` `+ .95·band`、`smoothingMid`/`repairMid` `+ .90·band`、`baseLuminance` `+ .80·band`；`tone`/`whitening` 不追加）。**但本文件的合成 oracle 无需再次重录**：
+
+- 两个 fixture 均无 ear 语义，实测 `semantic.ear nnz>0 = 0` → `earStructure nnz>0 = 0` → `earStructureBand` 恒零，`max(x, 0·c) = x` 逐位还原。
+- 逐 Ticket 字段置零探针：T22 在全部 7 个 case 的贡献均为 **0px**。
+- A/B 对照（`.scratch/tmp/T22-baseline-digests-{no,with}T22.txt`）逐行相同；本批实测 7 项 digest 与 T21 探针 `.scratch/tmp/t21_probe2.log` 逐位一致。
+- compat / legacy 路径与 `ce17e3…bdc4c` 的关系不变。
+
+因此 `recordedRgbBaseline` / `recordedPreviewDigest` / `recordedOriginalSizeDigest` 自 T21 重录后不再变动；T22 仅在真实图 77 链路上有耳区增量（见 `.scratch/tmp/T22-accept.log`）。

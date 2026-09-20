@@ -596,14 +596,35 @@ verifyFalse(testCase, rebuiltDiagnostics.reusedRuntimeCache);
 verifyEqual(testCase, cachedOutput, rebuiltOutput);
 
 % 3) stage protection 等价：缓存复用与重建产物的保护 mask 关键统计
-%    一致；由重建产物推导的 V4 stage 层与保存链路 Context 发布的
-%    protection 一致。
+%    一致；重建产物推导的 V4 stage 层在两条口径下都与发布值一致：
+%      a) 零带证据（显式传入全零 evidence 结构）必须逐位还原 T07 legacy
+%         折叠（= 单参缺省形态），即"无证据时逐位还原 legacy 折叠"这一
+%         真实契约；
+%      b) 携带保存链路 Context 发布的同一份 evidence 时必须逐位等于
+%         full.protection。
+%    T20 起 periocular/lip、T21 起 nostril/noseStructure、T22 起
+%    earStructure 均参与分级保护（本夹具实测贡献：periocular 234px、
+%    noseStructure 11px、earStructure 0px），故 603 行原有的"单参
+%    （无 evidence）对照 full.protection"自 T20 起已不成立——它不是
+%    legacy 折叠契约的正确表述，必须以零带证据为基准重新表达。
 assertProtectionStatsEqual(testCase, cachedDiagnostics.beautyMasks, ...
     rebuiltDiagnostics.beautyMasks, '缓存复用与重建');
+zeroEvidence = struct();
+evidenceNames = fieldnames(full.evidence);
+for index = 1:numel(evidenceNames)
+    zeroEvidence.(evidenceNames{index}) = zeros([targetSize, 1]);
+end
 verifyEqual(testCase, ...
+    masks.buildStageProtectionMasks(rebuiltDiagnostics.beautyMasks, ...
+    zeroEvidence), ...
     masks.buildStageProtectionMasks(rebuiltDiagnostics.beautyMasks), ...
+    'AbsTol', 0, ...
+    '零带证据必须逐位还原 T07 legacy 折叠（单参缺省形态）。');
+verifyEqual(testCase, ...
+    masks.buildStageProtectionMasks(rebuiltDiagnostics.beautyMasks, ...
+    full.evidence), ...
     full.protection, 'AbsTol', 0, ...
-    '重建产物推导的 stage 层必须与保存链路 Context 发布的 protection 一致。');
+    '重建产物推导的 stage 层必须与保存链路 Context 发布的 protection 一致（须携带同一份 evidence）。');
 
 % 4) 预览缓存混入保存链路：拒绝复用并安全重建，输出与统计不变。
 polluted = full;

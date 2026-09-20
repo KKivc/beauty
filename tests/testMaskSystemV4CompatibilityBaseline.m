@@ -36,6 +36,25 @@ function tests = testMaskSystemV4CompatibilityBaseline
 %   原尺寸等价）不放松；仅 RGB digest oracle 按"当前真实输出重新录制"
 %   的规则更新（新旧对照见 tests/beauty-regression-baseline.md 的 T20
 %   章节；rich 0/100 与 s=0 场景因不触发 smoothing 而保持原值）。
+%
+%   T21（2026-09-20）：第二批真实 V4 policy 行为变化（工单
+%   21-nose-region-policy）。buildStageProtectionMasks 新增消费
+%   evidence.nostril / evidence.noseStructure：鼻孔边缘软带（半径
+%   2--5px，与 v3.1 nostrilProtection 同一 radius 公式与 footprint）
+%   进入 texture/Fine 侧平台档位 .95，鼻结构带（.85）与鼻孔软带（.90）
+%   补 smoothingMid/repairMid，鼻结构带补 baseLuminance（.80）；tone/
+%   whitening 不追加鼻部项。compat Context（无 evidence 层）仍走 T07
+%   legacy 折叠，与 e889f31 逐位一致。structural 断言（零强度=源图、
+%   hard 区域=源图、cached/uncached 一致、预览/原尺寸等价）不放松；
+%   RGB digest oracle 按"当前真实输出重新录制"规则更新，仅 rich 100/0、
+%   rich 100/15 与原尺寸路径变化（新旧对照见
+%   tests/beauty-regression-baseline.md 的 T21 章节）。
+%
+%   T22（2026-09-20）：耳结构 policy（工单 22-ear-region-policy）新增
+%   evidence.earStructure 与耳结构带（smoothingFine/smoothingMid/
+%   repairMid/baseLuminance）。但 ear 语义在两个合成 fixture 中恒为零
+%   （探针实测 earStructure nnz=0、带恒零），因此本文件全部 digest 与
+%   T21 录制值逐位相同，无需再次重录；compat 路径仍等于 e889f31。
 
 tests = functiontests(localfunctions);
 end
@@ -113,9 +132,10 @@ end
 end
 
 function testFinalRgbMatchesRecordedBaselineDigests(testCase)
-% 最终 RGB oracle：SHA-256（uint8 列优先字节序）。e889f31 录制；T20 起
-%   按"当前真实输出重新录制"规则更新（0/100 项未触发 smoothing，保持
-%   e889f31 原值）。
+% 最终 RGB oracle：SHA-256（uint8 列优先字节序）。e889f31 录制；T20 与
+%   T21 按"当前真实输出重新录制"规则更新（0/100 项未触发 smoothing，
+%   保持 e889f31 原值；rich 50/25 与 compact 100/15 的 T21 增量未越过
+%   量化，保持 T20 值）。T22 对本表零影响。
 [cases, expectedDigests] = recordedRgbBaseline();
 for index = 1:numel(cases)
     fixture = loadBaselineFixture(cases(index).fixture);
@@ -127,7 +147,7 @@ for index = 1:numel(cases)
     verifySize(testCase, output, size(fixture.image));
     verifyClass(testCase, output, 'uint8');
     verifyEqual(testCase, rgbDigest(output), expectedDigests{index}, ...
-        sprintf('fixture=%s, smoothing=%d, whitening=%d 的最终 RGB 偏离 T20 重录基线。', ...
+        sprintf('fixture=%s, smoothing=%d, whitening=%d 的最终 RGB 偏离 T21 重录基线。', ...
         cases(index).fixture, cases(index).smoothingStrength, ...
         cases(index).whiteningStrength));
 end
@@ -170,7 +190,8 @@ end
 function testPreviewAndOriginalSizePathsMatchRecordedBaselineDigests(testCase)
 % 预览/原尺寸路径：预览图缩放 0.5，原尺寸路径由
 % resizeBeautyContext(previewContext, ..., targetImage) 重建，两条
-% 路径的最终 RGB 均在 e889f31 上录制为 SHA-256 oracle。
+% 路径的最终 RGB 均为 SHA-256 oracle（e889f31 录制，T20 重录；原尺寸
+% 路径在 T21 因鼻结构带生效再次重录，预览路径 T21/T22 未变）。
 fixture = buildRichFixture();
 previewScale = 0.5;
 previewSize = round([size(fixture.image, 1), size(fixture.image, 2)] * ...
@@ -185,7 +206,7 @@ previewOutput = beautifyImage(previewImage, params, previewFaceBox, ...
     rmfield(previewContext, 'runtimeCache'));
 verifySize(testCase, previewOutput, [previewSize, 3]);
 verifyEqual(testCase, rgbDigest(previewOutput), recordedPreviewDigest(), ...
-    '预览路径最终 RGB 偏离 T20 重录基线。');
+    '预览路径最终 RGB 偏离 T20 重录基线（T21/T22 未改变本项）。');
 
 fullContext = resizeBeautyContext(previewContext, ...
     [size(fixture.image, 1), size(fixture.image, 2), 3], ...
@@ -194,7 +215,7 @@ fullOutput = beautifyImage(fixture.image, params, fixture.faceBox, ...
     fullContext);
 verifySize(testCase, fullOutput, size(fixture.image));
 verifyEqual(testCase, rgbDigest(fullOutput), recordedOriginalSizeDigest(), ...
-    '原尺寸路径最终 RGB 偏离 T20 重录基线。');
+    '原尺寸路径最终 RGB 偏离 T21 重录基线。');
 
 uncachedFullContext = rmfield(fullContext, 'runtimeCache');
 uncachedFullOutput = beautifyImage(fixture.image, params, ...
@@ -206,28 +227,39 @@ end
 
 function [cases, expectedDigests] = recordedRgbBaseline
 %RECORDEDRGBBASELINE 冻结的最终 RGB oracle（SHA-256）。
-%   e889f31 录制；T20（eye/lip identity policy）按当前真实输出重录，
-%   新旧对照见 tests/beauty-regression-baseline.md。
+%   e889f31 录制；T20（eye/lip identity policy）按当前真实输出重录；
+%   T21（nose region policy）再次按当前真实输出重录——rich 100/0 与
+%   rich 100/15 因鼻孔软带抬升 texture/Fine 侧保护而变化（T20 旧值
+%   分别为 fffa926c… 与 e981883d…）；rich 0/100、rich 50/25、
+%   compact 100/15 未变化（T21 增量只落在非消费的零瑕疵参考快照上，
+%   或未越过 uint8 量化；逐 Ticket 字段置零探针实测贡献 0 px）。
+%   T22（ear region policy）对本文件全部 digest 零影响：两个 fixture 的
+%   earStructure 恒为零、耳结构带恒零。新旧对照见
+%   tests/beauty-regression-baseline.md。
 cases = struct( ...
     'fixture', {'rich', 'rich', 'rich', 'rich', 'compact'}, ...
     'smoothingStrength', {100, 0, 100, 50, 100}, ...
     'whiteningStrength', {0, 100, 15, 25, 15});
 expectedDigests = { ...
-    'fffa926c215f1ad2ca4ec2adb027c5f0d56eb1a0ff014145092151190b61bf61'; ...
+    '330ddc30c63bf9a9d896d1a65e6ef62421a3006230ed2fc8026e65e50ee04204'; ...
     '58ab2f354176fb258dcef67e01ff65d5c4c2b98f0085902cfe16c604281bfe80'; ...
-    'e981883d03041d1835ce4993ee4b8741feadbe8fdf32e41449cd8dbc214d32a1'; ...
+    '64f0a75e37bbcc8d893376dc702e83b180823fc717051a9d3098539ba5be9782'; ...
     'b4cfffbf09872912e27fdc8d1c3f202b1a22d5bf80bef80da8963aa414e00cd7'; ...
     '35279975228d5c25334e8b3a3a8fb243a532e9fb85a94a11acbff8c407a21b75'};
 end
 
 function digest = recordedPreviewDigest
-% T20 重录（e889f31 原值 dc6539302f6c001509f0cb69a95ae87691d852e551ba915b83ba98e10e3b89b2）。
+% T20 重录（e889f31 原值 dc6539302f6c001509f0cb69a95ae87691d852e551ba915b83ba98e10e3b89b2）；
+% T21/T22 未改变本项（探针实测 T21 对预览路径贡献 0 px、T22 恒 0 px），保持 T20 值。
 digest = '32ecb919c09c7899e83aa9c48bfe3bd1c212ff3c15f8cf7448fd7652f008485b';
 end
 
 function digest = recordedOriginalSizeDigest
-% T20 重录（e889f31 原值 31e9168c9dc1d74d3a0c40104c64eb40bd1d74ce6e1eb57e4f748db96c7a1ef7）。
-digest = 'fe627460bb82d7b4bfd2e07d270c442398d22d80008a131afb681a5020115ea5';
+% T21 重录（T20 旧值 fe627460bb82d7b4bfd2e07d270c442398d22d80008a131afb681a5020115ea5；
+% e889f31 原值 31e9168c9dc1d74d3a0c40104c64eb40bd1d74ce6e1eb57e4f748db96c7a1ef7）：
+% 原尺寸路径由 resizeBeautyContext 在目标分辨率重建 evidence，鼻结构带生效，
+% 因此随 T21 变化。T22 未改变本项（earStructure 恒零）。
+digest = '6b8e96a5088f422c7ff20a9499377cce521d0bb68729ebcbf266aea1a3054176';
 end
 
 function digest = rgbDigest(image)

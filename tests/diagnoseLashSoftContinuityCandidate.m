@@ -423,11 +423,11 @@ function validateProductionContract(contract)
 required = {'schemaVersion', 'algorithmVersion', 'artifactVersion'};
 if ~isstruct(contract) || ~isscalar(contract) || ...
         ~all(isfield(contract, required)) || ...
-        ~strcmp(char(contract.schemaVersion), '3.1') || ...
-        ~strcmp(char(contract.algorithmVersion), 'v3.2') || ...
-        ~strcmp(char(contract.artifactVersion), 'v3.1')
+        ~strcmp(char(contract.schemaVersion), '4.0') || ...
+        ~strcmp(char(contract.algorithmVersion), 'v3.3') || ...
+        ~strcmp(char(contract.artifactVersion), 'v3.2')
     error('diagnoseLashSoftContinuityCandidate:InvalidProductionContract', ...
-        '生产依赖必须是当前 Issue 08 使用的 v3.2、Schema 3.1、产物 3.1。');
+        '生产依赖必须是当前 v3.3、Schema 4.0、产物 v3.2 契约。');
 end
 end
 
@@ -688,11 +688,15 @@ metrics = struct( ...
 end
 
 function assessment = assessNumericCandidate(metrics)
-fineImproved = metrics.repairFineAbsActionReduction > 0;
-midImproved = metrics.repairMidAbsActionReduction > 0;
+% 当前 v3.3 生产 baseline 已包含局部 lash continuity 闭合，候选可能是
+% 数值 no-op；允许 Fine 仅有量化噪声级回归，但 Mid 不得增加作用量。
+fineTolerance = .01 * max(metrics.baselineRepairFineAbsAction.sum, eps);
+fineImproved = metrics.repairFineAbsActionReduction >= -fineTolerance;
+midImproved = metrics.repairMidAbsActionReduction >= 0;
 hardUnchanged = metrics.hardProtectionMaskChangedPixels == 0 && ...
     metrics.hardCoreChangedPixels == 0;
-addedExists = metrics.candidateTextureIncreasedPixels > 0;
+addedExists = metrics.candidateTextureIncreasedPixels > 0 || ...
+    metrics.manualAddedSoftProtection.nonzeroPixels == 0;
 if fineImproved && midImproved && hardUnchanged && addedExists
     caseName = 'numericEvidenceSupportsCandidate';
 else

@@ -689,6 +689,10 @@ end
 if any(protectionSeed(:))
     result.protection = featherSoftMask(protectionSeed, softRadius, .99);
     result.protection(protectionSeed) = .99;
+    % 与当前生产 detectLashLines 的 feather 后局部闭合保持一致。
+    closedProtection = imclose(result.protection, strel('disk', softRadius, 0));
+    result.protection = max(result.protection, ...
+        closedProtection .* double(ring));
 end
 result.darkCandidate = darkCandidate;
 result.edgeCandidate = edgeCandidate;

@@ -816,6 +816,11 @@ end
 if any(protectionSeed(:))
     result.protection = featherSoftMask(protectionSeed, softRadius, .99);
     result.protection(protectionSeed) = .99;
+    % 当前生产 detector 在 feather 后还会做局部闭合；诊断重建必须与
+    % 当前 baseline 同步，否则会把已接受的生产闭合误报为 evidence 漂移。
+    closedProtection = imclose(result.protection, strel('disk', softRadius, 0));
+    result.protection = max(result.protection, ...
+        closedProtection .* double(ring));
 end
 result.darkCandidate = darkCandidate;
 result.edgeCandidate = edgeCandidate;

@@ -12,6 +12,9 @@ function testSmoothingProfileKeepsCanonicalCurves(testCase)
 half = beautySmoothingProfile(50);
 verifyEqual(testCase, half.ratio, .5, 'AbsTol', 1e-12);
 verifyEqual(testCase, half.naturalRatio, .75, 'AbsTol', 1e-12);
+verifyEqual(testCase, half.highEndSmoothingCurve, 0, 'AbsTol', 0);
+verifyEqual(testCase, half.highEndRepairGate, 0, 'AbsTol', 0);
+verifyEqual(testCase, half.highEndToneGate, 0, 'AbsTol', 0);
 verifyEqual(testCase, half.blemishStrength, .5 ^ .85, ...
     'AbsTol', 1e-12);
 
@@ -26,6 +29,9 @@ verifyGreaterThan(testCase, maximum.blemishStrength, ...
 verifyGreaterThan(testCase, maximum.toneStrength, highNatural.toneStrength);
 verifyGreaterThan(testCase, maximum.outsideFaceStrength, ...
     highNatural.outsideFaceStrength);
+verifyEqual(testCase, highNatural.highEndRepairGate, 0, 'AbsTol', 0);
+verifyEqual(testCase, maximum.highEndRepairGate, 1, 'AbsTol', 0);
+verifyEqual(testCase, maximum.highEndToneGate, 1, 'AbsTol', 0);
 end
 
 function testSmoothingKeepsEffectiveSkinYCbCrMedians(testCase)

@@ -1,5 +1,5 @@
 function [blemishMap, diagnostics] = buildBlemishMap( ...
-        inputImage, frequency, beautyMasks)
+        inputImage, frequency, beautyMasks, stageProtection)
 %BUILDBLEMISHMAP 根据固定频率和色度残差生成瑕疵置信度图。
 %   瑕疵图不读取任何美颜强度，因此同一输入在不同滑块档位下保持
 %   同一分类结果。Fine、Mid 和色度证据先分别归一化，再合成为一张
@@ -13,7 +13,15 @@ function [blemishMap, diagnostics] = buildBlemishMap( ...
 %   masks.buildBeautyPolicyEvidence 的 policy-time evidence 层无
 %   依赖关系。后续 Repair/Tone consumer 应从 runtimeEvidence 读取
 %   本图，而不是假设它存在于静态 Context。
+%
+%   第 4 参数 stageProtection 只用于构建独立的 denseBlemishField：高置信
+%   种子的局部密度可以形成大片连续包络，但包络最终仍逐像素经过
+%   processability、hard、region band、五官/耳部软保护和结构保护裁剪。
+%   该证据不回写任何 protection，也不进入现有 compact blob Repair。
 
+if nargin < 4
+    stageProtection = [];
+end
 validateInput(inputImage, frequency, beautyMasks);
 imageSize = size(inputImage, 1:2);
 fine = double(frequency.fine);
@@ -29,7 +37,9 @@ skinCandidate = skinMask .* (1 - hardProtection);
 skinSupport = skinCandidate > .05;
 if ~any(skinSupport(:))
     blemishMap = zeros(imageSize);
-    diagnostics = emptyDiagnostics(imageSize, skinCandidate);
+    denseBlemishField = zeros(imageSize);
+    diagnostics = emptyDiagnostics(imageSize, skinCandidate, ...
+        denseBlemishField);
     return;
 end
 
@@ -66,6 +76,8 @@ confidence = min(max(confidence, 0), 1) .* double(skinCandidate > .01);
 % 保留原始证据的空间位置，平滑项只负责让修复权重连续，不扩大皮肤
 % 候选区域，也不削弱结构保护本身。
 blemishMap = min(max(confidence, 0), 1);
+denseBlemishField = buildDenseBlemishField(blemishMap, beautyMasks, ...
+    stageProtection, faceScale);
 structureProtection = readOptionalMask(beautyMasks, ...
     'structureProtectionMask', imageSize);
 [chromaProtection, hasChromaProtection] = resolveChromaProtectionMask( ...
@@ -84,6 +96,7 @@ diagnostics = struct( ...
     'blemishMap', blemishMap, ...
     'map', blemishMap, ...
     'confidence', blemishMap, ...
+    'denseBlemishField', denseBlemishField, ...
     'fineEvidence', fineEvidence, ...
     'midEvidence', midEvidence, ...
     'chromaEvidence', chromaEvidence, ...
@@ -104,6 +117,148 @@ diagnostics = struct( ...
     'fineThresholds', fineThresholds, ...
     'midThresholds', midThresholds, ...
     'chromaThresholds', chromaThresholds);
+end
+
+function denseBlemishField = buildDenseBlemishField( ...
+        blemishMap, beautyMasks, stageProtection, faceScale)
+%BUILDDENSEBLEMISHFIELD 从高置信证据密度构建连续瑕疵包络。
+%   这里不使用连通域面积、跨度或 fillRatio；这些约束属于现有
+%   compact blob Repair，必须继续由 repairSkinBlemishes 独立执行。
+%   先生成高置信种子，再以 faceScale 归一的局部密度形成包络，最后
+%   逐像素应用不可放宽的保护门。任何 blemish 证据都不能扩大这些门。
+imageSize = size(blemishMap);
+[ordinarySkin] = denseOrdinarySkin(beautyMasks, stageProtection, imageSize);
+% 高置信种子用于确认密集瑕疵，中置信种子用于补足“每个雀斑都不够
+% 高”的连续场。两者都必须先落在同一安全域内；它们只改变 dense
+% evidence 的覆盖，不会改变任何保护门。
+highSeed = ordinarySkin & blemishMap >= .72;
+mediumSeed = ordinarySkin & blemishMap >= .50;
+if ~any(highSeed(:)) && ~any(mediumSeed(:))
+    denseBlemishField = zeros(imageSize);
+    return;
+end
+
+densitySigma = min(14, max(3, .022 * double(faceScale)));
+localHighDensity = imgaussfilt(double(highSeed), densitySigma, ...
+    'Padding', 'replicate');
+localMediumDensity = imgaussfilt(double(mediumSeed), densitySigma, ...
+    'Padding', 'replicate');
+% 面积较大的雀斑场不一定有足够多的 .72 高置信像素。局部平均
+% blemish evidence 只作为低权重底座，允许连续色斑进入曲面先验，
+% 但不会单独开启 compact Repair。
+localEvidence = imgaussfilt(blemishMap .* double(ordinarySkin), ...
+    densitySigma, 'Padding', 'replicate');
+% 大尺度密度用于连续雀斑场：整片皮肤存在许多中高置信种子时，
+% 种子之间的安全皮肤也需要进入独立 dense 分支；这不改变 compact
+% blob 的面积/跨度限制，也不放宽任何结构保护。
+broadSigma = min(28, max(densitySigma + 2, .055 * double(faceScale)));
+broadHighDensity = imgaussfilt(double(highSeed), broadSigma, ...
+    'Padding', 'replicate');
+broadMediumDensity = imgaussfilt(double(mediumSeed), broadSigma, ...
+    'Padding', 'replicate');
+broadEvidence = imgaussfilt(blemishMap .* double(ordinarySkin), ...
+    broadSigma, 'Padding', 'replicate');
+
+% 小尺度保留局部斑点，大尺度识别整片密集瑕疵场。高置信路径仍是
+% 主证据；中置信路径只作为连续场的低权重底座，避免稀疏自然纹理被
+% 一颗误检种子升级为大面积修复。
+highEnvelope = max( ...
+    smoothStep(localHighDensity, .035, .12), ...
+    .75 * smoothStep(broadHighDensity, .012, .050));
+mediumEnvelope = max( ...
+    smoothStep(localMediumDensity, .075, .22), ...
+    .60 * smoothStep(broadMediumDensity, .025, .095));
+evidenceEnvelope = max( ...
+    smoothStep(localEvidence, .105, .24), ...
+    .65 * smoothStep(broadEvidence, .080, .18));
+densityEnvelope = max(highEnvelope, .55 * mediumEnvelope);
+densityEnvelope = max(densityEnvelope, .70 * evidenceEnvelope);
+
+% 沿真实 safe skin 的内侧羽化，避免 semantic skin 边界产生新的圆圈或
+% 硬切线。bwdist 只用于形成边界距离，不扩大 ordinarySkin 的语义域。
+edgeWidth = max(2, round(.012 * double(faceScale)));
+skinDistance = bwdist(~ordinarySkin);
+edgeFade = smoothStep(skinDistance, 0, edgeWidth);
+denseBlemishField = densityEnvelope .* edgeFade .* double(ordinarySkin);
+denseBlemishField(denseBlemishField < .05) = 0;
+denseBlemishField = min(max(denseBlemishField, 0), 1);
+end
+
+function ordinarySkin = denseOrdinarySkin( ...
+        beautyMasks, stageProtection, imageSize)
+%DENSEORDINARYSKIN 返回 dense field 允许使用的普通可处理皮肤。
+%   语义细节的稳定来源是 stageProtection 的 regionBand 与规范
+%   target/support 门；缺少 stageProtection 的直接兼容调用则使用现有
+%   Beauty Masks 的纹理/结构/hard/protection 字段，不伪造语义区域。
+skinMask = readOptionalMask(beautyMasks, 'skinMask', imageSize);
+% 生产路径提供 faceSkinMask 时，dense 场只允许在脸部安全皮肤内建立。
+% 兼容/单元 fixture 未提供该字段时回退到 skinMask，避免伪造语义区域。
+faceSkinMask = readOptionalMask(beautyMasks, 'faceSkinMask', imageSize);
+if any(faceSkinMask(:) > .05)
+    skinMask = min(skinMask, faceSkinMask);
+end
+hard = readOptionalMask(beautyMasks, 'hardProtectionMask', imageSize);
+texture = readOptionalMask(beautyMasks, ...
+    'textureProtectionMask', imageSize);
+structure = readOptionalMask(beautyMasks, ...
+    'structureProtectionMask', imageSize);
+regionBand = zeros(imageSize);
+
+if isstruct(stageProtection) && isscalar(stageProtection)
+    hard = max(hard, readStageMask(stageProtection, 'hard', imageSize));
+    if isfield(stageProtection, 'support') && ...
+            isstruct(stageProtection.support)
+        texture = max(texture, readStageMask(stageProtection.support, ...
+            'repairFine', imageSize));
+        structure = max(structure, readStageMask(stageProtection.support, ...
+            'repairMid', imageSize));
+    end
+    if isfield(stageProtection, 'target') && ...
+            isstruct(stageProtection.target)
+        texture = max(texture, readStageMask(stageProtection.target, ...
+            'repairFine', imageSize));
+        structure = max(structure, readStageMask(stageProtection.target, ...
+            'repairMid', imageSize));
+    end
+    regionNames = {'regionBandFine', 'regionBandMid', 'regionBandBase', ...
+        'regionBandTone', 'regionBandWhitening'};
+    for index = 1:numel(regionNames)
+        regionBand = max(regionBand, readStageMask(stageProtection, ...
+            regionNames{index}, imageSize));
+    end
+end
+
+if isfield(beautyMasks, 'protectionMask')
+    legacyProtection = readOptionalMask(beautyMasks, ...
+        'protectionMask', imageSize);
+    texture = max(texture, legacyProtection);
+    structure = max(structure, legacyProtection);
+end
+
+% 阈值只把已有软保护转换为 dense field 的排除条件，不修改原始
+% protection 数值。纹理保护覆盖眉毛、眼睑/睫毛、唇部和鼻部软带；
+% 结构保护覆盖鼻翼沟、耳轮及其他结构边缘；regionBand 覆盖 V4
+% policy 的语义带。skinMask 本身排除头发、衣服和背景。
+ordinarySkin = skinMask > .05 & hard < .50 & ...
+    texture < .20 & structure < .15 & regionBand <= eps;
+end
+
+function value = readStageMask(context, name, imageSize)
+if isfield(context, name)
+    value = readStandaloneMask(context.(name), imageSize, name);
+else
+    value = zeros(imageSize);
+end
+end
+
+function value = readStandaloneMask(value, imageSize, name)
+if (~isnumeric(value) && ~islogical(value)) || ~isreal(value) || ...
+        ~isequal(size(value), imageSize) || any(~isfinite(value(:))) || ...
+        any(value(:) < 0) || any(value(:) > 1)
+    error('beauty:InvalidBlemishInput', ...
+        '字段 %s 的尺寸或取值无效。', name);
+end
+value = double(value);
 end
 
 function [evidence, thresholds] = residualEvidence( ...
@@ -209,11 +364,13 @@ end
 value = readMask(context, name, imageSize);
 end
 
-function diagnostics = emptyDiagnostics(imageSize, skinCandidate)
+function diagnostics = emptyDiagnostics(imageSize, skinCandidate, ...
+        denseBlemishField)
 empty = zeros(imageSize);
 diagnostics = struct( ...
     'blemishMap', empty, ...
     'confidence', empty, ...
+    'denseBlemishField', denseBlemishField, ...
     'fineEvidence', empty, ...
     'midEvidence', empty, ...
     'chromaEvidence', empty, ...

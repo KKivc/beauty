@@ -63,7 +63,7 @@ cache = context.runtimeCache;
 % T08：缓存记录的契约戳随生产 Context 升为 '4.0'；缓存兼容由
 % artifactVersion（'v3.2'）把握。
 verifyEqual(testCase, cache.schemaVersion, '4.0');
-verifyEqual(testCase, cache.algorithmVersion, 'v3.3');
+verifyEqual(testCase, cache.algorithmVersion, 'v3.6');
 verifyEqual(testCase, cache.artifactVersion, 'v3.2');
 verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.2');
 verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.2');
@@ -168,7 +168,7 @@ verifyEqual(testCase, diagnostics.runtimeCache.status, 'regenerated');
 verifyEqual(testCase, output, uncachedOutput);
 
 tampered = context;
-tampered.runtimeCache.algorithmVersion = 'v3.4';
+tampered.runtimeCache.algorithmVersion = 'v3.5';
 [output, diagnostics] = beautifyImage(image, params, faceBox, tampered);
 verifyFalse(testCase, diagnostics.reusedRuntimeCache);
 verifyEqual(testCase, diagnostics.runtimeCache.status, 'regenerated');

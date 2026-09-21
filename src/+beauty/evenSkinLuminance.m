@@ -1,5 +1,6 @@
 function [luminanceResult, diagnostics] = evenSkinLuminance( ...
-        frequency, beautyMasks, smoothingStrength, baseLuminanceContract)
+        frequency, beautyMasks, smoothingStrength, baseLuminanceContract, ...
+        runtimeBlemish)
 %EVENSKINLUMINANCE 对皮肤 Base 亮度执行局部均匀化。
 %   本模块只读取 frequency.base。可靠皮肤的归一化加权局部参考用于
 %   生成目标 Base；输出 baseDelta 已经包含全部作用权重，合成阶段不再
@@ -53,6 +54,10 @@ function [luminanceResult, diagnostics] = evenSkinLuminance( ...
 %   之前的 legacy 门控积（补码往返误差 ≤2^-54，见 policy 层说明），
 %   带外泄漏维持 T30 之前的 ≤1 灰度级量级。
 
+if nargin < 5
+    runtimeBlemish = [];
+end
+
 if nargin < 3
     error('beauty:InvalidEvenLuminanceInput', ...
         'Base 亮度均匀化需要频率、Beauty Masks 和磨皮强度。');
@@ -83,6 +88,7 @@ targetGate = 1 - baseLuminanceContract.target.baseLuminance;
 supportGate = 1 - baseLuminanceContract.support.baseLuminance;
 hardProtectionGate = 1 - baseLuminanceContract.hard;
 regionBandGate = baseLuminanceContract.regionBandGate;
+profile = beautySmoothingProfile(smoothingStrength);
 
 % 参考权重与作用权重分开：前者只决定局部参考是否可信，后者决定
 % 当前像素实际校正多少。这样五官和强结构不会污染邻域参考，也不会
@@ -91,6 +97,12 @@ regionBandGate = baseLuminanceContract.regionBandGate;
 % supportGate（含 (1-hard)），刻意不含 regionBandGate——band 只作用于
 % 逐像素 supportMap，否则带内变化会经参考池扩散到带外。
 referenceReliability = skinMask .* strengthMap .* supportGate;
+% dense/blemish 参考排除只在 75 档以上启用。低中档不读取新增运行期
+% 门，保持已有 Base 输出逐位不变；高档路径使用与 Repair 相同的
+% denseBlemishField 与高置信候选排除，避免低频目标污染全局参考。
+referenceExclusion = readRuntimeBlemishExclusion(runtimeBlemish, imageSize);
+referenceReliability = referenceReliability .* ...
+    (1 - profile.highEndRepairGate .* referenceExclusion);
 referenceReliability = min(max(referenceReliability, 0), 1);
 
 faceScale = readFaceScale(frequency, beautyMasks, imageSize);
@@ -141,11 +153,34 @@ supportMap = baseWeightCurve .* regionalSkinWeight .* targetGate .* ...
     hardProtectionGate .* regionBandGate .* referenceCoverage;
 supportMap = min(max(supportMap, 0), 1);
 
+% dense 区域的慢变斑驳只增加受限的 Base 支持，不改变原有参考目标。
+% denseAllowedWeight 已经经过 Repair 的同皮肤参考覆盖与结构门；这里
+% 重新乘 Base 自己的 target/hard/band 门，并限制总支持，保留鼻梁和
+% 脸颊曲面的低频坡度。高档门显式保留，75 档及以下该分支逐位为零。
+denseAllowedWeight = readRuntimeDenseAllowedWeight(runtimeBlemish, imageSize);
+denseBaseReference = readRuntimeDenseBaseReference( ...
+    runtimeBlemish, imageSize);
+denseBaseReferenceCoverage = readRuntimeDenseBaseReferenceCoverage( ...
+    runtimeBlemish, imageSize);
+denseReferenceCoverage = readRuntimeDenseReferenceCoverage( ...
+    runtimeBlemish, imageSize);
+densePermission = denseAllowedWeight ./ max(denseReferenceCoverage, .05);
+densePermission(denseAllowedWeight <= eps) = 0;
+densePermission = min(max(densePermission, 0), 1);
+denseBaseWeight = .68 .* profile.highEndRepairGate .* ...
+    densePermission .* denseBaseReferenceCoverage .* targetGate .* ...
+    hardProtectionGate .* regionBandGate;
+denseBaseWeight = min(max(denseBaseWeight, 0), 1);
+supportMap = min(max(supportMap + denseBaseWeight, 0), 1);
+
 % 先限制未经计权的目标差异，再乘一次完整作用权重。该差异保留
 % 符号，因此暗区可提亮、亮区可压低，二者使用同一条校正路径。
 rawBaseDelta = localReference - base;
 limitedBaseDelta = min(max(rawBaseDelta, -.03), .03);
 baseDelta = limitedBaseDelta .* supportMap;
+denseBaseDelta = min(max(denseBaseReference - base, -.03), .03) .* ...
+    denseBaseWeight;
+baseDelta = min(max(baseDelta + denseBaseDelta, -.03), .03);
 baseAfter = base + baseDelta;
 
 luminanceResult = struct( ...
@@ -205,6 +240,11 @@ diagnostics = struct( ...
     'baseSupport', supportMap, ...
     'alphaMap', supportMap, ...
     'referenceSigma', referenceSigma, ...
+    'denseAllowedWeight', denseAllowedWeight, ...
+    'denseBaseWeight', denseBaseWeight, ...
+    'denseBaseReference', denseBaseReference, ...
+    'denseBaseReferenceCoverage', denseBaseReferenceCoverage, ...
+    'denseBaseDelta', denseBaseDelta, ...
     'faceScale', faceScale, ...
     'baseDeltaLimit', .03, ...
     'maxAbsBaseDelta', max(abs(baseDelta(:))), ...
@@ -298,6 +338,89 @@ if isfield(context, name)
 else
     value = zeros(imageSize);
 end
+end
+
+function exclusion = readRuntimeBlemishExclusion(value, imageSize)
+%READRUNTIMEBLEMISHEXCLUSION 读取高档 Base 参考池的运行期排除域。
+%   只保留一个内部排除语义：dense field 与高置信 blemish candidate
+%   的并集。该字段不进入持久化 Context 或缓存校验契约。
+exclusion = zeros(imageSize);
+if isempty(value)
+    return;
+end
+if isstruct(value)
+    if isfield(value, 'blemishMap')
+        blemishMap = readStandaloneMask(value.blemishMap, imageSize, ...
+            'blemishMap');
+    elseif isfield(value, 'confidence')
+        blemishMap = readStandaloneMask(value.confidence, imageSize, ...
+            'confidence');
+    else
+        error('beauty:InvalidEvenLuminanceInput', ...
+            '运行期瑕疵诊断缺少 blemishMap 或 confidence。');
+    end
+    if isfield(value, 'denseBlemishField')
+        denseField = readStandaloneMask(value.denseBlemishField, ...
+            imageSize, 'denseBlemishField');
+    else
+        denseField = zeros(imageSize);
+    end
+else
+    blemishMap = readStandaloneMask(value, imageSize, 'blemishMap');
+    denseField = zeros(imageSize);
+end
+exclusion = max(denseField, double(blemishMap > .60));
+end
+
+function denseAllowedWeight = readRuntimeDenseAllowedWeight(value, imageSize)
+%READRUNTIMEDENSEALLOWEDWEIGHT 读取 Repair 发布的 dense 作用门。
+denseAllowedWeight = zeros(imageSize);
+if isempty(value) || ~isstruct(value) || ...
+        ~isfield(value, 'denseAllowedWeight')
+    return;
+end
+denseAllowedWeight = readStandaloneMask(value.denseAllowedWeight, ...
+    imageSize, 'denseAllowedWeight');
+end
+
+function denseReference = readRuntimeDenseBaseReference(value, imageSize)
+denseReference = zeros(imageSize);
+if isempty(value) || ~isstruct(value) || ...
+        ~isfield(value, 'denseBaseReference')
+    return;
+end
+denseReference = readStandaloneMask(value.denseBaseReference, imageSize, ...
+    'denseBaseReference');
+end
+
+function coverage = readRuntimeDenseBaseReferenceCoverage(value, imageSize)
+coverage = zeros(imageSize);
+if isempty(value) || ~isstruct(value) || ...
+        ~isfield(value, 'denseBaseReferenceCoverage')
+    return;
+end
+coverage = readStandaloneMask(value.denseBaseReferenceCoverage, imageSize, ...
+    'denseBaseReferenceCoverage');
+end
+
+function coverage = readRuntimeDenseReferenceCoverage(value, imageSize)
+coverage = zeros(imageSize);
+if isempty(value) || ~isstruct(value) || ...
+        ~isfield(value, 'denseReferenceCoverageForTarget')
+    return;
+end
+coverage = readStandaloneMask(value.denseReferenceCoverageForTarget, ...
+    imageSize, 'denseReferenceCoverageForTarget');
+end
+
+function value = readStandaloneMask(value, imageSize, name)
+if (~isnumeric(value) && ~islogical(value)) || ~isreal(value) || ...
+        ~isequal(size(value), imageSize) || any(~isfinite(value(:))) || ...
+        any(value(:) < 0) || any(value(:) > 1)
+    error('beauty:InvalidEvenLuminanceInput', ...
+        '运行期瑕疵字段 %s 无效。', name);
+end
+value = double(value);
 end
 
 function faceScale = readFaceScale(frequency, beautyMasks, imageSize)

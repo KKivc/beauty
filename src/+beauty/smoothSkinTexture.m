@@ -99,9 +99,11 @@ end
 faceScale = readFaceScale(frequency);
 highStrengthWeight = profile.highStrengthCurve;
 smallResolutionWeight = 1 - smoothStep(faceScale, 140, 180);
-% v3.3：放开正常尺寸人脸的高档 Fine 自适应下限至约 0.42（.60 - .18），
-% 小人脸保持不低于 0.60，避免小图细节丢失。
-normalRelaxation = .18 * highStrengthWeight * (1 - smallResolutionWeight);
+% v3.4：放开正常尺寸人脸的高档 Fine 自适应下限至约 0.28（.60 - .18 - .14），
+% 75 档及以下高档延伸恒为 0，与 v3.3 逐位一致；小人脸保持不低于 0.60。
+highEndRelaxation = .14 * smoothStep(ratio, .75, 1.00) * (1 - smallResolutionWeight);
+normalRelaxation = .18 * highStrengthWeight * (1 - smallResolutionWeight) + ...
+    highEndRelaxation;
 baseFloor = .60 - normalRelaxation;
 energyAdjustment = .08 * smoothStep(fineEnergy, .004, .010) - ...
     .06 * smoothStep(blemishMean, .08, .14);

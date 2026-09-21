@@ -31,13 +31,16 @@ function [repairedFrequency, diagnostics] = repairSkinBlemishes( ...
 %     repairContract.support.repairFine  —— 邻域参考池纹理保护；
 %     repairContract.textureBandGate     —— T30 纯 policy 带门，只乘逐像素
 %       权重，不进邻域参考统计；
-%     blemishMap                        —— 运行期证据。
+%     blemishMap                        —— 运行期证据；也可传入含
+%       blemishMap/denseBlemishField 的诊断结构。denseBlemishField 走独立
+%       的高档分频 Repair 分支，不并入 compact blob。
 %
 %   生产顺序（与 legacy 逐位等价的关键）：结构门在 [0,1] 截断之前作用于
 %   权重；纹理门作用于 Fine/Mid/chroma，鼻部门只作用于 Mid，二者均在截断
 %   之后、textureBandGate 之前，且鼻部门先于纹理门（legacy 乘法结合序）。
 %   V4 policy 额外要求所有 Repair 证据先经过紧凑 Blob 筛选，Fine 为默认
-%   通道，Mid 只接受极高置信紧凑目标；compat contract 保留原有公式。
+%   通道，Mid 只接受极高置信紧凑目标；75--100 档的额外修复只通过独立
+%   highEndRepairGate 进入，不改变 75 档及以下公式。
 %
 %   生产链在结构门与纹理/鼻部门之间对权重做 [0,1] 截断（
 %   min(max(w·structureGate,0),1) 之后才乘纹理/鼻部门），把纹理或鼻部折叠
@@ -65,7 +68,8 @@ end
 validateFrequency(frequency);
 imageSize = frequency.imageSize(1:2);
 validateMasks(beautyMasks, imageSize);
-blemishMap = readBlemishMap(blemishMap, imageSize);
+[blemishMap, denseBlemishField] = readBlemishInput( ...
+    blemishMap, imageSize);
 if ~isValidStrength(smoothingStrength)
     error('beauty:InvalidStrength', '磨皮强度必须是 0 到 100 的数值标量。');
 end
@@ -97,6 +101,9 @@ if any(nonFacePixels(:))
 end
 normalRepairCurve = min(profile.blemishStrength / (.75 ^ .85), 1);
 highEndRepairCurve = max(profile.blemishStrength - .75 ^ .85, 0);
+highEndRepairGate = profile.highEndRepairGate;
+repairFineGain = 1 + .90 * highEndRepairGate;
+repairMidGain = 1 + .65 * highEndRepairGate;
 % 前置结构门（含 runtime blemish 放宽与强结构固定下限）由 contract 按生产
 % 原式重建并发布为 support.repairMid 的补码；执行层只做补码还原，不再自行
 % 组合 general masks。该门同时用于邻域参考池（见下）。
@@ -157,18 +164,21 @@ if policyRepairEnabled
     % V4 Repair 以 Fine 为唯一默认修复通道；Mid 只接受极高置信、
     % 紧凑且已通过同一结构门的目标，避免用中频把自然曲面拉平。
     fineWeight = repairCurveMap .* repairEvidence .* allowed .* ...
-        structureGate;
+        structureGate .* repairFineGain;
     midConfidence = smoothStep(repairEvidence, .82, .95);
     mediumWeight = highEndRepairCurve .* midConfidence .* ...
-        double(blobMask) .* globalGate .* allowed .* structureGate;
+        double(blobMask) .* globalGate .* allowed .* structureGate .* ...
+        repairMidGain;
 else
     fineWeight = repairCurveMap .* (repairEvidence + .25 * highConfidence) .* ...
-        allowed .* structureGate + (highEndRepairCurve .* ...
-        highEndConfidence) .* allowed .* structureGate;
+        allowed .* structureGate .* repairFineGain + ...
+        (highEndRepairCurve .* highEndConfidence) .* allowed .* ...
+        structureGate .* repairFineGain;
     mediumWeight = repairCurveMap .* (.95 * mediumConfidence + ...
         .40 * highConfidence) .* allowed .* structureGate + ...
         (highEndRepairCurve .* ...
         highEndConfidence) .* allowed .* structureGate;
+    mediumWeight = mediumWeight .* repairMidGain;
     midConfidence = highConfidence;
 end
 mediumWeight = min(max(mediumWeight, 0), 1);
@@ -213,15 +223,113 @@ if policyRepairEnabled
 else
     referenceBlemishGate = 1 - .86 * blemishMap;
 end
+% dense field 是独立的连续包络：高档路径不让其污染参考池。把排除门
+% 乘 highEndRepairGate，保证 0--75 档的 compact Repair 参考统计逐位不变。
+denseReferenceGate = 1 - highEndRepairGate .* denseBlemishField;
+referenceBlemishGate = referenceBlemishGate .* denseReferenceGate;
 referenceReliability = allowed .* supportTextureGate .* ...
     referenceBlemishGate .* supportStructureGate;
 referenceWeight = imfilter(referenceReliability, kernel, 'replicate');
+referenceCoverage = min(max(referenceWeight ./ max(sum(kernel(:)), 1), ...
+    0), 1);
 fineReference = imfilter(fine .* referenceReliability, kernel, ...
     'replicate') ./ max(referenceWeight, eps);
 midReference = imfilter(mid .* referenceReliability, kernel, ...
     'replicate') ./ max(referenceWeight, eps);
-fineReference(referenceWeight <= eps) = 0;
-midReference(referenceWeight <= eps) = 0;
+minimumReferenceCoverage = .05;
+referenceAvailable = referenceWeight > eps & ...
+    referenceCoverage >= minimumReferenceCoverage;
+fineReference(~referenceAvailable) = 0;
+midReference(~referenceAvailable) = 0;
+
+% dense Repair 使用排除高置信瑕疵后的同皮肤多尺度参考。小窗口优先
+% 保留局部曲面，较大窗口只在 dense 区域缺少近邻参考时补足覆盖；窗口
+% 有限且只用于构造参考，不把结果作为全局模糊直接写回图像。
+denseFineReference = zeros(imageSize);
+denseMidReference = zeros(imageSize);
+denseBaseReference = zeros(imageSize);
+denseReferenceCoverage = zeros(imageSize);
+denseBaseReferenceCoverage = zeros(imageSize);
+denseSurfaceReferenceReliability = zeros(imageSize);
+hasFaceSurfacePrior = isfield(beautyMasks, 'faceSkinMask') && ...
+    any(double(beautyMasks.faceSkinMask(:)) > .05);
+if highEndRepairGate > eps && any(denseBlemishField(:) > eps)
+    if hasFaceSurfacePrior
+        % 真实解析提供 faceSkinMask 时，密集雀斑区本身也是曲面先验
+        % 的有效样本。这里不再把 dense/high-confidence 像素排除，
+        % 只保留 face-skin、hard、纹理和结构安全域；曲面函数负责
+        % 用偏亮分位拒绝暗离群点。
+        faceSkin = readOptionalMask(beautyMasks, 'faceSkinMask', imageSize);
+        denseSurfaceReferenceReliability = allowed .* ...
+            double(faceSkin > .05) .* supportTextureGate .* ...
+            supportStructureGate;
+        [denseFineReference, denseReferenceCoverage] = ...
+            beauty.buildRobustSurfaceReference(fine, ...
+            denseSurfaceReferenceReliability, faceScale, 'median');
+        [denseMidReference, denseMidCoverage] = ...
+            beauty.buildRobustSurfaceReference(mid, ...
+            denseSurfaceReferenceReliability, faceScale, 'mid');
+        denseReferenceCoverage = min(denseReferenceCoverage, ...
+            denseMidCoverage);
+    else
+        % 缺少真实语义 faceSkinMask 的兼容/单元入口仍要求干净近邻，
+        % 用于显式验证“完全没有有效皮肤参考时必须归零”。
+        denseReferenceGate = double(denseBlemishField <= eps) .* ...
+            double(blemishMap <= .60);
+        denseReferenceReliability = allowed .* supportTextureGate .* ...
+            denseReferenceGate .* supportStructureGate;
+        [denseFineReference, denseMidReference, denseReferenceCoverage] = ...
+            multiScaleReference(fine, mid, denseReferenceReliability, ...
+            faceScale, radius);
+        denseSurfaceReferenceReliability = denseReferenceReliability;
+    end
+    % Base 需要单独的鲁棒曲面：亮度参考允许拒绝安全池中的暗离群点，
+    % 同时通过多尺度覆盖保留面部慢变曲面。使用 source luminance
+    % 建立先验而不是把 compact Repair 的频带均值直接当作大面积
+    % Base 目标；鲁棒曲面本身会抑制 Fine 离群点，最终 Base 仍受
+    % 调用方的有限幅度门约束。
+    denseSurfaceLuminance = frequency.sourceLuminance;
+    [denseBaseReference, denseBaseReferenceCoverage] = ...
+        beauty.buildRobustSurfaceReference(denseSurfaceLuminance, ...
+        denseSurfaceReferenceReliability, faceScale, 'luminance');
+    denseReferenceCoverage = max(denseReferenceCoverage, ...
+        denseBaseReferenceCoverage);
+end
+
+% 没有任何可信参考时，修复权重必须归零。参考值置零只是为了保持
+% 诊断数组有限，不能被解释成“把目标频带修到零”；否则会在紧凑候选
+% 或保护带交叠处制造灰块/平坦块。
+fineWeight(~referenceAvailable) = 0;
+mediumWeight(~referenceAvailable) = 0;
+chromaWeight(~referenceAvailable) = 0;
+
+denseReferenceCoverageForTarget = max(referenceCoverage, ...
+    denseReferenceCoverage);
+denseReferenceAvailable = denseReferenceCoverageForTarget >= ...
+    minimumReferenceCoverage;
+
+% 这里的置信度只描述语义安全域中的有效样本覆盖，不再代表“附近
+% 是否有完全无斑像素”。高档密集场可以使用自身统计，只在 face-skin
+% 不足或结构域没有有效样本时退让。
+denseSurfaceConfidence = smoothStep(denseReferenceCoverageForTarget, ...
+    .12, .45);
+faceSkinGate = ones(imageSize);
+if isfield(beautyMasks, 'faceSkinMask')
+    faceSkinMask = readOptionalMask(beautyMasks, 'faceSkinMask', imageSize);
+    if any(faceSkinMask(:) > .05)
+        faceSkinGate = double(faceSkinMask > .05);
+    end
+end
+
+% dense field 独立使用高档门；不得把大片连续证据伪装成 compact blob。
+% denseReferenceCoverageForTarget 允许大面积目标使用多尺度同皮肤参考，
+% 同时保留 referenceCoverage 作为已有 compact 参考的必要条件。
+denseAllowedWeight = denseBlemishField .* allowed .* structureGate .* ...
+    targetFineGate .* textureBandGate .* ...
+    highEndRepairGate .* double(~blobMask) .* ...
+    denseSurfaceConfidence .* faceSkinGate;
+denseAllowedWeight(~denseReferenceAvailable) = 0;
+denseAllowedWeight = min(max(denseAllowedWeight, 0), 1);
 
 % 参考只允许把同号残差向零收敛，避免局部邻域的反向纹理在
 % 强度升高时被重新放大，从而保证 Fine 和瑕疵能量单调下降。
@@ -229,6 +337,33 @@ fineTarget = sign(fine) .* min(abs(fine), abs(fineReference));
 midTarget = sign(mid) .* min(abs(mid), abs(midReference));
 fineCorrection = fineWeight .* (fineTarget - fine);
 mediumCorrection = mediumWeight .* (midTarget - mid);
+
+% dense 分支只在 highEndRepairGate 打开后进入。Mid 承担缓慢斑驳的
+% 主要收敛，Fine 仅轻量衰减以保留微纹理；所有权重仍受 target/band
+% 与同皮肤参考覆盖约束。Mid 增量再做有限幅度裁剪，避免鼻梁、脸颊
+% 曲面因参考尺度变化被拉平。
+denseFineWeight = .38 .* highEndRepairGate .* denseAllowedWeight .* ...
+    targetFineGate .* textureBandGate;
+denseMidWeight = .92 .* highEndRepairGate .* denseAllowedWeight .* ...
+    targetMidGate .* midBandGate .* targetFineGate .* textureBandGate;
+denseChromaWeight = .58 .* highEndRepairGate .* denseAllowedWeight .* ...
+    targetFineGate .* textureBandGate;
+denseFineWeight = min(max(denseFineWeight, 0), 1);
+denseMidWeight = min(max(denseMidWeight, 0), 1);
+denseChromaWeight = min(max(denseChromaWeight, 0), 1);
+denseFineTarget = sign(fine) .* min(abs(fine), abs(denseFineReference));
+denseMidTarget = min(max(denseMidReference, -.035), .035);
+denseMidDifference = denseMidTarget - mid;
+denseMidLimit = min(.035, .35 .* abs(mid) + .004);
+denseMidDifference = min(max(denseMidDifference, -denseMidLimit), ...
+    denseMidLimit);
+denseFineCorrection = denseFineWeight .* (denseFineTarget - fine);
+denseMediumCorrection = denseMidWeight .* denseMidDifference;
+fineCorrection = fineCorrection + denseFineCorrection;
+mediumCorrection = mediumCorrection + denseMediumCorrection;
+fineWeight = min(max(fineWeight + denseFineWeight, 0), 1);
+mediumWeight = min(max(mediumWeight + denseMidWeight, 0), 1);
+chromaWeight = min(max(chromaWeight + denseChromaWeight, 0), 1);
 
 repairedFrequency = frequency;
 repairedFrequency.fine = fine + fineCorrection;
@@ -246,7 +381,10 @@ repairedFrequency.alphaMap = min(1, max(alphaMap, ...
 repairedFrequency.blemishRepair = struct( ...
     'fineCorrection', fineCorrection, ...
     'mediumCorrection', mediumCorrection, ...
-    'chromaWeight', chromaWeight);
+    'chromaWeight', chromaWeight, ...
+    'denseFineCorrection', denseFineCorrection, ...
+    'denseMediumCorrection', denseMediumCorrection, ...
+    'denseChromaWeight', denseChromaWeight);
 
 beforeEnergy = mean(abs(fine(:)) + abs(mid(:)));
 afterEnergy = mean(abs(repairedFrequency.fine(:)) + ...
@@ -258,12 +396,17 @@ blemishAfter = mean((abs(repairedFrequency.fine(:)) + ...
 % 报告 target 门（逐像素修改保护）与 support 门（参考池保护）两族。
 diagnostics = struct( ...
     'blemishMap', blemishMap, ...
+    'denseBlemishField', denseBlemishField, ...
+    'denseAllowedWeight', denseAllowedWeight, ...
     'sparseGate', sparseGate, ...
     'globalHighDensity', globalHighDensity, ...
     'globalBlemishMean', globalBlemishMean, ...
     'globalGate', globalGate, ...
     'normalRepairCurve', normalRepairCurve, ...
     'highEndRepairCurve', highEndRepairCurve, ...
+    'highEndRepairGate', highEndRepairGate, ...
+    'repairFineGain', repairFineGain, ...
+    'repairMidGain', repairMidGain, ...
     'policyRepairEnabled', policyRepairEnabled, ...
     'compactCandidate', compactCandidate, ...
     'compactBlobAreaLimit', blobAreaLimit(faceScale), ...
@@ -291,13 +434,32 @@ diagnostics = struct( ...
     'structureGate', structureGate, ...
     'referenceReliability', referenceReliability, ...
     'referenceWeight', referenceWeight, ...
+    'referenceCoverage', referenceCoverage, ...
+    'denseReferenceCoverage', denseReferenceCoverage, ...
+    'denseReferenceCoverageForTarget', denseReferenceCoverageForTarget, ...
+    'denseReferenceAvailable', denseReferenceAvailable, ...
+    'denseSurfaceReferenceReliability', denseSurfaceReferenceReliability, ...
+    'denseSurfaceConfidence', denseSurfaceConfidence, ...
+    'faceSkinGate', faceSkinGate, ...
+    'hasFaceSurfacePrior', hasFaceSurfacePrior, ...
+    'denseBaseReference', denseBaseReference, ...
+    'denseBaseReferenceCoverage', denseBaseReferenceCoverage, ...
     'referenceRadius', radius, ...
     'fineReference', fineReference, ...
     'midReference', midReference, ...
+    'denseFineReference', denseFineReference, ...
+    'denseMidReference', denseMidReference, ...
     'fineTarget', fineTarget, ...
     'midTarget', midTarget, ...
+    'denseFineTarget', denseFineTarget, ...
+    'denseMidTarget', denseMidTarget, ...
     'fineCorrection', fineCorrection, ...
     'mediumCorrection', mediumCorrection, ...
+    'denseFineCorrection', denseFineCorrection, ...
+    'denseMediumCorrection', denseMediumCorrection, ...
+    'denseFineWeight', denseFineWeight, ...
+    'denseMidWeight', denseMidWeight, ...
+    'denseChromaWeight', denseChromaWeight, ...
     'fineBefore', fine, ...
     'fineAfter', repairedFrequency.fine, ...
     'midBefore', mid, ...
@@ -414,18 +576,25 @@ for index = 1:numel(required)
 end
 end
 
-function value = readBlemishMap(value, imageSize)
+function [blemishMap, denseBlemishField] = readBlemishInput(value, imageSize)
+denseBlemishField = zeros(imageSize);
 if isstruct(value)
     if isfield(value, 'blemishMap')
-        value = value.blemishMap;
+        blemishMap = value.blemishMap;
     elseif isfield(value, 'confidence')
-        value = value.confidence;
+        blemishMap = value.confidence;
     else
         error('beauty:InvalidBlemishRepair', ...
             '瑕疵诊断结构缺少 blemishMap 或 confidence。');
     end
+    if isfield(value, 'denseBlemishField')
+        denseBlemishField = validateMask(value.denseBlemishField, ...
+            imageSize, 'denseBlemishField');
+    end
+else
+    blemishMap = value;
 end
-value = validateMask(value, imageSize, 'blemishMap');
+blemishMap = validateMask(blemishMap, imageSize, 'blemishMap');
 end
 
 function value = readMask(context, name, imageSize)
@@ -516,6 +685,47 @@ areas = cellfun(@numel, components.PixelIdxList);
 largestRadius = 2 * sqrt(max(areas) / pi);
 scaleRadius = .040 * double(faceScale);
 radius = min(12, max(3, round(min(scaleRadius, largestRadius))));
+end
+
+function [fineReference, midReference, coverage] = multiScaleReference( ...
+        fine, mid, reliability, faceScale, compactRadius)
+%MULTISCALEREFERENCE 用有限尺度的同皮肤样本补足 dense 区域参考。
+%   参考只由 reliability 允许的像素贡献；尺度权重偏向近邻，较大窗口
+%   只在局部覆盖不足时提供稳定参考，不把卷积结果直接作为输出图像。
+imageSize = size(reliability);
+fineReference = zeros(imageSize);
+midReference = zeros(imageSize);
+coverage = zeros(imageSize);
+
+mediumRadius = min(24, max(compactRadius + 2, round(.055 * faceScale)));
+broadRadius = min(40, max(mediumRadius + 2, round(.11 * faceScale)));
+radii = unique(max(3, round([compactRadius, mediumRadius, broadRadius])));
+scaleWeights = 1 ./ sqrt(double(radii));
+totalScaleWeight = sum(scaleWeights);
+weightedFine = zeros(imageSize);
+weightedMid = zeros(imageSize);
+weightedCoverage = zeros(imageSize);
+
+for index = 1:numel(radii)
+    radius = radii(index);
+    kernel = ones(2 * radius + 1, 2 * radius + 1);
+    referenceWeight = imfilter(reliability, kernel, 'replicate');
+    scaleCoverage = min(max(referenceWeight ./ sum(kernel(:)), 0), 1);
+    fineAtScale = imfilter(fine .* reliability, kernel, 'replicate') ./ ...
+        max(referenceWeight, eps);
+    midAtScale = imfilter(mid .* reliability, kernel, 'replicate') ./ ...
+        max(referenceWeight, eps);
+    scaleContribution = scaleWeights(index) .* scaleCoverage;
+    weightedFine = weightedFine + scaleContribution .* fineAtScale;
+    weightedMid = weightedMid + scaleContribution .* midAtScale;
+    weightedCoverage = weightedCoverage + scaleContribution;
+end
+
+fineReference = weightedFine ./ max(weightedCoverage, eps);
+midReference = weightedMid ./ max(weightedCoverage, eps);
+coverage = min(max(weightedCoverage ./ max(totalScaleWeight, eps), 0), 1);
+fineReference(coverage <= eps) = 0;
+midReference(coverage <= eps) = 0;
 end
 
 function valid = isValidStrength(value)

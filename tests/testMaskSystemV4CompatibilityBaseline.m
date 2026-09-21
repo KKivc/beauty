@@ -91,13 +91,13 @@ function testFrozenPipelineContract(testCase)
 % expand，算法行为不变）；algorithmVersion/artifactVersion 冻结不动。
 contract = beautyPipelineContract();
 verifyEqual(testCase, contract.schemaVersion, '4.0');
-verifyEqual(testCase, contract.algorithmVersion, 'v3.3');
+verifyEqual(testCase, contract.algorithmVersion, 'v3.6');
 verifyEqual(testCase, contract.artifactVersion, 'v3.2');
 
 fixture = buildRichFixture();
 cache = fixture.context.runtimeCache;
 verifyEqual(testCase, cache.schemaVersion, '4.0');
-verifyEqual(testCase, cache.algorithmVersion, 'v3.3');
+verifyEqual(testCase, cache.algorithmVersion, 'v3.6');
 verifyEqual(testCase, cache.artifactVersion, 'v3.2');
 verifyEqual(testCase, cache.artifactInfo.beautyMasks, 'v3.2');
 verifyEqual(testCase, cache.artifactInfo.frequency, 'v3.2');

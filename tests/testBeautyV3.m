@@ -870,6 +870,9 @@ for caseIndex = 1:numel(blemishCases)
             (stageDetails.highEndRepairCurve .* ...
             stageDetails.highEndConfidence) .* ...
             stageDetails.allowed .* structureGateRuntime;
+        profile = beautySmoothingProfile(strength);
+        expectedMedium = expectedMedium .* ...
+            (1 + .65 * profile.highEndRepairGate);
         expectedMedium = min(max(expectedMedium, 0), 1);
         % Mid 逐像素门 = (1 - target.repairMid) .* midBandGate（鼻部退让 ×
         % T30 Mid 专属纯 policy 带），按生产原式的结合序先乘，再乘纹理门与

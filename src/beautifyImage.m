@@ -104,19 +104,10 @@ if ~hasRuntimeCache
     maskDiagnostics.runtimeCache = cacheDiagnostics;
     [frequency, decompositionDiagnostics] = beauty.decomposeSkinFrequency( ...
         inputImage, faceBox);
-    [blemishMap, blemishDiagnostics] = beauty.buildBlemishMap(inputImage, ...
-        frequency, beautyMasks);
 else
     maskDiagnostics.reusedRuntimeCache = true;
     maskDiagnostics.runtimeCache = cacheDiagnostics;
 end
-% T11：frequency/blemish 统一以运行期 evidence 的身份进入消费路径。
-%   组装时序：uncached 路径由 decomposeSkinFrequency/buildBlemishMap
-%   刚刚生成；cached 路径的产物来自已通过 validateRuntimeCache 校验的
-%   缓存记录。两条路径在此汇合成同一个 runtimeEvidence，后续 stage 与
-%   诊断只从这里读取，不再区分产物来源。
-runtimeEvidence = makeRuntimeEvidence(frequency, ...
-    decompositionDiagnostics, blemishMap, blemishDiagnostics);
 % T12：Fine smoothing 只消费 V4 stage contract 的 protection 分层。
 %   从本次调用实际使用的 beautyMasks 产物推导（T07 头注约定：与生产
 %   门控共用同一份 mask 产物），uncached 与 cached 两条路径同源；
@@ -140,6 +131,17 @@ if isfield(beautyContext, 'evidence') && isstruct(beautyContext.evidence) && ...
 else
     stageProtection = masks.buildStageProtectionMasks(beautyMasks);
 end
+% denseBlemishField 需要同一份 V4 region band/hard/结构门来完成逐像素
+% 排除。无论缓存是否命中，都在当前运行期按同一 production producer 重建
+% blemish evidence；不把 dense field 写入缓存契约，也不改变 cached/uncached
+% 的 stage 输入来源。
+[blemishMap, blemishDiagnostics] = beauty.buildBlemishMap(inputImage, ...
+    frequency, beautyMasks, stageProtection);
+% T11：frequency/blemish 统一以运行期 evidence 的身份进入消费路径。
+%   两条路径在这里汇合成同一个 runtimeEvidence，后续 stage 与诊断只从
+%   该结构读取，不再区分产物来源。
+runtimeEvidence = makeRuntimeEvidence(frequency, ...
+    decompositionDiagnostics, blemishMap, blemishDiagnostics);
 [smoothedFrequency, smoothingDiagnostics] = beauty.smoothSkinTexture( ...
     runtimeEvidence.frequency, beautyMasks, smoothingStrength, ...
     runtimeEvidence.blemishMap, stageProtection);
@@ -150,7 +152,7 @@ end
 repairContract = beauty.repairStageContract(stageProtection, ...
     runtimeEvidence.blemishMap);
 [repairedFrequency, repairDiagnostics] = beauty.repairSkinBlemishes( ...
-    smoothedFrequency, beautyMasks, runtimeEvidence.blemishMap, ...
+    smoothedFrequency, beautyMasks, runtimeEvidence.blemishDiagnostics, ...
     smoothingStrength, repairContract);
 % T32：Base Luminance 的 contract 组装只转发 V4 stage protection 的规范门
 %   （target.baseLuminance/support.baseLuminance + hard + regionBandBase），
@@ -160,7 +162,7 @@ repairContract = beauty.repairStageContract(stageProtection, ...
 baseLuminanceContract = beauty.baseLuminanceStageContract(stageProtection);
 [baseLuminance, baseLuminanceDiagnostics] = beauty.evenSkinLuminance( ...
     runtimeEvidence.frequency, beautyMasks, smoothingStrength, ...
-    baseLuminanceContract);
+    baseLuminanceContract, repairDiagnostics);
 % T33：Tone 只消费 V4 stage protection 的规范门
 %   （target.tone/support.tone + hard + toneGates），组装点在
 %   +beauty/toneStageContract，与 normalizeSkinTone 的兼容入口共用同一份
@@ -169,7 +171,7 @@ baseLuminanceContract = beauty.baseLuminanceStageContract(stageProtection);
 toneContract = beauty.toneStageContract(stageProtection);
 [skinTone, skinToneDiagnostics] = beauty.normalizeSkinTone(inputImage, ...
     runtimeEvidence.frequency, beautyMasks, ...
-    runtimeEvidence.blemishMap, smoothingStrength, toneContract);
+    repairDiagnostics, smoothingStrength, toneContract);
 % T33：Whitening 只消费 V4 stage protection 的规范门
 %   （target.whitening/support.whitening + hard + whiteningGates +
 %   whiteningAmplitudeCeiling），组装点在 +beauty/whiteningStageContract，
